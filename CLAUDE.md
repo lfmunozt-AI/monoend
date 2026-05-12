@@ -34,6 +34,6 @@ No tocar: [scope de otros agentes]
 - [x] 1.2 Schema Supabase + RLS ✓
 - [x] 1.3 Vercel pipeline funcionando ✓
 - [ ] 1.4 app.andgcore.com → apuntar dominio DNS
-- [ ] 1.5 Auth email + Google OAuth ← EN CURSO
+- [x] 1.5 Auth email + Google OAuth ✓
 - [ ] 1.6 Onboarding + Quiz + GDPR
 - [ ] 1.7 Dashboard ICA skeleton
