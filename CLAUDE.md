@@ -30,8 +30,8 @@ No tocar: [scope de otros agentes]
 - "Soberanía Total" = independencia financiera
 
 ## ESTADO DEL BACKLOG
-- [ ] 1.1 Repo + Next.js setup ← EN CURSO
-- [ ] 1.2 Schema Supabase + RLS
+- [x] 1.1 Repo + Next.js setup ✓
+- [x] 1.2 Schema Supabase + RLS ✓
 - [ ] 1.3 Auth email + Google OAuth
 - [ ] 1.4 Onboarding + Quiz + GDPR
 - [ ] 1.5 Dashboard ICA skeleton
