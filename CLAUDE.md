@@ -32,6 +32,8 @@ No tocar: [scope de otros agentes]
 ## ESTADO DEL BACKLOG
 - [x] 1.1 Repo + Next.js setup ✓
 - [x] 1.2 Schema Supabase + RLS ✓
-- [ ] 1.3 Auth email + Google OAuth
-- [ ] 1.4 Onboarding + Quiz + GDPR
-- [ ] 1.5 Dashboard ICA skeleton
+- [x] 1.3 Vercel pipeline funcionando ✓
+- [ ] 1.4 app.andgcore.com → apuntar dominio DNS
+- [ ] 1.5 Auth email + Google OAuth ← EN CURSO
+- [ ] 1.6 Onboarding + Quiz + GDPR
+- [ ] 1.7 Dashboard ICA skeleton
