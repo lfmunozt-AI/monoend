@@ -1,5 +1,5 @@
 # CLAUDE.md — andgcore · Sovereign CFO B2C
-# Actualizado: 2026-05-14 (rev2)
+# Actualizado: 2026-05-15
 
 ## PROYECTO
 Nombre: Sovereign CFO / andgcore  
@@ -43,7 +43,10 @@ No tocar: [scope de otros agentes]
 - [x] Sistema de prompts CFO completo ✓
 - [x] ICA service integrado con Supabase ✓
 - [x] Fix bugs dashboard + register + onboarding ✓
-- [ ] Chat CFO conectado al LLM
+- [x] Chat CFO con LLM real (gpt-4o-mini) ✓
+- [x] API transacciones completa con RAG ✓
+- [x] Embeddings + búsqueda semántica ✓
+- [ ] Día 4: TransactionForm UI + Stripe
 
 ## DECISIONES TÉCNICAS — 2026-05-13
 
@@ -113,6 +116,50 @@ No tocar: [scope de otros agentes]
 ### ICA trigger — migración 005
 - `supabase/migrations/005_ica_trigger.sql` — trigger automático en Supabase al insertar/actualizar datos relevantes
 - `src/lib/ica-service.ts` es la capa de servicio entre la BD y el cálculo ICA
+
+## DECISIONES TÉCNICAS — 2026-05-15
+
+### ICA — única fuente de verdad via trigger
+- El ICA solo se incrementa via trigger Supabase (`005_ica_trigger.sql`)
+- Nunca calcular ni mutar ICA desde el código de aplicación
+- Garantiza consistencia aunque múltiples agentes escriban transacciones
+
+### chat/route.ts — versión AG08 es canónica
+- `src/app/api/chat/route.ts` de AG08 (LLM real) prevalece sobre cualquier mock de AG04
+- AG04 solo gestiona los componentes UI del chat; nunca reimplementar la lógica de ruta
+
+### Embeddings — fire-and-forget
+- El embedding de una transacción no bloquea el guardado si falla
+- `src/lib/embeddings.ts` es owner; AG01 valida, otros agentes solo importan
+- Migración `006_embeddings_search.sql` + función RPC `match_embeddings()` ejecutada en Supabase
+
+### Rate limit chat — free tier
+- Free = 20 queries/día contando mensajes con `role='user'` en UTC
+- Lógica en `src/app/api/chat/route.ts`; no duplicar en cliente
+
+### callLLMWithHistory — AG08
+- Añadido a `src/lib/llm.ts` para mantener contexto conversacional
+- Recibe array de mensajes; AG08 es owner, no modificar sin coordinación
+
+## ARCHIVOS MODIFICADOS — 2026-05-15
+AG08:
+- `src/app/api/chat/route.ts`
+- `src/app/api/chat/history/route.ts`
+- `src/lib/llm.ts`
+
+AG04:
+- `src/components/chat/ChatMessage.tsx`
+- `src/components/chat/ChatInput.tsx`
+- `src/components/chat/ConversationSidebar.tsx`
+- `src/app/(dashboard)/chat/page.tsx`
+
+AG01:
+- `src/lib/transactions-validation.ts`
+- `src/lib/embeddings.ts`
+- `src/app/api/transactions/route.ts`
+- `src/app/api/transactions/[id]/route.ts`
+- `src/lib/__tests__/transactions.test.ts`
+- `supabase/migrations/006_embeddings_search.sql`
 
 ## ARCHIVOS MODIFICADOS — 2026-05-14
 AG04:
