@@ -16,7 +16,10 @@ export async function POST() {
     await recordConsent(user.id, { ip, userAgent })
     return NextResponse.json({ ok: true })
   } catch (err) {
-    console.error('gdpr_consent error:', err)
+    const detail = err instanceof Error
+      ? { message: err.message, stack: err.stack }
+      : JSON.stringify(err)
+    console.error('[gdpr/consent] error recording consent for user', user.id, detail)
     return NextResponse.json({ error: 'Internal error' }, { status: 500 })
   }
 }

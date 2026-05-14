@@ -2,11 +2,14 @@ import { createClient } from '@supabase/supabase-js'
 
 // Server-side only — nunca importar en componentes cliente
 function createServiceClient() {
-  return createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!,
-    { auth: { autoRefreshToken: false, persistSession: false } }
-  )
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY
+  if (!url || !key) {
+    throw new Error(
+      `[gdpr] Missing env vars: ${!url ? 'NEXT_PUBLIC_SUPABASE_URL' : ''} ${!key ? 'SUPABASE_SERVICE_ROLE_KEY' : ''}`.trim()
+    )
+  }
+  return createClient(url, key, { auth: { autoRefreshToken: false, persistSession: false } })
 }
 
 export interface ConsentData {
@@ -19,7 +22,7 @@ export async function recordConsent(userId: string, consentData: ConsentData): P
   const supabase = createServiceClient()
   const version = consentData.consentVersion ?? '1.0'
 
-  const { error } = await supabase.from('consent_records').upsert(
+  const { error: consentError } = await supabase.from('consent_records').upsert(
     {
       user_id: userId,
       consented_at: new Date().toISOString(),
@@ -31,18 +34,36 @@ export async function recordConsent(userId: string, consentData: ConsentData): P
     { onConflict: 'user_id' }
   )
 
-  // 42P01 = tabla no existe (migración 003_gdpr.sql no aplicada)
-  // En ese caso el consentimiento queda registrado sólo en audit_logs
-  if (error && error.code !== '42P01') throw error
-  if (error?.code === '42P01') {
-    console.warn('[gdpr] consent_records table missing — consent stored in audit_logs only. Run migration 003_gdpr.sql.')
+  if (consentError) {
+    // 42P01 = tabla no existe (migración 003_gdpr.sql no aplicada)
+    if (consentError.code === '42P01') {
+      console.warn('[gdpr] consent_records table missing — consent stored in audit_logs only. Run migration 003_gdpr.sql.')
+    } else {
+      console.error('[gdpr] consent_records upsert failed:', {
+        code: consentError.code,
+        message: consentError.message,
+        details: consentError.details,
+        hint: consentError.hint,
+      })
+      throw consentError
+    }
   }
 
-  await supabase.from('audit_logs').insert({
+  const { error: auditError } = await supabase.from('audit_logs').insert({
     user_id: userId,
     action: 'gdpr_consent_recorded',
     metadata: { consent_version: version, ip: consentData.ip ?? null },
   })
+
+  if (auditError) {
+    console.error('[gdpr] audit_logs insert failed:', {
+      code: auditError.code,
+      message: auditError.message,
+      details: auditError.details,
+      hint: auditError.hint,
+    })
+    throw auditError
+  }
 }
 
 export async function hasConsent(userId: string): Promise<boolean> {
