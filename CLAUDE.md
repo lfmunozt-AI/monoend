@@ -1,5 +1,5 @@
 # CLAUDE.md — andgcore · Sovereign CFO B2C
-# Actualizado: 2026-05-13
+# Actualizado: 2026-05-14
 
 ## PROYECTO
 Nombre: Sovereign CFO / andgcore  
@@ -27,7 +27,7 @@ No tocar: [scope de otros agentes]
 - "Fuga de Poder" = gasto innecesario
 - "Escudo Familiar" = seguros/protección  
 - "Escenario de Poder" = proyección what-if
-- "Soberanía Total" = independencia financiera
+- "Dominio Total" = independencia financiera (reemplaza "Soberanía Total" en UI desde 2026-05-14)
 
 ## ESTADO DEL BACKLOG
 - [x] 1.1 Repo + Next.js setup ✓
@@ -39,7 +39,10 @@ No tocar: [scope de otros agentes]
 - [x] Lógica fiscal Portugal ✓
 - [x] Algoritmo ICA completo ✓
 - [x] GDPR Pacto de Datos ✓
-- [ ] 1.7 Dashboard ICA skeleton
+- [x] 1.7 Dashboard ICA skeleton ✓
+- [x] Sistema de prompts CFO completo ✓
+- [x] ICA service integrado con Supabase ✓
+- [ ] Chat CFO conectado al LLM
 
 ## DECISIONES TÉCNICAS — 2026-05-13
 
@@ -66,6 +69,48 @@ No tocar: [scope de otros agentes]
 ### Bugfix crítico route onboarding/complete
 - `src/app/api/onboarding/complete/route.ts:61` — corregido `.eq('id', user.id)` → `.eq('user_id', user.id)`
 - Tabla `profiles` tiene PK propia (`id`) distinta del UUID de auth; siempre usar `user_id` para lookups por usuario
+
+## DECISIONES TÉCNICAS — 2026-05-14
+
+### "Dominio Total" reemplaza "Soberanía Total" en UI
+- Término actualizado en toda la UI a partir de hoy
+- `ICA` (Índice de Control Autónomo) mantiene el nombre técnico internamente
+- Actualizar cualquier string "Soberanía Total" que aparezca en componentes nuevos
+
+### llm.ts — patrón dual de llamadas al LLM
+- `callLLMJson<T>()` para parsing estructurado; usa `temperature: 0.2` — respuestas deterministas
+- `callLLM()` con fallback sin `throw` para resiliencia — nunca bloquea el flujo del usuario
+- Ambas funciones en `src/lib/llm.ts`; AG08 es owner, otros agentes solo consumen
+
+### Sistema de prompts CFO — AG08
+- Prompts en `src/lib/prompts/`: `consigliere`, `categorizar`, `detectarFuga`, `reporte`, `onboarding`
+- Cada prompt es una función pura que recibe contexto y devuelve string
+- No acoplar lógica de negocio dentro de los prompts
+
+### ICA trigger — migración 005
+- `supabase/migrations/005_ica_trigger.sql` — trigger automático en Supabase al insertar/actualizar datos relevantes
+- `src/lib/ica-service.ts` es la capa de servicio entre la BD y el cálculo ICA
+
+## ARCHIVOS MODIFICADOS — 2026-05-14
+AG04:
+- `src/components/dashboard/IcaCircle.tsx`
+- `src/components/dashboard/MetricCard.tsx`
+- `src/components/dashboard/PowerLeakBadge.tsx`
+- `src/app/(dashboard)/dashboard/page.tsx`
+- `src/app/api/ica/score/route.ts`
+
+AG06:
+- `src/lib/ica-service.ts`
+- `src/app/api/ica/score/route.ts`
+- `supabase/migrations/005_ica_trigger.sql`
+
+AG08:
+- `src/lib/prompts/consigliere.ts`
+- `src/lib/prompts/categorizar.ts`
+- `src/lib/prompts/detectarFuga.ts`
+- `src/lib/prompts/reporte.ts`
+- `src/lib/prompts/onboarding.ts`
+- `src/lib/llm.ts`
 
 ## ARCHIVOS MODIFICADOS — 2026-05-13
 - `src/lib/gdpr.ts`
