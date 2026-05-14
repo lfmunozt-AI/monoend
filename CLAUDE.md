@@ -1,5 +1,5 @@
 # CLAUDE.md — andgcore · Sovereign CFO B2C
-# Actualizado: 2026-05-14
+# Actualizado: 2026-05-14 (rev2)
 
 ## PROYECTO
 Nombre: Sovereign CFO / andgcore  
@@ -42,6 +42,7 @@ No tocar: [scope de otros agentes]
 - [x] 1.7 Dashboard ICA skeleton ✓
 - [x] Sistema de prompts CFO completo ✓
 - [x] ICA service integrado con Supabase ✓
+- [x] Fix bugs dashboard + register + onboarding ✓
 - [ ] Chat CFO conectado al LLM
 
 ## DECISIONES TÉCNICAS — 2026-05-13
@@ -70,6 +71,22 @@ No tocar: [scope de otros agentes]
 - `src/app/api/onboarding/complete/route.ts:61` — corregido `.eq('id', user.id)` → `.eq('user_id', user.id)`
 - Tabla `profiles` tiene PK propia (`id`) distinta del UUID de auth; siempre usar `user_id` para lookups por usuario
 
+## BUGFIXES — 2026-05-14 (AG01)
+
+### BUG 1 — Dashboard error al cargar datos
+- Archivo: `src/app/api/ica/score/route.ts`
+- Causa: consulta SQL incorrecta a Supabase
+- Fix: query corregido por AG01
+
+### BUG 2 — Register redirigía al login
+- Causa: `router.push('/login?message=check-email')` incorrecto tras registro
+- Fix: cambiado a `router.push('/dashboard')`
+
+### BUG 3 — Onboarding consent fallaba en BD
+- Causa: tabla `consent_records` no existía — migración `003_gdpr.sql` no había sido ejecutada en Supabase
+- Fix: migración ejecutada + `GRANT authenticated` aplicado
+- Tablas creadas: `consent_records` y columna `deletion_scheduled_at` en `profiles`
+
 ## DECISIONES TÉCNICAS — 2026-05-14
 
 ### "Dominio Total" reemplaza "Soberanía Total" en UI
@@ -86,6 +103,12 @@ No tocar: [scope de otros agentes]
 - Prompts en `src/lib/prompts/`: `consigliere`, `categorizar`, `detectarFuga`, `reporte`, `onboarding`
 - Cada prompt es una función pura que recibe contexto y devuelve string
 - No acoplar lógica de negocio dentro de los prompts
+
+### Protocolo de migraciones SQL
+- Las migraciones deben ejecutarse en Supabase **inmediatamente** después de ser generadas por los agentes
+- Verificar que todas las tablas existen antes de hacer push a producción
+- Responsable de ejecución: AG01 (validación) o quien haga el merge final
+- Referencia: BUG 3 — `003_gdpr.sql` generada por AG04 pero no ejecutada hasta hoy
 
 ### ICA trigger — migración 005
 - `supabase/migrations/005_ica_trigger.sql` — trigger automático en Supabase al insertar/actualizar datos relevantes
