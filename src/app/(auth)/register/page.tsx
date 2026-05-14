@@ -32,7 +32,7 @@ export default function RegisterPage() {
         ? 'El email ya está registrado'
         : 'Error al crear cuenta')
     } else {
-      router.push('/login?message=check-email')
+      router.push('/dashboard')
     }
     setLoading(false)
   }

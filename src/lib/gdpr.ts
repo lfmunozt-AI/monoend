@@ -17,6 +17,7 @@ export interface ConsentData {
 
 export async function recordConsent(userId: string, consentData: ConsentData): Promise<void> {
   const supabase = createServiceClient()
+  const version = consentData.consentVersion ?? '1.0'
 
   const { error } = await supabase.from('consent_records').upsert(
     {
@@ -25,16 +26,22 @@ export async function recordConsent(userId: string, consentData: ConsentData): P
       revoked_at: null,
       ip_address: consentData.ip ?? null,
       user_agent: consentData.userAgent ?? null,
-      consent_version: consentData.consentVersion ?? '1.0',
+      consent_version: version,
     },
     { onConflict: 'user_id' }
   )
-  if (error) throw error
+
+  // 42P01 = tabla no existe (migración 003_gdpr.sql no aplicada)
+  // En ese caso el consentimiento queda registrado sólo en audit_logs
+  if (error && error.code !== '42P01') throw error
+  if (error?.code === '42P01') {
+    console.warn('[gdpr] consent_records table missing — consent stored in audit_logs only. Run migration 003_gdpr.sql.')
+  }
 
   await supabase.from('audit_logs').insert({
     user_id: userId,
     action: 'gdpr_consent_recorded',
-    metadata: { consent_version: consentData.consentVersion ?? '1.0', ip: consentData.ip },
+    metadata: { consent_version: version, ip: consentData.ip ?? null },
   })
 }
 

@@ -16,16 +16,24 @@ export async function GET() {
       .toISOString()
       .split('T')[0]
 
-    const [score, txResult] = await Promise.all([
-      getICAScore(user.id),
-      supabase
-        .from('transactions')
-        .select('type, amount, is_leak')
-        .eq('user_id', user.id)
-        .gte('date', monthStart),
-    ])
+    // ICA score: fallback a 0 si ica_history no existe o service key no está configurada
+    let score = 0
+    try {
+      score = await getICAScore(user.id)
+    } catch (icaErr) {
+      console.error('[ica/score] getICAScore failed — check SUPABASE_SERVICE_ROLE_KEY and ica_history table:', icaErr)
+    }
 
-    if (txResult.error) throw txResult.error
+    const txResult = await supabase
+      .from('transactions')
+      .select('type, amount, is_leak')
+      .eq('user_id', user.id)
+      .gte('date', monthStart)
+
+    if (txResult.error) {
+      console.error('[ica/score] transactions query failed:', txResult.error)
+      throw txResult.error
+    }
 
     const txs = txResult.data
     let monthlyIncome = 0
@@ -58,12 +66,13 @@ export async function GET() {
       powerLeaks: {
         count: leaksCount,
         totalAmount: leaksAmount,
+        leaks: [],
       },
     }, {
       headers: { 'Cache-Control': 'private, max-age=60' },
     })
   } catch (err) {
-    console.error('Error fetching ICA score:', err)
+    console.error('[ica/score] unhandled error:', err)
     return NextResponse.json({ error: 'Error interno del servidor' }, { status: 500 })
   }
 }
