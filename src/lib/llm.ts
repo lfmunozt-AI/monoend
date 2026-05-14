@@ -153,6 +153,49 @@ export async function callLLMJson<T = unknown>(
   }
 }
 
+/**
+ * Variante con historial de conversación para el chat CFO.
+ * Acepta el array completo de mensajes (incluyendo el último mensaje del usuario).
+ * Nunca lanza — retorna fromFallback=true si OpenAI falla.
+ */
+export async function callLLMWithHistory(
+  messages: Array<{ role: 'user' | 'assistant'; content: string }>,
+  systemPrompt: string,
+): Promise<LLMResponse> {
+  let client: OpenAI;
+
+  try {
+    client = getClient();
+  } catch {
+    return { content: FALLBACK_RESPONSE, tokensUsed: 0, model: MODEL_PRIMARY, fromFallback: true };
+  }
+
+  const lastPrompt = messages.at(-1)?.content ?? '';
+
+  try {
+    const completion = await client.chat.completions.create({
+      model: MODEL_PRIMARY,
+      temperature: 0.4,
+      max_tokens: 600,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        ...messages.map((m) => ({ role: m.role, content: m.content })),
+      ],
+    });
+
+    const content = completion.choices[0]?.message?.content ?? FALLBACK_RESPONSE;
+    const tokensUsed = completion.usage?.total_tokens ?? 0;
+
+    logTokens({ model: MODEL_PRIMARY, tokensUsed, prompt: lastPrompt.slice(0, 80) });
+
+    return { content, tokensUsed, model: MODEL_PRIMARY, fromFallback: false };
+  } catch (err) {
+    const llmError = classifyError(err);
+    console.error(`[llm:history] ${llmError.code}: ${llmError.message}`);
+    return { content: FALLBACK_RESPONSE, tokensUsed: 0, model: MODEL_PRIMARY, fromFallback: true };
+  }
+}
+
 function logTokens(entry: { model: string; tokensUsed: number; prompt: string }): void {
   if (process.env.NODE_ENV === 'development') {
     console.log(`[llm] tokens_used=${entry.tokensUsed} model=${entry.model} prompt="${entry.prompt}..."`);
