@@ -106,8 +106,6 @@ export default function ChatPage() {
   }
 
   const handleSendMessage = async (content: string) => {
-    if (!activeConversationId) return
-
     const userMessage: Message = {
       id: `msg_${Date.now()}_user`,
       role: 'user',
