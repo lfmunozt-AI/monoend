@@ -4,6 +4,7 @@ import { useEffect, useState, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
 import IcaCircle from '@/components/dashboard/IcaCircle'
 import MetricCard from '@/components/dashboard/MetricCard'
+import Sidebar from '@/components/layout/Sidebar'
 import { createClient } from '@/lib/supabase/client'
 
 interface DashboardData {
@@ -32,6 +33,7 @@ export default function DashboardPage() {
   const [userName, setUserName] = useState('Tú')
   const [fabOpen, setFabOpen] = useState(false)
   const [bubbleVisible, setBubbleVisible] = useState(false)
+  const [consigliereState, setConsigliereState] = useState<'idle' | 'thinking' | 'responding'>('idle')
 
   // --- Chat state ---
   const [bubbleText, setBubbleText] = useState('')
@@ -76,12 +78,17 @@ export default function DashboardPage() {
     }
   }, [loading, data, userName])
 
+  useEffect(() => {
+    console.log('[Consigliere State]:', consigliereState)
+  }, [consigliereState])
+
   // --- PROBLEMA 1: Send handler conectado al chat ---
   const handleSend = useCallback(async (message: string) => {
     const trimmed = message.trim()
     if (!trimmed || chatSending) return
     setChatInput('')
     setChatSending(true)
+    setConsigliereState('thinking')
     try {
       const res = await fetch('/api/chat', {
         method: 'POST',
@@ -93,11 +100,16 @@ export default function DashboardPage() {
       })
       if (res.status === 401) { router.push('/login'); return }
       if (!res.ok) throw new Error('Error en la respuesta')
-      const json = await res.json() as { response?: string; conversationId?: string }
-      if (json.response) setBubbleText(json.response)
+      const json = await res.json() as { message?: string; conversationId?: string }
+      if (json.message) {
+        setConsigliereState('responding')
+        setBubbleText(json.message)
+        setTimeout(() => setConsigliereState('idle'), 1600)
+      }
       if (json.conversationId) setConversationId(json.conversationId)
     } catch {
       setBubbleText('Lo siento, no pude procesar tu mensaje. Inténtalo de nuevo.')
+      setConsigliereState('idle')
     } finally {
       setChatSending(false)
     }
@@ -113,38 +125,30 @@ export default function DashboardPage() {
           0%, 100% { transform: scale(1); }
           50%       { transform: scale(1.008); }
         }
-        @keyframes bubbleFadeIn {
-          from { opacity: 0; transform: translateY(8px); }
-          to   { opacity: 1; transform: translateY(0); }
+        @keyframes leanForward {
+          0% { transform: translateY(0) rotate(0deg); }
+          50% { transform: translateY(-5px) rotate(-1deg); }
+          100% { transform: translateY(0) rotate(0deg); }
         }
-        @keyframes fabPulse {
-          0%, 100% { box-shadow: 0 0 0 0 rgba(201,168,76,0.4); }
-          50%       { box-shadow: 0 0 0 8px rgba(201,168,76,0); }
+        @keyframes nodding {
+          0% { transform: rotate(0deg) translateY(0); }
+          25% { transform: rotate(-2deg) translateY(-3px); }
+          75% { transform: rotate(1.5deg) translateY(-1px); }
+          100% { transform: rotate(0deg) translateY(0); }
         }
-        @keyframes panelSlideUp {
-          from { transform: translateY(100%); opacity: 0; }
-          to   { transform: translateY(0);    opacity: 1; }
-        }
-        .consigliere-img {
-          animation: breathing 4s ease-in-out infinite;
-          transition: filter 0.3s ease;
-        }
-        .consigliere-img:hover { filter: brightness(1.05); }
-        .speech-bubble { animation: bubbleFadeIn 0.6s ease forwards; }
-        .fab-btn        { animation: fabPulse 3s ease-in-out infinite; }
-        .fab-panel      { animation: panelSlideUp 0.35s ease forwards; }
+        .state-breathing { animation: breathing 4s ease-in-out infinite; }
+        .state-thinking { animation: leanForward 1.5s ease-in-out infinite; }
+        .state-responding { animation: nodding 0.8s ease-in-out 2; }
       `}</style>
 
-      <div style={{ background: '#F4F1EA', minHeight: '100vh' }}>
+      <Sidebar />
 
-        {/* PROBLEMA 2: contenedor centrado con max-width explícito */}
-        <div style={{ maxWidth: '1280px', margin: '0 auto', padding: '0 24px' }}>
+      <div style={{ marginLeft: '256px', background: '#F9F9F9', minHeight: '100vh', padding: '32px' }}>
 
-          {/* ── DESKTOP (md+) ── */}
-          <div className="hidden md:grid md:grid-cols-2" style={{ minHeight: '100vh', columnGap: 0, paddingTop: '32px', paddingBottom: '32px' }}>
-
-            {/* Left column */}
-            <div className="flex flex-col gap-6" style={{ paddingRight: '40px' }}>
+        <div style={{ maxWidth: '1400px', margin: '0 auto' }}>
+          <div className="grid grid-cols-[55%_45%] gap-8">
+            {/* Left column: ICA + Metrics */}
+            <div className="flex flex-col gap-6">
               <div>
                 <h1 className="text-3xl font-bold mb-1" style={{ color: '#1A1A1A' }}>
                   Tu Dominio Financiero
@@ -154,61 +158,73 @@ export default function DashboardPage() {
                 </p>
               </div>
 
-              <div className="flex justify-center py-2">
-                <IcaCircle score={data.score} size={260} animated />
+              <div className="flex justify-center py-4">
+                <IcaCircle score={data.score} size={280} animated />
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
-                <MetricCard label="Ingresos del Mes"  value={`${data.metrics.monthlyIncome.toLocaleString('es-ES')}€`}   trend="up"      icon="💰" color="#4CAF7D" />
-                <MetricCard label="Gastos del Mes"    value={`${data.metrics.monthlyExpenses.toLocaleString('es-ES')}€`}  trend="down"    icon="📊" color="#E8A93C" />
-                <MetricCard label="Fugas Detectadas"  value={data.metrics.leaksDetected} trend={data.metrics.leaksDetected > 0 ? 'down' : 'neutral'} icon="⚠️" color="#E85C5C" />
-                <MetricCard label="Ahorro del Mes"    value={`${data.metrics.savings.toLocaleString('es-ES')}€`}          trend="up"      icon="🎯" color="#C9A84C" />
+              <div className="grid grid-cols-2 gap-4">
+                <MetricCard 
+                  label="Ingresos del Mes" 
+                  value={`${data.metrics.monthlyIncome.toLocaleString('es-ES')}€`} 
+                  trend="up" 
+                  color="#4CAF7D" 
+                />
+                <MetricCard 
+                  label="Gastos del Mes" 
+                  value={`${data.metrics.monthlyExpenses.toLocaleString('es-ES')}€`} 
+                  trend="up" 
+                  color="#E85C5C" 
+                />
+                <MetricCard 
+                  label="Fugas Detectadas" 
+                  value={data.metrics.leaksDetected.toString()} 
+                  trend={data.metrics.leaksDetected > 0 ? 'down' : 'neutral'} 
+                  color="#E85C5C" 
+                />
+                <MetricCard 
+                  label="Ahorro del Mes" 
+                  value={`${data.metrics.savings.toLocaleString('es-ES')}€`} 
+                  trend="up" 
+                  color="#4CAF7D" 
+                />
               </div>
             </div>
 
-            {/* Right column — Consigliere floating */}
-            <div className="relative flex flex-col items-start pt-4">
-
-              {/* Speech bubble */}
+            {/* Right column: Consigliere anclado al fondo */}
+            <div className="relative flex flex-col justify-end" style={{ minHeight: '80vh' }}>
+              {/* Burbuja conectada al personaje */}
               {bubbleVisible && (
                 <div
-                  className="speech-bubble"
                   style={{
                     background: 'white',
-                    border: '0.5px solid rgba(26,26,26,0.1)',
-                    borderRadius: '12px 12px 12px 0',
-                    padding: '14px 18px',
-                    maxWidth: '300px',
+                    border: '1px solid rgba(26,26,26,0.1)',
+                    borderRadius: '12px 12px 0px 12px',
+                    padding: '16px',
+                    maxWidth: '280px',
                     boxShadow: '0 4px 20px rgba(26,26,26,0.08)',
-                    marginLeft: '8px',
-                    marginBottom: '14px',
+                    marginBottom: '16px',
+                    maxHeight: '120px',
+                    overflowY: 'auto',
                   }}
                 >
-                  <p style={{ fontSize: '14px', fontWeight: 500, color: '#1A1A1A', margin: 0 }}>
+                  <p style={{ fontSize: '14px', fontWeight: 500, color: '#1A1A1A', margin: 0, lineHeight: '1.5' }}>
                     {chatSending ? 'El Consigliere está pensando…' : bubbleText}
                   </p>
                 </div>
               )}
 
-              {/* Quick actions */}
-              <div style={{ display: 'flex', gap: '8px', marginLeft: '8px', marginBottom: '20px' }}>
-                <QuickAction label="Ver ICA"        primary />
-                <QuickAction label="Registrar gasto" />
-                <QuickAction label="Analizar"        />
-              </div>
-
-              {/* PROBLEMA 3: personaje reducido 30% — 62vh → 43vh */}
-              <div className="flex-1 flex items-end justify-center w-full">
+              {/* Personaje anclado al fondo */}
+              <div className="flex justify-center">
                 <img
                   src="/consigliere.png"
                   alt="The Consigliere"
-                  className="consigliere-img"
-                  style={{ maxHeight: '43vh', width: 'auto', objectFit: 'contain', objectPosition: 'bottom' }}
+                  className={`state-${consigliereState}`}
+                  style={{ maxHeight: '50vh', width: 'auto', objectFit: 'contain', objectPosition: 'bottom' }}
                 />
               </div>
 
-              {/* Chat input conectado — fix problema 1 */}
-              <div style={{ width: '100%', maxWidth: '360px', marginTop: '16px', alignSelf: 'center' }}>
+              {/* Chat input */}
+              <div style={{ marginTop: '16px' }}>
                 <ChatInput
                   value={chatInput}
                   onChange={setChatInput}
@@ -218,120 +234,8 @@ export default function DashboardPage() {
               </div>
             </div>
           </div>
-
-          {/* ── MOBILE ── */}
-          <div className="md:hidden" style={{ paddingTop: '24px', paddingBottom: '112px' }}>
-            <h1 className="text-2xl font-bold mb-5" style={{ color: '#1A1A1A' }}>
-              Tu Dominio
-            </h1>
-
-            <div className="flex justify-center mb-5">
-              <IcaCircle score={data.score} size={180} animated />
-            </div>
-
-            <div className="grid grid-cols-2 gap-3">
-              <MetricCard label="Ingresos"  value={`${data.metrics.monthlyIncome.toLocaleString('es-ES')}€`}  trend="up"   icon="💰" color="#4CAF7D" />
-              <MetricCard label="Gastos"    value={`${data.metrics.monthlyExpenses.toLocaleString('es-ES')}€`} trend="down" icon="📊" color="#E8A93C" />
-              <MetricCard label="Fugas"     value={data.metrics.leaksDetected} trend={data.metrics.leaksDetected > 0 ? 'down' : 'neutral'} icon="⚠️" color="#E85C5C" />
-              <MetricCard label="Ahorro"    value={`${data.metrics.savings.toLocaleString('es-ES')}€`} trend="up" icon="🎯" color="#C9A84C" />
-            </div>
-          </div>
-
-        </div>{/* /centrado */}
-
-        {/* ── FAB (mobile only — fuera del contenedor centrado para posición fixed) ── */}
-        <div className="md:hidden">
-          <button
-            className="fab-btn"
-            onClick={() => setFabOpen(true)}
-            aria-label="Abrir Consigliere"
-            style={{
-              position: 'fixed', bottom: '24px', right: '24px',
-              width: '64px', height: '64px', borderRadius: '50%',
-              border: '2px solid #C9A84C', background: 'white',
-              overflow: 'hidden', cursor: 'pointer', padding: 0, zIndex: 50,
-            }}
-          >
-            <div style={{ position: 'relative', width: '100%', height: '100%' }}>
-              <img
-                src="/consigliere.png"
-                alt=""
-                style={{
-                  position: 'absolute', top: 0, left: '50%',
-                  transform: 'translateX(-50%)',
-                  width: 'auto', height: '286%', maxWidth: 'none',
-                }}
-              />
-            </div>
-          </button>
-
-          {/* FAB expanded panel */}
-          {fabOpen && (
-            <div
-              className="fab-panel"
-              style={{
-                position: 'fixed', inset: 0, zIndex: 100,
-                background: '#F4F1EA', display: 'flex', flexDirection: 'column',
-              }}
-            >
-              <div style={{ padding: '16px 16px 0', display: 'flex', justifyContent: 'flex-end' }}>
-                <button
-                  onClick={() => setFabOpen(false)}
-                  aria-label="Cerrar"
-                  style={{
-                    background: 'white', border: '0.5px solid rgba(26,26,26,0.15)',
-                    borderRadius: '50%', width: '36px', height: '36px',
-                    cursor: 'pointer', fontSize: '18px',
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    color: '#1A1A1A',
-                  }}
-                >
-                  ×
-                </button>
-              </div>
-
-              <div style={{ padding: '12px 20px 10px' }}>
-                <div
-                  style={{
-                    background: 'white', border: '0.5px solid rgba(26,26,26,0.1)',
-                    borderRadius: '12px 12px 12px 0', padding: '14px 18px',
-                    display: 'inline-block', maxWidth: '280px',
-                    boxShadow: '0 4px 20px rgba(26,26,26,0.08)',
-                  }}
-                >
-                  <p style={{ fontSize: '14px', fontWeight: 500, color: '#1A1A1A', margin: 0 }}>
-                    {chatSending ? 'El Consigliere está pensando…' : bubbleText}
-                  </p>
-                </div>
-              </div>
-
-              <div style={{ padding: '0 20px 14px', display: 'flex', gap: '8px' }}>
-                <QuickAction label="Ver ICA"   primary />
-                <QuickAction label="Registrar" />
-                <QuickAction label="Analizar"  />
-              </div>
-
-              {/* PROBLEMA 3: mobile panel 60vh → 42vh */}
-              <div style={{ flex: 1, display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
-                <img
-                  src="/consigliere.png"
-                  alt="The Consigliere"
-                  className="consigliere-img"
-                  style={{ maxHeight: '42vh', width: 'auto', objectFit: 'contain', objectPosition: 'bottom' }}
-                />
-              </div>
-
-              <div style={{ padding: '16px 20px 32px' }}>
-                <ChatInput
-                  value={chatInput}
-                  onChange={setChatInput}
-                  onSend={handleSend}
-                  loading={chatSending}
-                />
-              </div>
-            </div>
-          )}
         </div>
+
 
       </div>
     </>

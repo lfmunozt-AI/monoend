@@ -6,6 +6,8 @@ import ChatMessage from '@/components/chat/ChatMessage'
 import ChatInput from '@/components/chat/ChatInput'
 import ConversationSidebar from '@/components/chat/ConversationSidebar'
 
+type ConsigliereState = 'idle' | 'thinking' | 'responding' | 'alert' | 'celebrate'
+
 interface Message {
   id: string
   role: 'user' | 'assistant'
@@ -28,6 +30,7 @@ export default function ChatPage() {
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(false)
   const [isStreaming, setIsStreaming] = useState(false)
+  const [consigliereState, setConsigliereState] = useState<ConsigliereState>('idle')
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -119,6 +122,7 @@ export default function ChatPage() {
 
     setIsLoading(true)
     setIsStreaming(true)
+    setConsigliereState('thinking')
 
     try {
       const response = await fetch('/api/chat', {
@@ -128,7 +132,7 @@ export default function ChatPage() {
         },
         body: JSON.stringify({
           message: content,
-          ...(activeConversationId ? { conversationId: activeConversationId } : {}),
+          conversationId: activeConversationId
         }),
       })
 
@@ -143,26 +147,30 @@ export default function ChatPage() {
 
       const data = await response.json()
 
-      // Capture real conv ID (first message gets it from API response)
-      const realConvId = activeConversationId ?? data.conversationId ?? null
-      if (!activeConversationId && realConvId) {
-        setActiveConversationId(realConvId)
-        localStorage.setItem('activeConversationId', realConvId)
-      }
-
       setTimeout(() => {
         setIsStreaming(false)
-
+        setConsigliereState('responding')
+        
         const assistantMessage: Message = {
           id: `msg_${Date.now()}_assistant`,
           role: 'assistant',
-          content: data.response,
-          timestamp: new Date()
+          content: data.message,
+          timestamp: new Date(data.timestamp)
         }
 
         const finalMessages = [...updatedMessages, assistantMessage]
         setMessages(finalMessages)
-        saveMessages(realConvId, finalMessages)
+        saveMessages(activeConversationId, finalMessages)
+
+        if (data.message.toLowerCase().includes('fuga')) {
+          setTimeout(() => setConsigliereState('alert'), 1600)
+          setTimeout(() => setConsigliereState('idle'), 2100)
+        } else if (data.message.toLowerCase().includes('excelente') || data.message.toLowerCase().includes('¡')) {
+          setTimeout(() => setConsigliereState('celebrate'), 1600)
+          setTimeout(() => setConsigliereState('idle'), 3400)
+        } else {
+          setTimeout(() => setConsigliereState('idle'), 1600)
+        }
       }, 1000)
 
     } catch (error) {
@@ -268,12 +276,13 @@ export default function ChatPage() {
               </div>
             ) : (
               <>
-                {messages.map((message) => (
+                {messages.map((message, index) => (
                   <ChatMessage
                     key={message.id}
                     role={message.role}
                     content={message.content}
                     timestamp={message.timestamp}
+                    consigliereState={message.role === 'assistant' && index === messages.length - 1 ? consigliereState : 'idle'}
                   />
                 ))}
                 
@@ -283,6 +292,7 @@ export default function ChatPage() {
                     content=""
                     timestamp={new Date()}
                     isStreaming={true}
+                    consigliereState={consigliereState}
                   />
                 )}
                 
