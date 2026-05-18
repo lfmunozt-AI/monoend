@@ -371,7 +371,7 @@ export default function DashboardPage() {
           </div>
 
           {/* ═══ RIGHT COLUMN — Consigliere ═══ */}
-          <div style={{ display: 'flex', flexDirection: 'column', backgroundColor: isDark ? '#1A1A1A' : '#FFFFFF', borderRadius: '14px', border: `${T.borderWidth} solid ${T.border}`, padding: '20px', overflow: 'hidden' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', backgroundColor: isDark ? '#161616' : '#FFFFFF', borderRadius: '14px', border: `${T.borderWidth} solid ${T.border}`, padding: '20px', overflow: 'hidden' }}>
             {/* Header */}
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '16px' }}>
               <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#2D6A4F' }} />
