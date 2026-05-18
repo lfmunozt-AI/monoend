@@ -113,6 +113,12 @@ export default function DashboardPage() {
     })
   }, [])
 
+  const handleLogout = useCallback(async () => {
+    const supabase = createClient()
+    await supabase.auth.signOut()
+    router.push('/login')
+  }, [router])
+
   // Fetch data
   const fetchData = useCallback(async () => {
     try {
@@ -136,9 +142,11 @@ export default function DashboardPage() {
 
   useEffect(() => { fetchData() }, [fetchData])
 
+  // Set initial welcome message ONCE on mount
   useEffect(() => {
-    if (!loading && data) {
-      setBubbleText(getGreeting(userName))
+    if (!loading && data && userName !== null) {
+      const initialMsg = getGreeting(userName)
+      setBubbleText(initialMsg)
       const t = setTimeout(() => setBubbleVisible(true), 400)
       return () => clearTimeout(t)
     }
@@ -279,9 +287,9 @@ export default function DashboardPage() {
         .stroke-animate{animation:strokeIn 1.8s cubic-bezier(.22,.61,.36,1) forwards}
       `}</style>
 
-      <Sidebar isDark={isDark} onToggleDark={toggleDark} />
+      <Sidebar isDark={isDark} onToggleDark={toggleDark} onLogout={handleLogout} />
 
-      <div style={{ marginLeft: '220px', background: T.bg, minHeight: '100vh', display: 'flex', flexDirection: 'column', transition: 'background .3s' }}>
+      <div style={{ marginLeft: '220px', backgroundColor: isDark ? '#0E0E0E' : '#F4F1EA', minHeight: '100vh', display: 'flex', flexDirection: 'column', transition: 'background .3s' }}>
         {/* Main area */}
         <div style={{ flex: 1, padding: '28px 32px', display: 'grid', gridTemplateColumns: '55% 45%', gap: '24px' }}>
 
@@ -289,7 +297,7 @@ export default function DashboardPage() {
           <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
 
             {/* ICA row */}
-            <div style={{ background: T.card2, borderRadius: '12px', padding: '16px 20px', display: 'flex', alignItems: 'center', gap: '16px', border: `${T.borderWidth} solid ${T.border}` }}>
+            <div style={{ backgroundColor: isDark ? '#141414' : '#F0EDE6', borderRadius: '12px', padding: '16px 20px', display: 'flex', alignItems: 'center', gap: '16px', border: `${T.borderWidth} solid ${T.border}` }}>
               <IcaMini score={animIca} realScore={icaScore} stroke={icaStroke} />
               <div style={{ flex: 1 }}>
                 <div style={{ fontSize: '13px', color: T.fg2, marginBottom: '2px' }}>Lo que sé de ti</div>
@@ -301,7 +309,7 @@ export default function DashboardPage() {
             </div>
 
             {/* IDF hero */}
-            <div style={{ background: T.card, borderRadius: '14px', padding: '28px', border: `${T.borderWidth} solid ${T.border}`, textAlign: 'center' }}>
+            <div style={{ backgroundColor: isDark ? '#1A1A1A' : '#FFFFFF', borderRadius: '14px', padding: '28px', border: `${T.borderWidth} solid ${T.border}`, textAlign: 'center' }}>
               <div style={{ fontSize: '13px', color: T.fg2, marginBottom: '4px' }}>Tu progreso hacia</div>
               <div style={{ fontSize: '17px', fontWeight: 700, color: T.fg, marginBottom: '16px' }}>
                 Tu primera meta financiera
@@ -321,10 +329,10 @@ export default function DashboardPage() {
 
             {/* Metric cards 2x2 */}
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
-              <Card t={T} label="Ingresos" value={`${animIncome.toLocaleString('es-ES')}\u20ac`} color="#2D6A4F" trendUp />
-              <Card t={T} label="Gastos" value={`${animExpenses.toLocaleString('es-ES')}\u20ac`} color={T.fg} />
+              <Card t={T} label="Ingresos" value={`${animIncome.toLocaleString('es-ES')}\u20ac`} color="#2D6A4F" trendUp isDark={isDark} />
+              <Card t={T} label="Gastos" value={`${animExpenses.toLocaleString('es-ES')}\u20ac`} color={T.fg} isDark={isDark} />
               <div style={{
-                background: fugaResolved ? T.card : T.card, borderRadius: '12px',
+                backgroundColor: isDark ? '#1A1A1A' : '#FFFFFF', borderRadius: '12px',
                 padding: '16px 18px', border: `${T.borderWidth} solid ${fugaResolved ? '#2D6A4F' : T.border}`,
                 display: 'flex', flexDirection: 'column', gap: '6px',
               }}>
@@ -358,12 +366,12 @@ export default function DashboardPage() {
                   </button>
                 ) : null}
               </div>
-              <Card t={T} label="Saldo fin de mes" value={`${Math.max(0, saldo).toLocaleString('es-ES')}\u20ac`} color="#2D6A4F" trendUp />
+              <Card t={T} label="Saldo fin de mes" value={`${Math.max(0, saldo).toLocaleString('es-ES')}\u20ac`} color="#2D6A4F" trendUp isDark={isDark} />
             </div>
           </div>
 
           {/* ═══ RIGHT COLUMN — Consigliere ═══ */}
-          <div style={{ display: 'flex', flexDirection: 'column', background: T.card, borderRadius: '14px', border: `${T.borderWidth} solid ${T.border}`, padding: '20px', overflow: 'hidden' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', backgroundColor: isDark ? '#1A1A1A' : '#FFFFFF', borderRadius: '14px', border: `${T.borderWidth} solid ${T.border}`, padding: '20px', overflow: 'hidden' }}>
             {/* Header */}
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '16px' }}>
               <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#2D6A4F' }} />
@@ -585,10 +593,10 @@ function IdfCircle({ score, realScore, stroke }: { score: number; realScore: num
 
 interface ThemeTokens { bg: string; card: string; card2: string; fg: string; fg2: string; border: string; borderWidth: string }
 
-function Card({ t, label, value, color, trendUp }: { t: ThemeTokens; label: string; value: string; color: string; trendUp?: boolean }) {
+function Card({ t, label, value, color, trendUp, isDark }: { t: ThemeTokens; label: string; value: string; color: string; trendUp?: boolean; isDark: boolean }) {
   return (
     <div style={{
-      background: t.card, borderRadius: '12px', padding: '16px 18px',
+      backgroundColor: isDark ? '#1A1A1A' : '#FFFFFF', borderRadius: '12px', padding: '16px 18px',
       border: `${t.borderWidth} solid ${t.border}`, display: 'flex', flexDirection: 'column', gap: '6px',
     }}>
       <div style={{ fontSize: '11px', color: t.fg2, textTransform: 'uppercase', letterSpacing: '.5px' }}>{label}</div>

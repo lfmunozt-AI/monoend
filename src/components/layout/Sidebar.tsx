@@ -18,9 +18,10 @@ const NAV_SECONDARY = [
 interface SidebarProps {
   isDark: boolean
   onToggleDark: () => void
+  onLogout?: () => void
 }
 
-export default function Sidebar({ isDark, onToggleDark }: SidebarProps) {
+export default function Sidebar({ isDark, onToggleDark, onLogout }: SidebarProps) {
   const pathname = usePathname()
 
   const renderLink = (item: { label: string; href: string }) => {
@@ -69,6 +70,25 @@ export default function Sidebar({ isDark, onToggleDark }: SidebarProps) {
 
       {/* Bottom */}
       <div style={{ borderTop: '1px solid rgba(255,255,255,.06)' }}>
+        {/* Logout */}
+        {onLogout && (
+          <button
+            onClick={onLogout}
+            style={{
+              width: '100%', padding: '14px 24px',
+              display: 'flex', alignItems: 'center', gap: '10px',
+              background: 'transparent', border: 'none',
+              color: 'rgba(255,255,255,.35)', fontSize: '13px', cursor: 'pointer',
+              transition: 'color .2s',
+            }}
+            onMouseEnter={(e) => e.currentTarget.style.color = '#8B2635'}
+            onMouseLeave={(e) => e.currentTarget.style.color = 'rgba(255,255,255,.35)'}
+          >
+            <i className="ti ti-logout" style={{ fontSize: '16px' }} />
+            <span>Cerrar sesión</span>
+          </button>
+        )}
+
         {/* Dark mode toggle */}
         <button
           onClick={onToggleDark}
