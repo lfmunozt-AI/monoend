@@ -94,15 +94,20 @@ export default function Sidebar({ isDark, onToggleDark }: SidebarProps) {
         </button>
 
         {/* Plan */}
-        <div style={{ padding: '14px 24px 20px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '6px' }}>
-            <span style={{ color: '#C9A84C', fontWeight: 600, fontSize: '13px' }}>Élite</span>
-            <span style={{ color: '#6A6460', fontSize: '11px' }}>· activo</span>
+        <div style={{ padding: '18px 24px 22px', background: 'rgba(201,168,76,.05)', borderTop: '1px solid rgba(201,168,76,.12)' }}>
+          <div style={{ fontSize: '10px', fontWeight: 700, color: '#C9A84C', textTransform: 'uppercase', letterSpacing: '1px', marginBottom: '6px' }}>
+            Plan Actual
+          </div>
+          <div style={{ fontSize: '14px', fontWeight: 500, color: '#EAE6DC', marginBottom: '4px' }}>
+            Élite
+          </div>
+          <div style={{ fontSize: '11px', color: '#6A6460', marginBottom: '12px' }}>
+            activo · renovación en 26 días
           </div>
           <button style={{
-            background: 'rgba(201,168,76,.1)', border: '1px solid rgba(201,168,76,.2)',
-            borderRadius: '6px', padding: '6px 12px', color: '#C9A84C',
-            fontSize: '11px', fontWeight: 500, cursor: 'pointer', width: '100%',
+            background: '#C9A84C', border: 'none',
+            borderRadius: '8px', padding: '9px 14px', color: '#111',
+            fontSize: '12px', fontWeight: 600, cursor: 'pointer', width: '100%',
           }}>
             Ver beneficios
           </button>

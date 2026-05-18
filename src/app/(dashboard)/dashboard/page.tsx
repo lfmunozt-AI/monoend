@@ -295,7 +295,7 @@ export default function DashboardPage() {
             <div style={{ background: T.card, borderRadius: '14px', padding: '28px', border: `1px solid ${T.border}`, textAlign: 'center' }}>
               <div style={{ fontSize: '13px', color: T.fg2, marginBottom: '4px' }}>Tu progreso hacia</div>
               <div style={{ fontSize: '17px', fontWeight: 700, color: T.fg, marginBottom: '16px' }}>
-                Libertad Financiera
+                Tu primera meta financiera
               </div>
               <IdfCircle score={animIdf} realScore={data.score} stroke={idfStroke} />
               <div style={{ marginTop: '14px', fontSize: '13px', color: T.fg2 }}>
@@ -312,8 +312,8 @@ export default function DashboardPage() {
 
             {/* Metric cards 2x2 */}
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
-              <Card t={T} label="Ingresos" value={`${animIncome.toLocaleString('es-ES')}\u20ac`} color="#2D6A4F" trend="\u2191" />
-              <Card t={T} label="Gastos" value={`${animExpenses.toLocaleString('es-ES')}\u20ac`} color={T.fg} trend="" />
+              <Card t={T} label="Ingresos" value={`${animIncome.toLocaleString('es-ES')}\u20ac`} color="#2D6A4F" trendUp />
+              <Card t={T} label="Gastos" value={`${animExpenses.toLocaleString('es-ES')}\u20ac`} color={T.fg} />
               <div style={{
                 background: fugaResolved ? T.card : T.card, borderRadius: '12px',
                 padding: '16px 18px', border: `1px solid ${fugaResolved ? '#2D6A4F' : T.border}`,
@@ -349,31 +349,49 @@ export default function DashboardPage() {
                   </button>
                 ) : null}
               </div>
-              <Card t={T} label="Saldo fin de mes" value={`${Math.max(0, saldo).toLocaleString('es-ES')}\u20ac`} color="#2D6A4F" trend="\u2191" />
+              <Card t={T} label="Saldo fin de mes" value={`${Math.max(0, saldo).toLocaleString('es-ES')}\u20ac`} color="#2D6A4F" trendUp />
             </div>
           </div>
 
           {/* ═══ RIGHT COLUMN — Consigliere ═══ */}
-          <div style={{ display: 'flex', flexDirection: 'column', position: 'relative' }}>
-            {/* Bubble */}
-            {bubbleVisible && (
-              <div className="bubble-in" style={{
-                background: T.card, border: '1px solid rgba(201,168,76,.38)',
-                borderRadius: '12px 12px 12px 3px', padding: '14px 18px',
-                maxWidth: '280px', maxHeight: '120px', overflowY: 'auto',
-                marginBottom: '12px',
-              }}>
-                <p style={{ fontSize: '14px', fontWeight: 500, color: T.fg, margin: 0, lineHeight: '1.5' }}>
-                  {chatSending ? 'El Consigliere está pensando…' : bubbleText}
-                </p>
+          <div style={{ display: 'flex', flexDirection: 'column', background: T.card, borderRadius: '14px', border: `1px solid ${T.border}`, padding: '20px', overflow: 'hidden' }}>
+            {/* Header */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '16px' }}>
+              <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#2D6A4F' }} />
+              <span style={{ fontSize: '14px', fontWeight: 600, color: T.fg }}>The Consigliere</span>
+              <span style={{ fontSize: '11px', color: T.fg2 }}>activo</span>
+            </div>
+
+            {/* Character + Bubble zone */}
+            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'flex-end', minHeight: '200px', position: 'relative' }}>
+              {/* Bubble above character */}
+              {bubbleVisible && (
+                <div className="bubble-in" style={{
+                  background: T.card2, border: '1px solid rgba(201,168,76,.38)',
+                  borderRadius: '12px 12px 12px 3px', padding: '14px 18px',
+                  maxWidth: '280px', maxHeight: '120px', overflowY: 'auto',
+                  marginBottom: '12px',
+                }}>
+                  <p style={{ fontSize: '14px', fontWeight: 500, color: T.fg, margin: 0, lineHeight: '1.5' }}>
+                    {chatSending ? 'El Consigliere está pensando…' : bubbleText}
+                  </p>
+                </div>
+              )}
+              <div style={{ display: 'flex', justifyContent: 'center' }}>
+                <img
+                  src="/consigliere.png"
+                  alt="The Consigliere"
+                  className={`state-${cState}`}
+                  style={{ maxHeight: '42vh', width: 'auto', objectFit: 'contain', objectPosition: 'bottom' }}
+                />
               </div>
-            )}
+            </div>
 
             {/* Quick actions */}
-            <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginBottom: '16px' }}>
+            <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginTop: '14px', marginBottom: '12px' }}>
               {['\u00bfCómo resolver las fugas?', 'Proyección a la meta', 'Resumen del mes'].map(q => (
                 <button key={q} onClick={() => handleSend(q)} style={{
-                  background: T.card, border: `1px solid ${T.border}`, borderRadius: '18px',
+                  background: T.card2, border: `1px solid ${T.border}`, borderRadius: '18px',
                   padding: '6px 14px', fontSize: '12px', fontWeight: 500, color: T.fg2,
                   cursor: 'pointer', whiteSpace: 'nowrap',
                 }}>
@@ -382,19 +400,9 @@ export default function DashboardPage() {
               ))}
             </div>
 
-            {/* Character */}
-            <div style={{ flex: 1, display: 'flex', alignItems: 'flex-end', justifyContent: 'center', minHeight: '200px' }}>
-              <img
-                src="/consigliere.png"
-                alt="The Consigliere"
-                className={`state-${cState}`}
-                style={{ maxHeight: '48vh', width: 'auto', objectFit: 'contain', objectPosition: 'bottom' }}
-              />
-            </div>
-
             {/* Input */}
             <div style={{
-              marginTop: '14px', display: 'flex', alignItems: 'center', gap: '8px',
+              display: 'flex', alignItems: 'center', gap: '8px',
               background: T.card2, border: `1px solid ${T.border}`,
               borderRadius: '24px', padding: '8px 8px 8px 16px',
             }}>
@@ -568,16 +576,20 @@ function IdfCircle({ score, realScore, stroke }: { score: number; realScore: num
 
 interface ThemeTokens { bg: string; card: string; card2: string; fg: string; fg2: string; border: string }
 
-function Card({ t, label, value, color, trend }: { t: ThemeTokens; label: string; value: string; color: string; trend: string }) {
+function Card({ t, label, value, color, trendUp }: { t: ThemeTokens; label: string; value: string; color: string; trendUp?: boolean }) {
   return (
     <div style={{
       background: t.card, borderRadius: '12px', padding: '16px 18px',
       border: `1px solid ${t.border}`, display: 'flex', flexDirection: 'column', gap: '6px',
     }}>
       <div style={{ fontSize: '11px', color: t.fg2, textTransform: 'uppercase', letterSpacing: '.5px' }}>{label}</div>
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: '4px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
         <span style={{ fontSize: '24px', fontWeight: 700, color }}>{value}</span>
-        {trend && <span style={{ fontSize: '14px', color }}>{trend}</span>}
+        {trendUp && (
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M12 19V5M5 12l7-7 7 7" />
+          </svg>
+        )}
       </div>
     </div>
   )
