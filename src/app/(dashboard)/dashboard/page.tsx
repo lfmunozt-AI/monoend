@@ -28,8 +28,10 @@ type CState = 'breathing' | 'thinking' | 'nodding' | 'celebrate'
 
 function getGreeting(name: string): string {
   const h = new Date().getHours()
-  if (h >= 6 && h < 12) return `Buenos días, ${name}. Revisemos tu plan del día.`
-  if (h >= 12 && h < 18) return `¿Cómo van tus números de hoy, ${name}?`
+  const n = name || 'amigo/a'
+  if (h >= 0 && h < 6) return `Es tarde, ${n}. Tus finanzas pueden esperar.`
+  if (h >= 6 && h < 12) return `Buenos días, ${n}. Revisemos tu plan del día.`
+  if (h >= 12 && h < 18) return `¿Cómo van tus números de hoy, ${n}?`
   return `Cierre del día. ¿Registramos las transacciones?`
 }
 
@@ -77,7 +79,7 @@ export default function DashboardPage() {
   const [data, setData] = useState<DashboardData | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [userName, setUserName] = useState('Tú')
+  const [userName, setUserName] = useState('')
 
   // Theme
   const [isDark, setIsDark] = useState(false)
@@ -120,8 +122,8 @@ export default function DashboardPage() {
       if (user) {
         const raw = (user.user_metadata?.full_name as string | undefined)
           || (user.user_metadata?.name as string | undefined)
-          || user.email?.split('@')[0] || 'Tú'
-        setUserName(raw.split(' ')[0])
+          || user.email?.split('@')[0] || ''
+        setUserName(raw ? raw.split(' ')[0] : '')
       }
       const res = await fetch('/api/ica/score')
       if (res.status === 401) { router.push('/login'); return }
@@ -226,8 +228,15 @@ export default function DashboardPage() {
     setBubbleText(getGreeting(userName))
   }, [userName])
 
+  // ICA score is independent — only changes when user provides data, not on fuga resolution
+  const icaScoreRef = useRef<number | null>(null)
+  if (data && icaScoreRef.current === null) {
+    icaScoreRef.current = data.score
+  }
+  const icaScore = icaScoreRef.current ?? 0
+
   // Animated values
-  const animIca = useAnimatedNumber(data?.score ?? 0, 1800, !loading && !!data)
+  const animIca = useAnimatedNumber(icaScore, 1800, !loading && !!data)
   const animIdf = useAnimatedNumber(data?.score ?? 0, 1800, !loading && !!data)
   const animIncome = useAnimatedNumber(data?.metrics.monthlyIncome ?? 0, 1800, !loading && !!data)
   const animExpenses = useAnimatedNumber(data?.metrics.monthlyExpenses ?? 0, 1800, !loading && !!data)
@@ -237,16 +246,16 @@ export default function DashboardPage() {
   // Theme tokens
   const T = isDark ? {
     bg: '#0E0E0E', card: '#1A1A1A', card2: '#141414',
-    fg: '#EAE6DC', fg2: '#6A6460', border: 'rgba(255,255,255,.08)',
+    fg: '#EAE6DC', fg2: '#6A6460', border: 'rgba(255,255,255,.08)', borderWidth: '0.5px',
   } : {
     bg: '#F4F1EA', card: '#FFFFFF', card2: '#F0EDE6',
-    fg: '#1A1A1A', fg2: '#7A736C', border: 'rgba(26,26,26,.1)',
+    fg: '#1A1A1A', fg2: '#7A736C', border: 'rgba(26,26,26,.1)', borderWidth: '0.5px',
   }
 
   if (loading) return <LoadingSkeleton isDark={isDark} />
   if (error || !data) return <ErrorState error={error} onRetry={fetchData} />
 
-  const icaStroke = (data.score >= 70) ? '#2D6A4F' : '#92570A'
+  const icaStroke = (icaScore >= 70) ? '#2D6A4F' : '#92570A'
   const idfStroke = (data.score >= 76) ? '#2D6A4F' : '#C9A84C'
   const idfLevel = getIdfLevel(data.score)
   const saldo = data.metrics.monthlyIncome - data.metrics.monthlyExpenses
@@ -280,11 +289,11 @@ export default function DashboardPage() {
           <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
 
             {/* ICA row */}
-            <div style={{ background: T.card2, borderRadius: '12px', padding: '16px 20px', display: 'flex', alignItems: 'center', gap: '16px', border: `1px solid ${T.border}` }}>
-              <IcaMini score={animIca} realScore={data.score} stroke={icaStroke} />
+            <div style={{ background: T.card2, borderRadius: '12px', padding: '16px 20px', display: 'flex', alignItems: 'center', gap: '16px', border: `${T.borderWidth} solid ${T.border}` }}>
+              <IcaMini score={animIca} realScore={icaScore} stroke={icaStroke} />
               <div style={{ flex: 1 }}>
                 <div style={{ fontSize: '13px', color: T.fg2, marginBottom: '2px' }}>Lo que sé de ti</div>
-                <div style={{ fontSize: '15px', fontWeight: 600, color: T.fg }}>{getIcaLevel(data.score)}</div>
+                <div style={{ fontSize: '15px', fontWeight: 600, color: T.fg }}>{getIcaLevel(icaScore)}</div>
                 <div style={{ fontSize: '11px', color: T.fg2, marginTop: '4px' }}>
                   Sube tu extracto bancario para mejorar mis proyecciones
                 </div>
@@ -292,7 +301,7 @@ export default function DashboardPage() {
             </div>
 
             {/* IDF hero */}
-            <div style={{ background: T.card, borderRadius: '14px', padding: '28px', border: `1px solid ${T.border}`, textAlign: 'center' }}>
+            <div style={{ background: T.card, borderRadius: '14px', padding: '28px', border: `${T.borderWidth} solid ${T.border}`, textAlign: 'center' }}>
               <div style={{ fontSize: '13px', color: T.fg2, marginBottom: '4px' }}>Tu progreso hacia</div>
               <div style={{ fontSize: '17px', fontWeight: 700, color: T.fg, marginBottom: '16px' }}>
                 Tu primera meta financiera
@@ -316,7 +325,7 @@ export default function DashboardPage() {
               <Card t={T} label="Gastos" value={`${animExpenses.toLocaleString('es-ES')}\u20ac`} color={T.fg} />
               <div style={{
                 background: fugaResolved ? T.card : T.card, borderRadius: '12px',
-                padding: '16px 18px', border: `1px solid ${fugaResolved ? '#2D6A4F' : T.border}`,
+                padding: '16px 18px', border: `${T.borderWidth} solid ${fugaResolved ? '#2D6A4F' : T.border}`,
                 display: 'flex', flexDirection: 'column', gap: '6px',
               }}>
                 <div style={{ fontSize: '11px', color: T.fg2, textTransform: 'uppercase', letterSpacing: '.5px' }}>Fugas detectadas</div>
@@ -354,7 +363,7 @@ export default function DashboardPage() {
           </div>
 
           {/* ═══ RIGHT COLUMN — Consigliere ═══ */}
-          <div style={{ display: 'flex', flexDirection: 'column', background: T.card, borderRadius: '14px', border: `1px solid ${T.border}`, padding: '20px', overflow: 'hidden' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', background: T.card, borderRadius: '14px', border: `${T.borderWidth} solid ${T.border}`, padding: '20px', overflow: 'hidden' }}>
             {/* Header */}
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '16px' }}>
               <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#2D6A4F' }} />
@@ -574,13 +583,13 @@ function IdfCircle({ score, realScore, stroke }: { score: number; realScore: num
   )
 }
 
-interface ThemeTokens { bg: string; card: string; card2: string; fg: string; fg2: string; border: string }
+interface ThemeTokens { bg: string; card: string; card2: string; fg: string; fg2: string; border: string; borderWidth: string }
 
 function Card({ t, label, value, color, trendUp }: { t: ThemeTokens; label: string; value: string; color: string; trendUp?: boolean }) {
   return (
     <div style={{
       background: t.card, borderRadius: '12px', padding: '16px 18px',
-      border: `1px solid ${t.border}`, display: 'flex', flexDirection: 'column', gap: '6px',
+      border: `${t.borderWidth} solid ${t.border}`, display: 'flex', flexDirection: 'column', gap: '6px',
     }}>
       <div style={{ fontSize: '11px', color: t.fg2, textTransform: 'uppercase', letterSpacing: '.5px' }}>{label}</div>
       <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
