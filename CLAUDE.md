@@ -47,7 +47,12 @@ No tocar: [scope de otros agentes]
 - [x] API transacciones completa con RAG ✓
 - [x] Embeddings + búsqueda semántica ✓
 - [ ] Día 4: TransactionForm UI + Stripe
-
+- [x] Dashboard con Consigliere ✓ (rediseño v3 en curso)
+- [ ] Dashboard definitivo v3 — paleta + dopamina + dark mode ← EN CURSO AG04
+- [ ] Motor IDF — tabla goals + engine
+- [ ] Onboarding → solo GDPR + primera sesión Consigliere
+- [ ] Memoria continua entre sesiones
+- [ ] Proactividad del Consigliere
 ## DECISIONES TÉCNICAS — 2026-05-13
 
 ### PactoModal — dos versiones coexisten
@@ -199,3 +204,59 @@ AG08:
 - `src/app/privacy/page.tsx`
 - `supabase/migrations/003_gdpr.sql`
 - `supabase/migrations/004_onboarding_data.sql`
+
+## PIVOT AAAS — LEER ANTES DE CUALQUIER TAREA
+- The Consigliere = método principal INPUT/OUTPUT (no es chat de soporte)
+- ICA = pequeño círculo "Lo que sé de ti" · muestra % · indicador interno
+- IDF = protagonista · "Tu progreso hacia: [meta]" · 4 dimensiones (40/25/20/15)
+- Onboarding = solo GDPR · resto via Consigliere en primera sesión
+- Memoria financiera continua entre sesiones (RAG completo)
+- Proactividad = el agente habla primero sin que le pregunten
+- Animaciones Consigliere = CSS v1 · Lottie planificado Fase 2
+- Modo oscuro = funcional con toggle en sidebar
+- Open Banking = post-MVP · regulatorio
+
+## PALETA DE COLORES — NO DESVIAR
+Light: Background #F4F1EA · Cards #FFFFFF · Secundario #F0EDE6
+Dark: Background #0E0E0E · Cards #1A1A1A · Secundario #141414
+Texto primario: #1A1A1A (light) / #EAE6DC (dark)
+Texto secundario: #7A736C (light) / #6A6460 (dark)
+Primario/acción: #C9A84C
+Éxito: #2D6A4F (verde bosque)
+Peligro/fugas: #8B2635 (burdeos)
+Advertencia: #92570A (mostaza oscura)
+Sidebar: #111111 siempre
+PROHIBIDO: azules neón, verdes tóxicos
+
+## TERMINOLOGÍA ANDGCORE
+- "Reserva de Soberanía" = fondo de emergencia
+- "Fuga de Poder" = gasto innecesario
+- "Escudo Familiar" = seguros/protección
+- "Escenario de Poder" = proyección what-if
+- "Dominio Financiero" = nivel máximo (NO Soberanía)
+- "The Consigliere" = nombre del agente (NO traducir)
+
+## AAAS ROADMAP
+L1 Reactivo (hoy) → L2 Proactivo (hoy) → 
+L3 Autónomo (mes 6-12) → L4 Orquestador (año 2+)
+Revenue: suscripción → % valor generado
+
+## REGLAS ABSOLUTAS
+1. SOLO features B2C
+2. RLS activo en TODAS las tablas
+3. Nunca almacenar IBANs ni credenciales bancarias
+4. LLM: gpt-4o-mini · NO usar GPU local
+5. Idioma código: inglés · UI default: español
+6. NO usar palabra "Soberano/Soberanía" en UI
+7. Plan en sidebar: "Élite · activo" + "Ver beneficios"
+
+## IDF FÓRMULA
+Progreso al objetivo: 40%
+Control de fugas: 25%
+Estabilidad base: 20%
+Velocidad de ahorro: 15%
+
+## PRIMERA SESIÓN CONSIGLIERE
+Al completar GDPR → Consigliere inicia conversación con mensaje de bienvenida.
+Extrae de la respuesta: meta principal, plazo, urgencia, miedo subyacente.
+Todo se guarda estructurado en DB sin formulario.

@@ -1,78 +1,111 @@
 'use client'
 
-import { useState } from 'react'
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 
-const NAV_ITEMS = [
-  { label: 'Dashboard', href: '/dashboard', icon: '📊' },
-  { label: 'Transacciones', href: '/transactions', icon: '💳' },
-  { label: 'Chat CFO', href: '/chat', icon: '💬' },
-  { label: 'Proyecciones', href: '/projections', icon: '📈' },
-  { label: 'Fugas', href: '/leaks', icon: '⚠️' },
-  { label: 'Reportes', href: '/reports', icon: '📄' }
+const NAV_MAIN = [
+  { label: 'Dashboard',     href: '/dashboard' },
+  { label: 'Transacciones', href: '/transactions' },
+  { label: 'Proyecciones',  href: '/projections' },
+  { label: 'Fugas',         href: '/leaks' },
 ]
 
-export default function Sidebar() {
-  const pathname = usePathname()
-  const [isDarkMode, setIsDarkMode] = useState(false)
+const NAV_SECONDARY = [
+  { label: 'Reportes',      href: '/reports' },
+  { label: 'Configuración', href: '/settings' },
+]
 
-  const toggleTheme = () => {
-    setIsDarkMode(!isDarkMode)
+interface SidebarProps {
+  isDark: boolean
+  onToggleDark: () => void
+}
+
+export default function Sidebar({ isDark, onToggleDark }: SidebarProps) {
+  const pathname = usePathname()
+
+  const renderLink = (item: { label: string; href: string }) => {
+    const isActive = pathname === item.href
+    return (
+      <Link
+        key={item.href}
+        href={item.href}
+        style={{
+          display: 'flex', alignItems: 'center', gap: '10px',
+          padding: '10px 24px',
+          borderLeft: isActive ? '3px solid #C9A84C' : '3px solid transparent',
+          background: isActive ? 'rgba(201,168,76,.08)' : 'transparent',
+          color: isActive ? '#C9A84C' : '#6A6460',
+          fontSize: '14px', fontWeight: isActive ? 600 : 400,
+          textDecoration: 'none', transition: 'all .15s',
+        }}
+      >
+        {item.label}
+      </Link>
+    )
   }
 
   return (
-    <aside className="w-64 bg-[#1A1A1A] text-white flex flex-col h-screen fixed left-0 top-0 z-40">
-      <div className="p-6 border-b border-gray-800">
-        <div className="flex items-center gap-2">
-          <div className="w-8 h-8 bg-gradient-to-br from-[#D9B648] to-[#C9A84C] rounded-lg flex items-center justify-center">
-            <span className="text-white font-bold text-sm">A</span>
-          </div>
-          <span className="text-[#D9B648] font-bold text-lg">andgcore</span>
+    <aside style={{
+      width: '220px', background: '#111', color: '#EAE6DC',
+      display: 'flex', flexDirection: 'column', height: '100vh',
+      position: 'fixed', left: 0, top: 0, zIndex: 40,
+    }}>
+      {/* Logo */}
+      <div style={{ padding: '28px 24px 20px' }}>
+        <span style={{ color: '#C9A84C', fontWeight: 700, fontSize: '18px', letterSpacing: '-0.3px' }}>
+          andgcore
+        </span>
+        <div style={{ color: '#6A6460', fontSize: '11px', marginTop: '2px', letterSpacing: '0.5px' }}>
+          Sovereign CFO
         </div>
       </div>
 
-      <nav className="flex-1 py-6 overflow-y-auto">
-        {NAV_ITEMS.map((item) => {
-          const isActive = pathname === item.href
-          return (
-            <Link
-              key={item.href}
-              href={item.href}
-              className={`
-                flex items-center gap-3 px-6 py-3 transition-colors
-                ${isActive 
-                  ? 'bg-[#D9B648]/10 text-[#D9B648] border-l-4 border-[#D9B648]' 
-                  : 'text-gray-400 hover:text-white hover:bg-white/5'
-                }
-              `}
-            >
-              <span className="text-xl">{item.icon}</span>
-              <span className="font-medium">{item.label}</span>
-            </Link>
-          )
-        })}
+      {/* Nav principal */}
+      <nav style={{ flex: 1, paddingTop: '8px' }}>
+        {NAV_MAIN.map(renderLink)}
+        <div style={{ height: '1px', background: 'rgba(255,255,255,.06)', margin: '12px 24px' }} />
+        {NAV_SECONDARY.map(renderLink)}
       </nav>
 
-      <div className="border-t border-gray-800">
+      {/* Bottom */}
+      <div style={{ borderTop: '1px solid rgba(255,255,255,.06)' }}>
+        {/* Dark mode toggle */}
         <button
-          onClick={toggleTheme}
-          className="w-full px-6 py-4 flex items-center gap-3 text-gray-400 hover:text-white hover:bg-white/5 transition-colors"
+          onClick={onToggleDark}
+          style={{
+            width: '100%', padding: '14px 24px',
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+            background: 'transparent', border: 'none',
+            color: '#6A6460', fontSize: '13px', cursor: 'pointer',
+          }}
         >
-          <span className="text-xl">{isDarkMode ? '☀️' : '🌙'}</span>
-          <span className="font-medium">
-            {isDarkMode ? 'Light Mode' : 'Dark Mode'}
-          </span>
+          <span>Modo oscuro</span>
+          <div style={{
+            width: '36px', height: '20px', borderRadius: '10px',
+            background: isDark ? '#C9A84C' : 'rgba(255,255,255,.12)',
+            position: 'relative', transition: 'background .2s',
+          }}>
+            <div style={{
+              width: '16px', height: '16px', borderRadius: '50%',
+              background: '#fff', position: 'absolute', top: '2px',
+              left: isDark ? '18px' : '2px', transition: 'left .2s',
+            }} />
+          </div>
         </button>
 
-        <div className="px-6 py-4 bg-gradient-to-r from-[#D9B648]/10 to-transparent">
-          <div className="text-xs text-gray-500 mb-1">Plan Actual</div>
-          <div className="flex items-center justify-between">
-            <span className="text-[#D9B648] font-semibold">Soberano</span>
-            <button className="text-xs text-white bg-[#D9B648] px-3 py-1 rounded-full hover:bg-[#D9B648]/90 transition-colors">
-              Upgrade a Élite
-            </button>
+        {/* Plan */}
+        <div style={{ padding: '14px 24px 20px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '6px' }}>
+            <span style={{ color: '#C9A84C', fontWeight: 600, fontSize: '13px' }}>Élite</span>
+            <span style={{ color: '#6A6460', fontSize: '11px' }}>· activo</span>
           </div>
+          <button style={{
+            background: 'rgba(201,168,76,.1)', border: '1px solid rgba(201,168,76,.2)',
+            borderRadius: '6px', padding: '6px 12px', color: '#C9A84C',
+            fontSize: '11px', fontWeight: 500, cursor: 'pointer', width: '100%',
+          }}>
+            Ver beneficios
+          </button>
         </div>
       </div>
     </aside>
