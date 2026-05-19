@@ -126,10 +126,15 @@ export default function DashboardPage() {
       const supabase = createClient()
       const { data: { user } } = await supabase.auth.getUser()
       if (user) {
-        const raw = (user.user_metadata?.full_name as string | undefined)
-          || (user.user_metadata?.name as string | undefined)
-          || user.email?.split('@')[0] || ''
-        setUserName(raw ? raw.split(' ')[0] : '')
+        const { data: profile } = await supabase
+          .from('profiles')
+          .select('name')
+          .eq('user_id', user.id)
+          .maybeSingle()
+        const nombre = (profile?.name as string | null | undefined)
+          || user.email?.split('@')[0]
+          || 'amigo'
+        setUserName(nombre.split(' ')[0])
       }
       const res = await fetch('/api/ica/score')
       if (res.status === 401) { router.push('/login'); return }
@@ -287,9 +292,10 @@ export default function DashboardPage() {
         .stroke-animate{animation:strokeIn 1.8s cubic-bezier(.22,.61,.36,1) forwards}
       `}</style>
 
-      <Sidebar isDark={isDark} onToggleDark={toggleDark} onLogout={handleLogout} />
+      <div style={{ display: 'flex', flexDirection: 'row', minHeight: '100vh' }}>
+        <Sidebar isDark={isDark} onToggleDark={toggleDark} onLogout={handleLogout} />
 
-      <div style={{ marginLeft: '220px', backgroundColor: isDark ? '#0E0E0E' : '#E8E3D9', minHeight: '100vh', display: 'flex', flexDirection: 'column', transition: 'background .3s' }}>
+        <div style={{ flex: 1, marginLeft: '220px', backgroundColor: isDark ? '#0E0E0E' : '#E8E3D9', minHeight: '100vh', display: 'flex', flexDirection: 'column', transition: 'background .3s' }}>
         {/* Main area */}
         <div style={{ flex: 1, padding: '28px 32px', display: 'grid', gridTemplateColumns: '55% 45%', gap: '24px' }}>
 
@@ -372,7 +378,7 @@ export default function DashboardPage() {
           </div>
 
           {/* ═══ RIGHT COLUMN — Consigliere ═══ */}
-          <div style={{ display: 'flex', flexDirection: 'column', backgroundColor: isDark ? '#161616' : '#FFFFFF', borderRadius: '14px', border: `${T.borderWidth} solid ${T.border}`, padding: '20px', overflow: 'hidden', boxShadow: isDark ? 'none' : '0 1px 4px rgba(0,0,0,.08)' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', backgroundColor: isDark ? '#0E0E0E' : '#E8E3D9', borderRadius: '14px', border: 'none', padding: '20px', overflow: 'hidden', boxShadow: 'none' }}>
             {/* Header */}
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '16px' }}>
               <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#2D6A4F' }} />
@@ -385,10 +391,11 @@ export default function DashboardPage() {
               {/* Bubble above character */}
               {bubbleVisible && (
                 <div className="bubble-in" style={{
-                  background: T.card2, border: '1px solid rgba(201,168,76,.38)',
+                  background: isDark ? '#1A1A1A' : '#FFFFFF', border: '1px solid rgba(201,168,76,.38)',
                   borderRadius: '12px 12px 12px 3px', padding: '14px 18px',
                   maxWidth: '280px', maxHeight: '120px', overflowY: 'auto',
                   marginBottom: '12px',
+                  boxShadow: isDark ? 'none' : '0 1px 4px rgba(0,0,0,.08)',
                 }}>
                   <p style={{ fontSize: '14px', fontWeight: 500, color: T.fg, margin: 0, lineHeight: '1.5' }}>
                     {chatSending ? 'El Consigliere está pensando…' : bubbleText}
@@ -421,8 +428,9 @@ export default function DashboardPage() {
             {/* Input */}
             <div style={{
               display: 'flex', alignItems: 'center', gap: '8px',
-              background: T.card2, border: `1px solid ${T.border}`,
+              background: isDark ? '#1A1A1A' : '#FFFFFF', border: `1px solid ${T.border}`,
               borderRadius: '24px', padding: '8px 8px 8px 16px',
+              boxShadow: isDark ? 'none' : '0 1px 4px rgba(0,0,0,.08)',
             }}>
               <input
                 type="text"
@@ -467,6 +475,7 @@ export default function DashboardPage() {
           {(new Date().getMonth() === 4 || new Date().getMonth() === 5) && (
             <Tag t={T} label="Subsidio vacaciones · jun" />
           )}
+        </div>
         </div>
       </div>
 
