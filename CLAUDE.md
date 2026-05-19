@@ -1,18 +1,11 @@
 # CLAUDE.md — andgcore · Sovereign CFO B2C
-# Actualizado: 2026-05-15
+# Actualizado: 2026-05-19
 
 ## PROYECTO
 Nombre: Sovereign CFO / andgcore  
 Tipo: SaaS B2C · Copiloto de Independencia Financiera  
 Stack: Next.js 16 · TypeScript · Tailwind · Supabase · Vercel · OpenAI  
 Dominio: app.andgcore.com  
-
-## REGLAS ABSOLUTAS
-1. SOLO features B2C — nunca añadir lógica B2B/empresa
-2. RLS activo en TODAS las tablas Supabase
-3. Nunca almacenar IBANs ni credenciales bancarias
-4. LLM actual: gpt-4o-mini (OpenAI) — NO usar GPU local todavía
-5. Idioma del código: inglés · UI default: español
 
 ## AGENTE ACTIVO
 <!-- Cambiar al inicio de cada sesión -->
@@ -21,13 +14,6 @@ Worktree: ../wt-agXX-nombre/
 Tarea: [item del backlog]
 Output esperado: [archivo específico]
 No tocar: [scope de otros agentes]
-
-## TERMINOLOGÍA ANDGCORE
-- "Reserva de Soberanía" = fondo de emergencia
-- "Fuga de Poder" = gasto innecesario
-- "Escudo Familiar" = seguros/protección  
-- "Escenario de Poder" = proyección what-if
-- "Dominio Total" = independencia financiera (reemplaza "Soberanía Total" en UI desde 2026-05-14)
 
 ## ESTADO DEL BACKLOG
 - [x] 1.1 Repo + Next.js setup ✓
@@ -48,11 +34,19 @@ No tocar: [scope de otros agentes]
 - [x] Embeddings + búsqueda semántica ✓
 - [ ] Día 4: TransactionForm UI + Stripe
 - [x] Dashboard con Consigliere ✓ (rediseño v3 en curso)
-- [ ] Dashboard definitivo v3 — paleta + dopamina + dark mode ← EN CURSO AG04
-- [ ] Motor IDF — tabla goals + engine
+- [x] Dashboard definitivo v3 — paleta + dopamina + dark mode ✓
+- [x] Contraste fondo #E8E3D9 vs cards #FFFFFF con sombra ✓
+- [x] Dark mode funcional con toggle sidebar ✓
+- [x] Modal fugas con advertencia + revertir 60s ✓
+- [x] Logout en sidebar ✓
+- [x] Nombre real usuario desde profiles.name ✓
+- [ ] Motor IDF — idf.ts + idf-service.ts ← AG06 EN CURSO
+- [ ] Prompts IDF actualizados ← AG08 EN CURSO
+- [ ] Migración 007_goals_idf.sql ← pendiente ejecutar en Supabase
 - [ ] Onboarding → solo GDPR + primera sesión Consigliere
 - [ ] Memoria continua entre sesiones
 - [ ] Proactividad del Consigliere
+
 ## DECISIONES TÉCNICAS — 2026-05-13
 
 ### PactoModal — dos versiones coexisten
@@ -146,6 +140,21 @@ No tocar: [scope de otros agentes]
 - Añadido a `src/lib/llm.ts` para mantener contexto conversacional
 - Recibe array de mensajes; AG08 es owner, no modificar sin coordinación
 
+## DECISIONES TÉCNICAS — 2026-05-19
+
+### ICA e IDF son métricas independientes
+- ICA sube solo cuando el usuario aporta información al sistema
+- IDF sube cuando mejora el progreso hacia la meta
+- No confundir: pueden moverse en sentidos opuestos en una misma sesión
+
+### Dashboard — contraste y profundidad
+- Fondo dashboard: `#E8E3D9` (más contraste que `#F4F1EA`)
+- Cards con `box-shadow: 0 1px 4px rgba(0,0,0,.08)` para separación visual
+
+### Herramientas por tipo de tarea
+- Claude Code para código principal (lógica, servicios, APIs, tests)
+- Windsurf para UI components < 100 líneas
+
 ## ARCHIVOS MODIFICADOS — 2026-05-15
 AG08:
 - `src/app/api/chat/route.ts`
@@ -217,7 +226,7 @@ AG08:
 - Open Banking = post-MVP · regulatorio
 
 ## PALETA DE COLORES — NO DESVIAR
-Light: Background #F4F1EA · Cards #FFFFFF · Secundario #F0EDE6
+Light: Background #E8E3D9 · Cards #FFFFFF · Secundario #F0EDE6
 Dark: Background #0E0E0E · Cards #1A1A1A · Secundario #141414
 Texto primario: #1A1A1A (light) / #EAE6DC (dark)
 Texto secundario: #7A736C (light) / #6A6460 (dark)
