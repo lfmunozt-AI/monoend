@@ -256,7 +256,7 @@ export default function DashboardPage() {
     bg: '#0E0E0E', card: '#1A1A1A', card2: '#141414',
     fg: '#EAE6DC', fg2: '#6A6460', border: 'rgba(255,255,255,.08)', borderWidth: '0.5px',
   } : {
-    bg: '#F4F1EA', card: '#FFFFFF', card2: '#F0EDE6',
+    bg: '#E8E3D9', card: '#FFFFFF', card2: '#F0EDE6',
     fg: '#1A1A1A', fg2: '#7A736C', border: 'rgba(26,26,26,.1)', borderWidth: '0.5px',
   }
 
@@ -289,7 +289,7 @@ export default function DashboardPage() {
 
       <Sidebar isDark={isDark} onToggleDark={toggleDark} onLogout={handleLogout} />
 
-      <div style={{ marginLeft: '220px', backgroundColor: isDark ? '#0E0E0E' : '#F4F1EA', minHeight: '100vh', display: 'flex', flexDirection: 'column', transition: 'background .3s' }}>
+      <div style={{ marginLeft: '220px', backgroundColor: isDark ? '#0E0E0E' : '#E8E3D9', minHeight: '100vh', display: 'flex', flexDirection: 'column', transition: 'background .3s' }}>
         {/* Main area */}
         <div style={{ flex: 1, padding: '28px 32px', display: 'grid', gridTemplateColumns: '55% 45%', gap: '24px' }}>
 
@@ -297,7 +297,7 @@ export default function DashboardPage() {
           <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
 
             {/* ICA row */}
-            <div style={{ backgroundColor: isDark ? '#141414' : '#F0EDE6', borderRadius: '12px', padding: '16px 20px', display: 'flex', alignItems: 'center', gap: '16px', border: `${T.borderWidth} solid ${T.border}` }}>
+            <div style={{ backgroundColor: isDark ? '#141414' : '#F0EDE6', borderRadius: '12px', padding: '16px 20px', display: 'flex', alignItems: 'center', gap: '16px', border: `${T.borderWidth} solid ${T.border}`, boxShadow: isDark ? 'none' : '0 1px 4px rgba(0,0,0,.08)' }}>
               <IcaMini score={animIca} realScore={icaScore} stroke={icaStroke} />
               <div style={{ flex: 1 }}>
                 <div style={{ fontSize: '13px', color: T.fg2, marginBottom: '2px' }}>Lo que sé de ti</div>
@@ -309,7 +309,7 @@ export default function DashboardPage() {
             </div>
 
             {/* IDF hero */}
-            <div style={{ backgroundColor: isDark ? '#1A1A1A' : '#FFFFFF', borderRadius: '14px', padding: '28px', border: `${T.borderWidth} solid ${T.border}`, textAlign: 'center' }}>
+            <div style={{ backgroundColor: isDark ? '#1A1A1A' : '#FFFFFF', borderRadius: '14px', padding: '28px', border: `${T.borderWidth} solid ${T.border}`, textAlign: 'center', boxShadow: isDark ? 'none' : '0 1px 4px rgba(0,0,0,.08)' }}>
               <div style={{ fontSize: '13px', color: T.fg2, marginBottom: '4px' }}>Tu progreso hacia</div>
               <div style={{ fontSize: '17px', fontWeight: 700, color: T.fg, marginBottom: '16px' }}>
                 Tu primera meta financiera
@@ -335,6 +335,7 @@ export default function DashboardPage() {
                 backgroundColor: isDark ? '#1A1A1A' : '#FFFFFF', borderRadius: '12px',
                 padding: '16px 18px', border: `${T.borderWidth} solid ${fugaResolved ? '#2D6A4F' : T.border}`,
                 display: 'flex', flexDirection: 'column', gap: '6px',
+                boxShadow: isDark ? 'none' : '0 1px 4px rgba(0,0,0,.08)',
               }}>
                 <div style={{ fontSize: '11px', color: T.fg2, textTransform: 'uppercase', letterSpacing: '.5px' }}>Fugas detectadas</div>
                 <div style={{ fontSize: '24px', fontWeight: 700, color: fugaResolved ? '#2D6A4F' : '#8B2635' }}>
@@ -371,7 +372,7 @@ export default function DashboardPage() {
           </div>
 
           {/* ═══ RIGHT COLUMN — Consigliere ═══ */}
-          <div style={{ display: 'flex', flexDirection: 'column', backgroundColor: isDark ? '#161616' : '#FFFFFF', borderRadius: '14px', border: `${T.borderWidth} solid ${T.border}`, padding: '20px', overflow: 'hidden' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', backgroundColor: isDark ? '#161616' : '#FFFFFF', borderRadius: '14px', border: `${T.borderWidth} solid ${T.border}`, padding: '20px', overflow: 'hidden', boxShadow: isDark ? 'none' : '0 1px 4px rgba(0,0,0,.08)' }}>
             {/* Header */}
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '16px' }}>
               <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#2D6A4F' }} />
@@ -598,6 +599,7 @@ function Card({ t, label, value, color, trendUp, isDark }: { t: ThemeTokens; lab
     <div style={{
       backgroundColor: isDark ? '#1A1A1A' : '#FFFFFF', borderRadius: '12px', padding: '16px 18px',
       border: `${t.borderWidth} solid ${t.border}`, display: 'flex', flexDirection: 'column', gap: '6px',
+      boxShadow: isDark ? 'none' : '0 1px 4px rgba(0,0,0,.08)',
     }}>
       <div style={{ fontSize: '11px', color: t.fg2, textTransform: 'uppercase', letterSpacing: '.5px' }}>{label}</div>
       <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
@@ -627,7 +629,7 @@ function Tag({ t, label, danger = false }: { t: ThemeTokens; label: string; dang
 }
 
 function LoadingSkeleton({ isDark }: { isDark: boolean }) {
-  const bg = isDark ? '#0E0E0E' : '#F4F1EA'
+  const bg = isDark ? '#0E0E0E' : '#E8E3D9'
   const sh = isDark ? 'rgba(255,255,255,.04)' : 'rgba(26,26,26,.06)'
   const sh2 = isDark ? 'rgba(255,255,255,.02)' : 'rgba(26,26,26,.03)'
   return (
@@ -652,7 +654,7 @@ function LoadingSkeleton({ isDark }: { isDark: boolean }) {
 
 function ErrorState({ error, onRetry }: { error: string | null; onRetry: () => void }) {
   return (
-    <div style={{ background: '#F4F1EA', minHeight: '100vh', marginLeft: '220px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+    <div style={{ background: '#E8E3D9', minHeight: '100vh', marginLeft: '220px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
       <div style={{ background: '#fff', borderRadius: '16px', padding: '40px', maxWidth: '380px', textAlign: 'center', border: '1px solid rgba(26,26,26,.1)' }}>
         <h2 style={{ fontSize: '20px', fontWeight: 700, color: '#1A1A1A', marginBottom: '12px' }}>Error al cargar</h2>
         <p style={{ color: '#7A736C', marginBottom: '24px', fontSize: '14px' }}>{error || 'Error desconocido'}</p>
