@@ -1,5 +1,5 @@
 # CLAUDE.md — andgcore · Sovereign CFO B2C
-# Actualizado: 2026-05-19
+# Actualizado: 2026-05-25
 
 ## PROYECTO
 Nombre: Sovereign CFO / andgcore  
@@ -8,12 +8,8 @@ Stack: Next.js 16 · TypeScript · Tailwind · Supabase · Vercel · OpenAI
 Dominio: app.andgcore.com  
 
 ## AGENTE ACTIVO
-<!-- Cambiar al inicio de cada sesión -->
-Agente: [XX — Nombre]
-Worktree: ../wt-agXX-nombre/
-Tarea: [item del backlog]
-Output esperado: [archivo específico]
-No tocar: [scope de otros agentes]
+Rellenar al inicio de cada sesión de trabajo.
+Ver proceso completo en PROJECT_LOG.md
 
 ## ESTADO DEL BACKLOG
 - [x] 1.1 Repo + Next.js setup ✓
@@ -40,8 +36,8 @@ No tocar: [scope de otros agentes]
 - [x] Modal fugas con advertencia + revertir 60s ✓
 - [x] Logout en sidebar ✓
 - [x] Nombre real usuario desde profiles.name ✓
-- [ ] Motor IDF — idf.ts + idf-service.ts ← AG06 EN CURSO
-- [ ] Prompts IDF actualizados ← AG08 EN CURSO
+- [x] Motor IDF — idf.ts + idf-service.ts + api/idf/ ✓ (untracked, pendiente commit)
+- [x] Prompts IDF actualizados ✓
 - [ ] Migración 007_goals_idf.sql ← pendiente ejecutar en Supabase
 - [ ] Onboarding → solo GDPR + primera sesión Consigliere
 - [ ] Memoria continua entre sesiones
@@ -154,6 +150,23 @@ No tocar: [scope de otros agentes]
 ### Herramientas por tipo de tarea
 - Claude Code para código principal (lógica, servicios, APIs, tests)
 - Windsurf para UI components < 100 líneas
+
+## ARCHIVOS MODIFICADOS — 2026-05-25
+AG04 · 2026-05-25 · fix terminología Soberanía→Dominio
+
+## ARCHIVOS MODIFICADOS — 2026-05-19
+AG05 · 2026-05-19 · a161245 · PROJECT_LOG.md creado
+AG05 · 2026-05-19 · bcf10df · CLAUDE.md limpiado paleta E8E3D9
+
+## COMMITS RECIENTES — POSTERIORES A 2026-05-19
+- bcf10df ag05: CLAUDE.md limpiado
+- 082baa3 ag04: fix fondo ICA independiente
+- c086c1e ag04: fix fondo + logout + bienvenida
+- 0731e8a ag04: fix colores hex directos
+- 0c18537 ag01: fix background colors
+- 015ea6e chore: force cache bust
+- 7313e6f ag01: fix contraste fondo-cards dashboard
+- 93c4879 ag04: fix sidebar visible + nombre real + fondo consigliere
 
 ## ARCHIVOS MODIFICADOS — 2026-05-15
 AG08:
