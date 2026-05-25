@@ -24,6 +24,19 @@ git checkout main
 git merge develop --no-ff -m "release: develop → main"
 git push origin main
 
+### Proceso de trabajo por agente (OBLIGATORIO)
+1. git branch → verificar estar en agent/XX
+2. git fetch origin && git reset --hard origin/main
+3. Leer PROJECT_LOG.md y CLAUDE.md
+4. Trabajar solo en archivos de su dominio
+5. git push origin agent/XX ÚNICAMENTE
+   PROHIBIDO: push a main, develop o ramas de otros agentes
+6. Reportar Fase 4 y esperar aprobación de Luis
+
+### Merges — solo Luis
+agent/XX → develop: validación QA
+develop → main: aprobación producción
+
 ### Pendientes
 - develop URL de preview pendiente de confirmar en Vercel
 - tmux + launch-swarm.sh pendiente de instalar
