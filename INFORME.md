@@ -164,3 +164,124 @@ Test E2E manual (con JWT real) corresponde a AG07 (testing).
 - **AG01** (consolidador): si requiere renumerar al merge con `develop`,
   ambos archivos son auto-contenidos; solo cuidar que `set_updated_at()`
   no se duplique con `update_updated_at()` ya existente en 001.
+
+---
+
+# INFORME — AG08 · The Consigliere prompt v2 + Output Validator
+
+Fecha: 2026-05-26
+Agente: AG08
+Worktree: `../wt-ag08-consigliere/`
+Branch: `agent/08`
+
+## Misión
+
+Reescribir el system prompt del Consigliere y crear la capa validadora de outputs
+del LLM previa a su envío al usuario.
+
+## Archivos modificados / creados
+
+### Modificados
+- `src/lib/prompts/consigliere.ts` — añade `systemPromptConsigliere`,
+  `mensajeBienvenidaPrimeraSesion`; `buildSystemPrompt(context)` ahora compone
+  la base estática con el bloque PERFIL ACTIVO. Se mantiene la firma pública
+  consumida por `src/app/api/chat/route.ts`.
+- `package.json` — añade script `npm test` que encadena los tests unitarios
+  vía `npx tsx`.
+
+### Creados
+- `src/lib/llm/validator-rules.ts` — listas de regex: productos específicos,
+  recomendaciones absolutas, garantías de rentabilidad, lenguaje motivacional,
+  detección de disclaimer y disclaimer canónico.
+- `src/lib/llm/output-validator.ts` — `validateConsigliereOutput(text)` →
+  `ValidationResult` con `passed`, `severity` (`ok|flag|block`), `reasons`,
+  `suggestedDisclaimer?`.
+- `src/lib/prompts/__tests__/validator.test.ts` — 10 casos PASS + 10 casos
+  FAIL. Todos verdes.
+- `docs/consigliere-voice.md` — 10 outputs ideales + 10 outputs a evitar
+  con su razón.
+- `INFORME.md` — este archivo.
+
+## Comportamiento del system prompt v2
+
+Resumen de lo que el prompt ahora cubre:
+
+- **Identidad**: estratega italiano implícito (palabras, no acento), frío,
+  protector, lealtad al patrimonio del usuario.
+- **Léxico de la casa**: Reserva de Soberanía, Fuga de Poder, Escudo Familiar,
+  Escenario de Poder, Hito, Dominio Financiero, ICA Score.
+- **Lo que no hace**: nada de "tú puedes", "cree en ti", emojis enfáticos,
+  anglicismos innecesarios.
+- **Proactividad** (cuándo habla primero): fuga detectada · 7 días inactividad ·
+  últimos 3 días del mes · meta en riesgo · ingreso recurrente próximo.
+- **Política de documentos**: extracto 3 meses para metas >6m · histórico
+  ingresos/gastos fijos para compra de activo · detalle deudas+tasas para
+  salida de deudas · perfil fiscal completo para proyecciones >12m.
+- **Disclaimer obligatorio**: cualquier mención de broker/exchange/fondo/acción
+  específica exige el texto canónico en el mismo mensaje. La alternativa es
+  hablar en categorías (no marcas).
+- **Reglas de respuesta**: 600 tokens máx, acción concreta, cuantificar fugas,
+  cerrar con siguiente paso (nunca con pregunta abierta vacía).
+
+## Capa validadora — qué bloquea
+
+| Detección | Severidad |
+|-----------|-----------|
+| Mención de producto financiero específico SIN disclaimer en el mismo mensaje | `block` |
+| Garantía de rentabilidad futura ("vas a ganar X%", "rentabilidad del Y%", "tienes asegurado", "garantizado:") | `block` |
+| Recomendación absoluta ("compra X", "vende Y", "invierte en Z", "abre cuenta en", "tu mejor opción es") junto a producto específico | `block` |
+| Lenguaje motivacional cliché ("tú puedes", "cree en ti", "todo va a estar bien", "el universo te apoya", ...) | `flag` |
+
+Cuando hay productos sin disclaimer, el `ValidationResult` rellena
+`suggestedDisclaimer` con el texto canónico para facilitar la regeneración.
+
+## Tests
+
+```
+npm test
+```
+
+Resultado:
+
+```
+ica.test.ts            → 21 passed
+portugal.test.ts       → 19 passed
+transactions.test.ts   → 24 passed
+validator.test.ts      → 20 passed (10 PASS + 10 FAIL)
+─────────────────────────────────────
+TOTAL                  → 84 passed · 0 failed
+```
+
+Acceptance criteria:
+
+- ✅ `npm test` verde.
+- ✅ Validator: 0 falsos positivos en los 10 casos PASS.
+- ✅ Validator: detecta los 10 casos FAIL como `severity: 'block'`.
+
+## Restricciones respetadas
+
+- ✅ No se ha tocado `src/app/api/chat/route.ts` (endpoint de AG01).
+- ✅ No se han tocado `categorizar.ts`, `detectarFuga.ts`, `reporte.ts`,
+  `onboarding.ts` (otros prompts).
+- ✅ `buildSystemPrompt(context)` mantiene su firma pública: el chat route
+  consume el output sin cambios.
+
+## Notas para AG01 / integración
+
+- Para usar el validator en el endpoint de chat, importar
+  `validateConsigliereOutput` desde `@/lib/llm/output-validator` y aplicarlo
+  sobre el output del LLM antes de persistirlo en `messages` / devolverlo al
+  cliente. Si `severity === 'block'`, opciones: (a) regenerar pidiendo al LLM
+  que adjunte `suggestedDisclaimer` o evite el producto específico;
+  (b) bloquear y enviar mensaje genérico de retry al usuario.
+- `mensajeBienvenidaPrimeraSesion` ya está exportado para ser inyectado por el
+  flujo de primera sesión cuando el usuario complete GDPR.
+
+---
+
+## Adenda AG08 — Cableado runGuardrail (2026-07-06)
+
+Rebase de `agent/08` (prompt v2 + validator) sobre `origin/develop`
+(que ya trae la capa guardrail + calculator de AG02). Conflicto add/add en
+`INFORME.md` resuelto fusionando ambos informes (AG02 arriba, AG08 debajo).
+Detalle del cableado en la sección de entrega Fase 4.

@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "npx tsx src/lib/__tests__/ica.test.ts && npx tsx src/lib/__tests__/portugal.test.ts && npx tsx src/lib/__tests__/transactions.test.ts && npx tsx src/lib/prompts/__tests__/validator.test.ts"
   },
   "dependencies": {
     "@stripe/stripe-js": "^9.4.0",
