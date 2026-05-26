@@ -285,3 +285,76 @@ Rebase de `agent/08` (prompt v2 + validator) sobre `origin/develop`
 (que ya trae la capa guardrail + calculator de AG02). Conflicto add/add en
 `INFORME.md` resuelto fusionando ambos informes (AG02 arriba, AG08 debajo).
 Detalle del cableado en la sección de entrega Fase 4.
+
+---
+
+# INFORME — AG07 · Simulador Masivo
+
+**Misión:** generar 100 perfiles sintéticos realistas PT/ES en DB de staging.
+**Branch:** `agent/07`
+**Worktree:** `../wt-ag07-testing/`
+**Fecha:** 2026-05-26
+
+## Entregables
+
+| Archivo                                  | LoC | Función                                                          |
+|------------------------------------------|----:|------------------------------------------------------------------|
+| `scripts/seed-synthetic-profiles.ts`     | ~610| Crea 100 usuarios + perfiles + transacciones                     |
+| `scripts/cleanup-synthetic-profiles.ts`  | ~100| Borra usuarios sintéticos vía `auth.admin.deleteUser` (cascada)  |
+| `docs/synthetic-data-spec.md`            | ~250| Especificación completa de distribuciones, reglas y verificación |
+
+## Cumplimiento del brief
+
+- ✅ Emails `synth_001@audit.andgcore.test` … `synth_100@…` (TLD reservado RFC 2606)
+- ✅ Distribución país: 60 PT + 40 ES
+- ✅ Distribución edad: 25 / 40 / 25 / 10 en los buckets pedidos
+- ✅ Distribución arquetipo: 20 / 25 / 15 / 20 / 20
+- ✅ Salarios realistas: PT 800–3500 € / ES 1100–4500 € con subsidios y pagas extra
+- ✅ Eventos puntuales: bono anual (25%), devolución hacienda (30%), gasto médico (20%)
+- ✅ 3–6 meses de transacciones por usuario, ordenadas por fecha
+- ✅ Categorías coherentes: alquiler, supermercado, transporte, restaurantes, suscripciones, ocio, salud, ropa, energia, telecomunicaciones (+ pago_deuda / intereses_deuda para `endeudado`)
+- ✅ Meta declarada coherente con arquetipo (storage en `onboarding_data.main_goal` — tabla `goals` aún no existe)
+- ✅ Patrones de spike semanal para `impulsivo` (factor 0.3–2.5 sobre discrecionales)
+- ✅ Cleanup script funcional (delete en cascada vía FK `ON DELETE CASCADE`)
+
+## Decisiones técnicas
+
+- **PRNG determinista (mulberry32, seed `20260526`).** Re-runs producen el mismo conjunto — necesario para auditar diffs entre ejecuciones.
+- **Triple guard-rail anti-producción:**
+  1. URL no debe contener `prod` / `production`
+  2. Variables `ALLOW_SYNTHETIC_SEED=1` y `ALLOW_SYNTHETIC_CLEANUP=1` deben estar puestas explícitamente
+  3. El TLD `.test` (RFC 2606) garantiza que ningún email saliente se entregue
+- **No tocamos triggers.** El trigger ICA (`005_ica_trigger.sql`) seguirá disparando por cada `INSERT`. Documentado en spec § 13 como limitación conocida (todos los sintéticos terminarán con ICA = 100).
+- **`monthly_gross` = `monthly_net × 1.32`** como aproximación uniforme. No usamos `src/lib/fiscal/portugal.ts` porque el seeder vive fuera del bundle Next.js y la dirección bruto→neto es la inversa de lo que la lib calcula.
+- **No insertamos en `goals`.** Migración 007 pendiente (owner AG06). La meta vive en `profiles.onboarding_data.main_goal`. Cuando AG06 termine, este script deberá extenderse — comentado en `docs/synthetic-data-spec.md` § 13.
+
+## Verificación
+
+- ✅ Type-check con `tsc --strict` pasa limpio sobre ambos scripts.
+- ⚠️ No ejecutado contra staging (esta sesión no tiene credenciales). La spec incluye queries SQL de verificación post-seed en § 12.
+
+## Cómo se ejecuta
+
+```bash
+export $(grep -v '^#' .env.local | xargs)
+
+ALLOW_SYNTHETIC_SEED=1 npx tsx scripts/seed-synthetic-profiles.ts
+# … logs por usuario …
+# ✅ Listo. Creados: 100 · Fallidos: 0
+
+# Cuando se quiera limpiar:
+ALLOW_SYNTHETIC_CLEANUP=1 npx tsx scripts/cleanup-synthetic-profiles.ts
+```
+
+## Restricciones respetadas
+
+- Solo `scripts/` y `docs/` tocados.
+- Sin cambios a `src/`, `supabase/`, `package.json`, `next.config.ts`, ni CLAUDE.md.
+- Sin tocar scripts existentes (no había ninguno).
+- Compatible con el resto de agentes — ningún archivo pisado.
+
+## Pendiente (no-blockers para esta misión)
+
+- Ejecución real contra staging cuando AG01/operador disponga del entorno.
+- Extender seeder para insertar `goals` cuando AG06 termine la migración 007.
+- Considerar un script auxiliar `reset-synthetic-ica.ts` que pone `ica_score=0` y truncate `ica_history` de los sintéticos si las pruebas necesitan ICAs distribuidos en vez de saturados a 100.
