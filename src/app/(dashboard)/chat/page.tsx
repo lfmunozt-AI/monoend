@@ -147,25 +147,35 @@ export default function ChatPage() {
 
       const data = await response.json()
 
+      // Adopta la conversación creada/confirmada por el servidor
+      if (data.conversationId && data.conversationId !== activeConversationId) {
+        setActiveConversationId(data.conversationId)
+        localStorage.setItem('activeConversationId', data.conversationId)
+      }
+
       setTimeout(() => {
         setIsStreaming(false)
         setConsigliereState('responding')
-        
+
+        // El route devuelve { response }, no { message }; el servidor no envía
+        // timestamp → hora local del cliente
+        const responseText: string = data.response ?? 'Sin respuesta'
         const assistantMessage: Message = {
           id: `msg_${Date.now()}_assistant`,
           role: 'assistant',
-          content: data.message,
-          timestamp: new Date(data.timestamp)
+          content: responseText,
+          timestamp: new Date()
         }
 
         const finalMessages = [...updatedMessages, assistantMessage]
         setMessages(finalMessages)
-        saveMessages(activeConversationId, finalMessages)
+        saveMessages(data.conversationId ?? activeConversationId, finalMessages)
 
-        if (data.message.toLowerCase().includes('fuga')) {
+        const lower = responseText.toLowerCase()
+        if (lower.includes('fuga')) {
           setTimeout(() => setConsigliereState('alert'), 1600)
           setTimeout(() => setConsigliereState('idle'), 2100)
-        } else if (data.message.toLowerCase().includes('excelente') || data.message.toLowerCase().includes('¡')) {
+        } else if (lower.includes('excelente') || lower.includes('¡')) {
           setTimeout(() => setConsigliereState('celebrate'), 1600)
           setTimeout(() => setConsigliereState('idle'), 3400)
         } else {

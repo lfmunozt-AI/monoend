@@ -88,6 +88,7 @@ export default function DashboardPage() {
   const [cState, setCState] = useState<CState>('breathing')
   const [bubbleText, setBubbleText] = useState('')
   const [bubbleVisible, setBubbleVisible] = useState(false)
+  const [bubbleError, setBubbleError] = useState(false)
   const [chatInput, setChatInput] = useState('')
   const [chatSending, setChatSending] = useState(false)
   const [conversationId, setConversationId] = useState<string | null>(null)
@@ -157,11 +158,13 @@ export default function DashboardPage() {
     }
   }, [loading, data, userName])
 
-  // Chat send
+  // Chat send — mismo flujo para input y quick actions
   const handleSend = useCallback(async (msg: string) => {
     const trimmed = msg.trim()
     if (!trimmed || chatSending) return
-    setChatInput(''); setChatSending(true); setCState('thinking')
+    // Estado pensando: burbuja "..." + personaje state-thinking
+    setChatInput(''); setChatSending(true); setBubbleError(false)
+    setBubbleVisible(true); setCState('thinking')
     try {
       const res = await fetch('/api/chat', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -169,14 +172,15 @@ export default function DashboardPage() {
       })
       if (res.status === 401) { router.push('/login'); return }
       if (!res.ok) throw new Error('Error')
-      const json = await res.json() as { message?: string; conversationId?: string }
-      if (json.message) {
-        setCState('nodding'); setBubbleText(json.message)
-        setTimeout(() => setCState('breathing'), 1600)
-      }
+      const json = await res.json() as { response?: string; conversationId?: string }
+      if (!json.response) throw new Error('Respuesta vacía')
+      // Respuesta lista: burbuja pinta el texto + personaje state-nodding
+      setBubbleText(json.response); setCState('nodding')
+      setTimeout(() => setCState('breathing'), 1600)
       if (json.conversationId) setConversationId(json.conversationId)
     } catch {
-      setBubbleText('Error al procesar. Inténtalo de nuevo.')
+      setBubbleError(true)
+      setBubbleText('No pude procesar eso. Intenta de nuevo.')
       setCState('breathing')
     } finally { setChatSending(false) }
   }, [chatSending, conversationId, router])
@@ -238,6 +242,7 @@ export default function DashboardPage() {
     setRevertTimer(0)
     if (revertInterval.current) clearInterval(revertInterval.current)
     setCState('breathing')
+    setBubbleError(false)
     setBubbleText(getGreeting(userName))
   }, [userName])
 
@@ -397,8 +402,8 @@ export default function DashboardPage() {
                   marginBottom: '12px',
                   boxShadow: isDark ? 'none' : '0 1px 4px rgba(0,0,0,.08)',
                 }}>
-                  <p style={{ fontSize: '14px', fontWeight: 500, color: T.fg, margin: 0, lineHeight: '1.5' }}>
-                    {chatSending ? 'El Consigliere está pensando…' : bubbleText}
+                  <p style={{ fontSize: '14px', fontWeight: 500, color: bubbleError ? '#8B2635' : T.fg, margin: 0, lineHeight: '1.5', whiteSpace: 'pre-wrap' }}>
+                    {chatSending ? '…' : bubbleText}
                   </p>
                 </div>
               )}

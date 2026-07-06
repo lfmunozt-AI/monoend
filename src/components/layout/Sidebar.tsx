@@ -5,6 +5,7 @@ import { usePathname } from 'next/navigation'
 
 const NAV_MAIN = [
   { label: 'Dashboard',     href: '/dashboard' },
+  { label: 'Chat CFO',      href: '/chat', icon: 'ti-message-circle' },
   { label: 'Transacciones', href: '/transactions' },
   { label: 'Proyecciones',  href: '/projections' },
   { label: 'Fugas',         href: '/leaks' },
@@ -24,7 +25,7 @@ interface SidebarProps {
 export default function Sidebar({ isDark, onToggleDark, onLogout }: SidebarProps) {
   const pathname = usePathname()
 
-  const renderLink = (item: { label: string; href: string }) => {
+  const renderLink = (item: { label: string; href: string; icon?: string }) => {
     const isActive = pathname === item.href
     return (
       <Link
@@ -40,6 +41,7 @@ export default function Sidebar({ isDark, onToggleDark, onLogout }: SidebarProps
           textDecoration: 'none', transition: 'all .15s',
         }}
       >
+        {item.icon && <i className={`ti ${item.icon}`} style={{ fontSize: '16px' }} />}
         {item.label}
       </Link>
     )
