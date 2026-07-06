@@ -6,7 +6,10 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "npx tsx src/lib/__tests__/ica.test.ts && npx tsx src/lib/__tests__/portugal.test.ts && npx tsx src/lib/__tests__/transactions.test.ts && npx tsx src/lib/prompts/__tests__/validator.test.ts",
+    "test:guardrail": "npx tsx src/lib/guardrail/guardrail.test.ts && npx tsx src/lib/guardrail/numbers.test.ts && npx tsx src/lib/guardrail/injection.test.ts",
+    "test:calculator": "npx tsx src/lib/calculator/operations.test.ts && npx tsx src/lib/calculator/orchestrator.test.ts"
   },
   "dependencies": {
     "@stripe/stripe-js": "^9.4.0",
