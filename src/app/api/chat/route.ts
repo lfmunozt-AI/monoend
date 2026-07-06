@@ -2,6 +2,8 @@ import { createClient } from '@/lib/supabase/server'
 import { adminClient } from '@/lib/supabase/admin'
 import { buildSystemPrompt } from '@/lib/prompts/consigliere'
 import { callLLMWithHistory } from '@/lib/llm'
+import { runGuardrail } from '@/lib/guardrail'
+import { validateConsigliereOutput } from '@/lib/llm/output-validator'
 import { getICAScore } from '@/lib/ica-service'
 import { getICALevel } from '@/lib/ica'
 import { NextResponse } from 'next/server'
@@ -190,13 +192,37 @@ export async function POST(request: Request) {
   const allMessages = [...contextMessages, { role: 'user' as const, content: cleanMessage }]
   const llmResult = await callLLMWithHistory(allMessages, systemPrompt)
 
+  // ── Guardarraíl de cifras (código externo al modelo) ─────────────────────────
+  // Extrae los hechos del usuario, valida el grounding de las cifras de la
+  // respuesta y, en modo mvp, reescribe los montos inventados. best-effort:
+  // nunca lanza. `texto_final` es la respuesta saneada a persistir/mostrar.
+  const guardrail = await runGuardrail(cleanMessage, llmResult.content, {
+    mode: 'mvp',
+    supabase: admin,
+    userId: user.id,
+  })
+  let finalContent = guardrail.texto_final
+
+  // ── BONUS: validador de política de consejos, sobre el texto ya saneado ──────
+  // El guardrail de cifras corre primero; el validador de política, después,
+  // ambos sobre `finalContent`. Función pura: solo detecta y reporta.
+  const validation = validateConsigliereOutput(finalContent)
+  if (validation.severity !== 'ok') {
+    console.warn('[chat] output-validator:', validation.severity, validation.reasons)
+  }
+  // Producto específico sin disclaimer → adjuntar el disclaimer canónico
+  // (enforcement determinista, sin segunda llamada al LLM, no bloqueante).
+  if (validation.suggestedDisclaimer && !finalContent.includes(validation.suggestedDisclaimer)) {
+    finalContent = `${finalContent}\n\n${validation.suggestedDisclaimer}`
+  }
+
   // ── Guardar respuesta + actualizar conversación (parallel) ───────────────────
   const [assistantMsgResult, updateConvResult] = await Promise.all([
     admin.from('messages').insert({
       conversation_id: convId,
       user_id: user.id,
       role: 'assistant',
-      content: llmResult.content,
+      content: finalContent,
       tokens_used: llmResult.tokensUsed,
     }),
     admin.from('conversations')
@@ -229,7 +255,7 @@ export async function POST(request: Request) {
   }
 
   return NextResponse.json({
-    response: llmResult.content,
+    response: finalContent,
     conversationId: convId,
     tokensUsed: llmResult.tokensUsed,
   })
