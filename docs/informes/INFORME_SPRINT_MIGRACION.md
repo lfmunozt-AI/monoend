@@ -1,3 +1,19 @@
+> **Archivo compuesto — legado.** Reubicado desde la raíz del repo el 2026-07-08.
+> Contiene **tres** informes de **dos** agentes y **dos** fechas, pegados al
+> resolver un conflicto add/add sobre el viejo `INFORME.md` de la raíz:
+>
+> 1. AG02 · 2026-05-26 — migraciones 007 / 008
+> 2. AG08 · 2026-05-26 — prompt v2 + output validator
+> 3. AG08 · 2026-07-06 — adenda: cableado `runGuardrail`
+>
+> Se conserva íntegro por trazabilidad, pero **no cumple** la regla que inaugura
+> este directorio. **A partir de ahora**: los informes van a `docs/informes/`,
+> **un archivo por agente y fecha** → `INFORME_AGXX_YYYY-MM-DD.md`.
+> Un `INFORME.md` en la raíz garantiza este conflicto en cuanto dos agentes
+> entregan el mismo día. Ver `CLAUDE.md` → REGLAS DE PROCESO.
+
+---
+
 # INFORME AG02 — Pattern Architect
 
 Fecha: 2026-05-26
