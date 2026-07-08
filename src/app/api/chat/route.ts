@@ -2,7 +2,7 @@ import { createClient } from '@/lib/supabase/server'
 import { adminClient } from '@/lib/supabase/admin'
 import { buildSystemPrompt } from '@/lib/prompts/consigliere'
 import { callLLMWithHistory } from '@/lib/llm'
-import { runGuardrail } from '@/lib/guardrail'
+import { runGuardrail, rewriteDelegativeClosing } from '@/lib/guardrail'
 import { buildVerifiedContext } from '@/lib/calculator/orchestrator'
 import { detectLanguage } from '@/lib/language'
 import {
@@ -291,6 +291,19 @@ export async function POST(request: Request) {
     !finalContent.includes(validation.suggestedDisclaimer)
   ) {
     finalContent = `${finalContent}\n\n${validation.suggestedDisclaimer}`
+  }
+
+  // TAREA 1 — cierre delegativo: si la respuesta cierra pidiendo al usuario que
+  // analice ("¿qué gastos podrías reducir?"), se sustituye por una petición de
+  // insumo + promesa de análisis, en el idioma del usuario. monoend pide el
+  // dato, él analiza. Determinista; último paso para no reintroducir delegación.
+  const beforeDelegative = finalContent
+  finalContent = rewriteDelegativeClosing(finalContent, userLang)
+  if (finalContent !== beforeDelegative) {
+    console.warn('[chat] delegative_closing_rewritten', JSON.stringify({
+      user_id: user.id,
+      conversation_id: convId,
+    }))
   }
 
   // ── Guardar respuesta + actualizar conversación (parallel) ───────────────────

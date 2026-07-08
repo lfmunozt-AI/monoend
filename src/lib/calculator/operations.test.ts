@@ -16,6 +16,7 @@ import {
   tiempoHastaMeta,
   ratioDeuda,
   interesCompuesto,
+  loanPayment,
 } from "./operations";
 
 // ── Caso canónico ──────────────────────────────────────────────────────────
@@ -92,6 +93,36 @@ test("interesCompuesto(1000, 10, 2) → 1210 (tasa como %)", () => {
   const r = interesCompuesto(1000, 10, 2); // 1000*(1.1)^2 = 1210
   if (!r.ok) return assert.fail(`esperaba ok, error: ${r.error}`);
   assert.equal(r.valor, 1210);
+});
+
+// ── loanPayment (sistema francés) ───────────────────────────────────────────
+test("loanPayment: 30000 a 36 meses, TAE 7% ≈ 926.31 (NUNCA 833)", () => {
+  const r = loanPayment({ principal: 30000, months: 36, annualRatePct: 7 });
+  if (!r.ok) return assert.fail(`esperaba ok, error: ${r.error}`);
+  assert.ok(Math.abs(r.valor - 926.3) < 0.1, `esperaba ~926.31, salió ${r.valor}`);
+  assert.notEqual(r.valor, 833.33, "no es el reparto lineal que ignora intereses");
+});
+
+test("loanPayment: TAE 0 → reparto lineal principal/meses (833.33)", () => {
+  const r = loanPayment({ principal: 30000, months: 36, annualRatePct: 0 });
+  if (!r.ok) return assert.fail(`esperaba ok, error: ${r.error}`);
+  assert.equal(r.valor, 833.33);
+});
+
+test("loanPayment: 12000 a 12 meses, TAE 7% ≈ 1038.32", () => {
+  const r = loanPayment({ principal: 12000, months: 12, annualRatePct: 7 });
+  if (!r.ok) return assert.fail(`esperaba ok, error: ${r.error}`);
+  assert.ok(Math.abs(r.valor - 1038.32) < 0.1, `salió ${r.valor}`);
+});
+
+test("loanPayment: edge months=1 → una cuota con un mes de interés", () => {
+  const r = loanPayment({ principal: 1000, months: 1, annualRatePct: 7 });
+  if (!r.ok) return assert.fail(`esperaba ok, error: ${r.error}`);
+  assert.equal(r.valor, 1005.83); // 1000 × (1 + 0.0058333)
+
+  const cero = loanPayment({ principal: 1000, months: 0, annualRatePct: 7 });
+  assert.equal(cero.ok, false);
+  assert.equal(cero.ok === false && cero.error, "division_por_cero");
 });
 
 test("valores negativos → error tipado, nunca NaN", () => {

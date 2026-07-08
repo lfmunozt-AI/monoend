@@ -14,6 +14,48 @@ import { parseModelOutput } from "./schema";
 import { parseDigitAmount, findNumberMentions } from "./numbers";
 import { runGuardrail } from "./index";
 import { splitSentences, segmentSentences, sentenceRangeAt } from "./context";
+import { rewriteDelegativeClosing, isDelegativeClosing } from "./policy";
+
+// ── TAREA 1 — cierre delegativo (monoend pide el insumo, él analiza) ──────────
+test("cierre delegativo ES → reemplazado por petición de insumo", () => {
+  const out = rewriteDelegativeClosing(
+    "Tu sobrante es 500 €. ¿Qué gastos podrías reducir?",
+    "es",
+  );
+  assert.ok(!out.includes("podrías reducir"), "elimina la delegación");
+  assert.ok(out.includes("¿Me compartes tus gastos principales con sus montos? Yo identifico cuáles recortar."));
+  assert.ok(out.includes("Tu sobrante es 500 €"), "conserva el análisis previo");
+});
+
+test("cierre delegativo EN → reemplazado por petición de insumo", () => {
+  const out = rewriteDelegativeClosing(
+    "Your surplus is 500 €. Which expenses do you think you could cut?",
+    "en",
+  );
+  assert.ok(!/do you think|could cut/i.test(out), "elimina la delegación");
+  assert.ok(out.includes("Share your main expenses with their amounts — I'll pinpoint which ones to cut."));
+});
+
+test("cierre delegativo PT → reemplazado por petición de insumo", () => {
+  const out = rewriteDelegativeClosing(
+    "O teu excedente é 500 €. Que gastos achas que consegues reduzir?",
+    "pt",
+  );
+  assert.ok(!/achas que|consegues reduzir/i.test(out));
+  assert.ok(out.includes("Partilhas comigo os teus principais gastos com os valores? Eu identifico quais cortar."));
+});
+
+test("petición de dato correcta → intacta (no es delegativa)", () => {
+  const texto = "Tu sobrante es 500 €. ¿Cuál es tu ingreso neto mensual?";
+  assert.equal(isDelegativeClosing(texto), false);
+  assert.equal(rewriteDelegativeClosing(texto, "es"), texto);
+});
+
+test("propuesta sin pregunta → intacta", () => {
+  const texto = "Tu sobrante es 500 €. Sube la aportación a 400 € este mes.";
+  assert.equal(isDelegativeClosing(texto), false);
+  assert.equal(rewriteDelegativeClosing(texto, "es"), texto);
+});
 
 // ── BUG 1 — segmentador de oraciones NUMERIC-SAFE ─────────────────────────────
 test("splitSentences: 'sobrante de 1.000 € es sólido' = 1 oración", () => {

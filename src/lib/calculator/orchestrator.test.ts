@@ -95,6 +95,38 @@ test("Fallo B (5): la capacidad verificada 12000 se APRUEBA por el validador", (
   assert.ok(ref.cifras_bloqueadas.some((c) => c.valor === 300), "300 sin marcador → bloqueado");
 });
 
+// ── TAREA 2 — cuota de crédito con TAE de referencia ────────────────────────
+test("crédito: 'financiar 30000 a 36 meses' → referencia_cuota_credito ~926.31", () => {
+  const { bloque, cifrasCalculadas } = buildVerifiedContext("quiero financiar un carro de 30000 a 36 meses");
+  assert.ok(bloque.includes("referencia_cuota_credito: 926,31 €/mes"), `bloque:\n${bloque}`);
+  assert.ok(bloque.includes("TAE de referencia ~7%"), "marca la simulación explícita");
+  assert.ok(bloque.includes("monto 30000 a 36 meses"), "documenta principal y plazo");
+  // Excepción de grounding: la cuota SÍ entra en cifrasCalculadas.
+  assert.ok(cifrasCalculadas.includes(926.31), "926.31 aprobable por el guardarraíl");
+});
+
+test("crédito: la cuota simulada se APRUEBA por el validador (rama c0)", () => {
+  const { cifrasCalculadas } = buildVerifiedContext("préstamo de 30000 a 36 meses");
+  const r = validateGrounding(
+    "Como referencia, con una TAE del 7% la cuota sería 926,31 €/mes.",
+    [],
+    cifrasCalculadas,
+  );
+  assert.ok(r.cifras_aprobadas.some((c) => c.valor === 926.31), "cuota aprobada");
+  assert.equal(r.cifras_bloqueadas.length, 0);
+});
+
+test("crédito: sin palabra de crédito → no se calcula cuota", () => {
+  // "30000 en 36 meses" sin verbo de crédito no debe disparar la simulación.
+  const { bloque } = buildVerifiedContext("quiero llegar a 30000 en 36 meses");
+  assert.ok(!bloque.includes("referencia_cuota_credito"), "no hay escenario de crédito");
+});
+
+test("crédito EN: 'loan of 30000 over 36 months' → cuota detectada", () => {
+  const { bloque } = buildVerifiedContext("a loan of 30000 over 36 months");
+  assert.ok(bloque.includes("referencia_cuota_credito: 926,31 €/mes"), `bloque:\n${bloque}`);
+});
+
 // ── PIEZA 3 — validateGrounding con cifrasCalculadas ────────────────────────
 test("validateGrounding con cifrasCalculadas: aprueba 1000 exacto, bloquea 999", () => {
   const cifras = [1000];

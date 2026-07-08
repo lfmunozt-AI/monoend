@@ -205,6 +205,63 @@ export function containsDataRequest(text: string): boolean {
   return PROPOSAL_RE.test(norm(text));
 }
 
+// ── Cierre delegativo (bug de persona) ───────────────────────────────────────
+//
+// monoend pide el INSUMO y él analiza. Un cierre que delega el análisis al
+// usuario ("¿qué gastos podrías reducir?") viola el ADN. Se detecta de forma
+// determinista y se reemplaza por una petición de insumo + promesa de análisis.
+
+// ES/PT/EN, sobre texto normalizado (sin acentos, minúsculas).
+const DELEGATIVE_RE = new RegExp(
+  "(" +
+    // ES
+    "podrias\\s+reducir|podrias\\s+recortar|crees\\s+que|te\\s+parece|piensa\\s+en|" +
+    "evalua|considera\\s+cuales|que\\s+gastos\\s+(?:podrias|crees)|que\\s+recortarias|" +
+    "en\\s+que\\s+(?:crees\\s+que\\s+)?gastas\\s+de\\s+mas|" +
+    // PT
+    "achas\\s+que|consegues\\s+reduzir|o\\s+que\\s+achas|pensa\\s+em|avalia|" +
+    // EN
+    "could\\s+you\\s+cut|do\\s+you\\s+think|consider\\s+which|what\\s+do\\s+you\\s+think|" +
+    "think\\s+about\\s+which" +
+  ")",
+);
+
+/** Cierre de petición de insumo + promesa de análisis (el patrón correcto). */
+const INSUMO_REQUEST: Record<Language, string> = {
+  es: "¿Me compartes tus gastos principales con sus montos? Yo identifico cuáles recortar.",
+  pt: "Partilhas comigo os teus principais gastos com os valores? Eu identifico quais cortar.",
+  en: "Share your main expenses with their amounts — I'll pinpoint which ones to cut.",
+};
+
+/** ¿La última frase delega el análisis en el usuario en vez de pedir un dato? */
+export function isDelegativeClosing(text: string): boolean {
+  const last = lastSentence(text);
+  return last !== "" && DELEGATIVE_RE.test(norm(last));
+}
+
+/**
+ * Si el texto cierra delegando el análisis, elimina esa última frase y la
+ * reemplaza por la petición de insumo en el idioma del usuario. Determinista y
+ * puro. Si el cierre no es delegativo, devuelve el texto intacto.
+ */
+export function rewriteDelegativeClosing(
+  text: string,
+  lang: Language = DEFAULT_LANGUAGE,
+): string {
+  if (!isDelegativeClosing(text)) return text;
+
+  const segments = segmentSentences(text);
+  // Índice del último segmento con contenido (el cierre delegativo).
+  let lastIdx = -1;
+  for (let i = segments.length - 1; i >= 0; i--) {
+    if (segments[i].text.trim()) { lastIdx = i; break; }
+  }
+
+  const kept = cleanup(segments.slice(0, lastIdx).map((s) => s.text).join(""));
+  const req = INSUMO_REQUEST[lang];
+  return kept ? `${kept}\n\n${req}` : req;
+}
+
 // ── Limpieza ───────────────────────────────────────────────────────────────
 
 /**
