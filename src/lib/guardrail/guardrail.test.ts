@@ -109,14 +109,28 @@ test("CASO cálculo válido: 10000 → 'ahorra 2000 (20%)' se APRUEBA", () => {
   assert.equal(dosmil?.categoria, "calculo");
 });
 
-test("Pieza 2: porcentaje y regla temporal se aprueban como concepto", () => {
+test("Pieza 2: regla temporal se aprueba; porcentaje suelto sin marcador se BLOQUEA", () => {
   const r = validateGrounding(
     "Mantén un fondo de 3 a 6 meses y ahorra un 20%.",
     [], // sin hechos del usuario
   );
-  assert.equal(r.cifras_bloqueadas.length, 0);
+  // "3 a 6 meses" es regla general: concepto.
   const conceptos = r.cifras_aprobadas.filter((c) => c.categoria === "concepto");
-  assert.ok(conceptos.length >= 2);
+  assert.deepEqual(conceptos.map((c) => c.valor), [3, 6]);
+  // "ahorra un 20%" sin datos ni marcador es cifra de manual disfrazada de consejo.
+  assert.deepEqual(r.cifras_bloqueadas.map((c) => c.valor), [20]);
+});
+
+test("Pieza 2: el mismo porcentaje CON marcador de referencia se aprueba", () => {
+  const r = validateGrounding("Como referencia, el estándar ronda el 20% del ingreso.", []);
+  assert.equal(r.cifras_bloqueadas.length, 0);
+  assert.equal(r.cifras_aprobadas[0].categoria, "referencia");
+});
+
+test("Pieza 2: marcador de referencia solo cuenta en la MISMA frase", () => {
+  // El marcador vive en la primera frase; el 20% suelto, en la segunda.
+  const r = validateGrounding("Como referencia, esto es orientativo. Ahorra el 20%.", []);
+  assert.deepEqual(r.cifras_bloqueadas.map((c) => c.valor), [20]);
 });
 
 test("Pieza 2: conversión mensual→anual (×12) se deriva", () => {
@@ -225,7 +239,7 @@ test("Pieza 3 (MVP v2): etiquetas mezcladas → cierre genérico", () => {
 test("Pieza 2: la etiqueta de una cifra bloqueada no cruza el punto", () => {
   const facts = extractInputFacts("Gano 3000 al mes");
   // "ahorrar" vive en la frase SIGUIENTE: no debe etiquetar a 12700.
-  const respuesta = "Tu Reserva debería ser de 12700. La regla es ahorrar el 20%.";
+  const respuesta = "Tu Reserva debería ser de 12700. La regla es ahorrar siempre.";
   const r = validateGrounding(respuesta, facts);
 
   const doceMilSetecientos = r.cifras_bloqueadas.find((c) => c.valor === 12700);
@@ -254,6 +268,62 @@ test("Pieza 3 (passthrough): no reescribe pero sí loguea", () => {
   assert.equal(policy.bloqueado, true);
   assert.equal(policy.texto_final, respuesta);
   assert.equal(policy.logEntries.length, 1);
+});
+
+// ── TERCERA VÍA — el estándar como puente, nunca como diagnóstico ─────────────
+
+// (1) Con marcador Y petición de dato → la respuesta pasa intacta.
+test("Tercera vía: estándar etiquetado + petición del dato → intacto", () => {
+  const respuesta =
+    "Como referencia, el estándar ronda el 20% del ingreso — pero tu número real " +
+    "depende de tus gastos y tu meta. Dame ambos y te digo el tuyo exacto.";
+  const v = validateGrounding(respuesta, []);
+  const p = applyPolicy(respuesta, v, "h");
+
+  assert.equal(v.cifras_bloqueadas.length, 0);
+  assert.equal(v.cifras_aprobadas[0].categoria, "referencia");
+  assert.equal(p.bloqueado, false);
+  assert.equal(p.texto_final, respuesta, "no se toca");
+  assert.equal(countRequests(p.texto_final), 0, "no añade cierre: ya pide el dato");
+});
+
+// (2) Con marcador pero SIN petición → se permite, y el cierre v2 la cubre.
+test("Tercera vía: estándar etiquetado SIN petición → se añade el cierre", () => {
+  const respuesta = "Como referencia, el estándar ronda el 20% del ingreso.";
+  const v = validateGrounding(respuesta, []);
+  const p = applyPolicy(respuesta, v, "h");
+
+  assert.equal(v.cifras_bloqueadas.length, 0);
+  assert.equal(p.bloqueado, false);
+  assert.ok(p.texto_final.startsWith("Como referencia"), "la referencia sobrevive");
+  assert.ok(p.texto_final.includes("20%"), "el estándar sigue ahí");
+  assert.equal(countRequests(p.texto_final), 1, "exactamente un cierre");
+});
+
+// (3) Sin marcador → cifra de manual disfrazada de diagnóstico: frase eliminada.
+test("Tercera vía: cifra de manual sin marcador → frase eliminada (caso QA)", () => {
+  const respuesta = "La cifra clave es el 20% de tus ingresos netos.";
+  const v = validateGrounding(respuesta, []);
+  const p = applyPolicy(respuesta, v, "h");
+
+  assert.deepEqual(v.cifras_bloqueadas.map((c) => c.valor), [20]);
+  assert.equal(p.bloqueado, true);
+  assert.ok(!p.texto_final.includes("20%"), "el estándar disfrazado desaparece");
+  assert.ok(!p.texto_final.includes("cifra clave"));
+  assert.equal(countRequests(p.texto_final), 1);
+});
+
+// (4) Cifra fundamentada en datos del usuario → intacta, la tercera vía no aplica.
+test("Tercera vía: cifra con grounding en datos del usuario → intacta", () => {
+  const facts = extractInputFacts("Gano 3000 al mes y gasto 2000");
+  const respuesta = "Puedes ahorrar 1000 al mes.";
+  const v = validateGrounding(respuesta, facts);
+  const p = applyPolicy(respuesta, v, "h");
+
+  assert.equal(v.cifras_bloqueadas.length, 0);
+  assert.equal(p.bloqueado, false);
+  assert.equal(p.texto_final, respuesta);
+  assert.equal(countRequests(p.texto_final), 0);
 });
 
 // ── PIEZA 4 — esquema Zod ──────────────────────────────────────────────────────

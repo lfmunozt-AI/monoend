@@ -1,7 +1,9 @@
 // PIEZA 3 — Política de acción + log.
 //
 // A partir del resultado del validador (Pieza 2):
-//   · Si NO hay cifras bloqueadas → se entrega la respuesta tal cual.
+//   · Si NO hay cifras bloqueadas → se entrega la respuesta tal cual, SALVO que
+//     cite un estándar como referencia sin pedir el dato personal: entonces se
+//     le añade el cierre (tercera vía, ver `containsDataRequest`).
 //   · Si HAY cifras bloqueadas → se aplica la política configurable:
 //       - MODO MVP (v2): la frase que contiene el monto inventado se ELIMINA
 //         entera y, si hubo al menos una eliminación, se añade UNA SOLA línea
@@ -106,7 +108,7 @@ function norm(s: string): string {
 
 // Verbos con los que el Consigliere cierra proponiendo o pidiendo un dato.
 const PROPOSAL_RE =
-  /\b(te propongo|propongo|mi propuesta|siguiente paso|empecemos|empieza por|hagamos|comparteme|compartes|comparte|dime|cuentame|enviame|mandame|necesito)\b/;
+  /\b(te propongo|propongo|mi propuesta|siguiente paso|empecemos|empieza por|hagamos|comparteme|compartes|comparte|dame|damelo|pasame|indicame|facilitame|dime|cuentame|enviame|mandame|necesito)\b/;
 
 /** Última frase no vacía del texto. */
 function lastSentence(text: string): string {
@@ -126,6 +128,18 @@ function endsWithRequestOrProposal(text: string): boolean {
   if (!last) return false;
   if (last.endsWith("?")) return true;
   return PROPOSAL_RE.test(norm(last));
+}
+
+/**
+ * ¿La respuesta pide un dato EN ALGÚN punto, no necesariamente al final?
+ *
+ * Es el requisito de la tercera vía: un estándar puede citarse como referencia
+ * solo si la respuesta, en conjunto, reclama el dato personal que falta. Si no
+ * lo hace, el cierre v2 se añade para cubrirla.
+ */
+function containsDataRequest(text: string): boolean {
+  if (text.includes("?")) return true;
+  return PROPOSAL_RE.test(norm(text));
 }
 
 // ── Segmentación y limpieza ───────────────────────────────────────────────────
@@ -192,6 +206,7 @@ export function applyPolicy(
 ): PolicyResult {
   const { mode = "mvp", dataHint } = options;
   const blocked = validation.cifras_bloqueadas;
+  const referencias = validation.cifras_aprobadas.filter((c) => c.categoria === "referencia");
 
   const logEntries: GuardrailLogEntry[] = blocked.map((b) => ({
     cifra_bloqueada: b.valor,
@@ -201,12 +216,20 @@ export function applyPolicy(
     pregunta_hash: preguntaHash,
   }));
 
-  if (blocked.length === 0) {
-    return { texto_final: modelResponse, bloqueado: false, logEntries };
+  // MODO passthrough: nunca reescribe, solo loguea.
+  if (mode === "passthrough") {
+    return { texto_final: modelResponse, bloqueado: blocked.length > 0, logEntries };
   }
 
-  if (mode === "passthrough") {
-    return { texto_final: modelResponse, bloqueado: true, logEntries };
+  if (blocked.length === 0) {
+    // TERCERA VÍA: la respuesta cita un estándar etiquetado como referencia. Se
+    // permite, pero un estándar sin petición del dato personal se lee como
+    // diagnóstico. Si la respuesta no reclama el dato, el cierre lo reclama.
+    if (referencias.length > 0 && !containsDataRequest(modelResponse)) {
+      const texto_final = appendClosing(cleanup(modelResponse), buildClosingRequest([], dataHint));
+      return { texto_final, bloqueado: false, logEntries };
+    }
+    return { texto_final: modelResponse, bloqueado: false, logEntries };
   }
 
   // MODO MVP (v2): elimina las frases con montos inventados y cierra UNA vez.
