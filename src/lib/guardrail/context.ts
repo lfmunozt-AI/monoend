@@ -11,28 +11,113 @@ function norm(s: string): string {
   return s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
 }
 
-// ── Frase que contiene una cifra ─────────────────────────────────────────────
-const SENTENCE_END = [".", "!", "?", "\n"];
+// ── Segmentador de oraciones — ÚNICO en el sistema, NUMERIC-SAFE ──────────────
+//
+// BUG QA: "tu sobrante mensual de 1.000 €" salía como "tu sobrante mensual de 1."
+// porque el splitter cortaba en el punto de los millares. Este es el ÚNICO
+// segmentador del sistema; policy.ts y output-validator.ts lo consumen para que
+// eliminación de frases, `violatingSentences` y `sentenceRangeAt` corten igual.
+//
+// Reglas de corte (un `[.!?]` es límite de frase solo si TODAS se cumplen):
+//   1. No está entre dígitos → respeta 1.000 · 3,5 · 1.234,56.
+//   2. No va tras una abreviatura común (Sr., etc., p.ej., núm., …).
+//   3. Va seguido de espacio + inicio de frase nueva (mayúscula/¿/¡/comilla/
+//      dígito), o de fin de texto.
+// El salto de línea `\n` es siempre límite (separa párrafos).
+
+interface Sentence {
+  /** Texto del segmento, delimitadores incluidos (concatenar reproduce el original). */
+  text: string;
+  start: number;
+  end: number;
+}
+
+// Abreviaturas tras las que un punto NO cierra frase. Sin acentos (se comparan
+// sobre `norm`). "p.ej" cubre el punto final de "p.ej."; el interno lo salva ya
+// la regla de "espacio después".
+const ABBREVIATIONS = new Set([
+  "sr", "sra", "srta", "dr", "dra", "d", "dna", "ud", "uds", "vd", "vds",
+  "etc", "vs", "av", "avda", "num", "nro", "art", "pag", "ej", "aprox",
+  "max", "min", "cap", "fig", "pp", "ss", "esq", "izq", "dcha", "tel",
+]);
+
+const DIGIT = /\d/;
+const SENTENCE_START = /[\p{Lu}¿¡"«'(0-9]/u;
+
+/** ¿El `[.!?]` en la posición `i` cierra realmente una frase? */
+function isSentenceBoundary(text: string, i: number): boolean {
+  const ch = text[i];
+  if (ch !== "." && ch !== "!" && ch !== "?") return false;
+
+  // (1) Entre dígitos: separador de millares/decimal. No corta.
+  if (DIGIT.test(text[i - 1] ?? "") && DIGIT.test(text[i + 1] ?? "")) return false;
+
+  // (2) Tras abreviatura común (solo aplica al punto).
+  if (ch === ".") {
+    const m = /([\p{L}]+)$/u.exec(text.slice(Math.max(0, i - 12), i));
+    if (m && ABBREVIATIONS.has(norm(m[1]))) return false;
+  }
+
+  // (3) Fin de texto, o espacio + inicio de frase nueva.
+  const rest = text.slice(i + 1);
+  if (rest === "") return true;
+  const m = /^\s+(\S)/.exec(rest);
+  if (!m) return false; // sin espacio tras el signo → no es límite (p.ej "p.ej")
+  return SENTENCE_START.test(m[1]);
+}
 
 /**
- * Límites [start, end) de la frase que contiene el rango dado. La frase es la
- * unidad de decisión del guardarraíl: se elimina entera, y un marcador de
- * referencia solo vale si vive en la MISMA frase que la cifra.
+ * Parte el texto en segmentos con offsets. Partición contigua: concatenar
+ * `seg.text` reproduce el original EXACTO (delimitadores incluidos). Es el núcleo
+ * que usan `splitSentences`, `sentenceRangeAt` y la eliminación de frases.
+ */
+export function segmentSentences(text: string): Sentence[] {
+  const segs: Sentence[] = [];
+  let start = 0;
+  let i = 0;
+  while (i < text.length) {
+    if (text[i] === "\n" || isSentenceBoundary(text, i)) {
+      // Absorbe un run contiguo de signos y saltos ("?!", ".\n\n").
+      let j = i + 1;
+      while (j < text.length && (text[j] === "\n" || ".!?".includes(text[j]))) j++;
+      segs.push({ text: text.slice(start, j), start, end: j });
+      start = j;
+      i = j;
+    } else {
+      i++;
+    }
+  }
+  if (start < text.length) segs.push({ text: text.slice(start), start, end: text.length });
+  return segs.length ? segs : [{ text, start: 0, end: text.length }];
+}
+
+/**
+ * Utilidad canónica: oraciones del texto como strings recortados y no vacíos.
+ * Numeric-safe. Es la que deben usar todos los consumidores que no necesiten
+ * offsets.
+ */
+export function splitSentences(text: string): string[] {
+  return segmentSentences(text)
+    .map((s) => s.text.trim())
+    .filter(Boolean);
+}
+
+/**
+ * Límites [start, end) de la frase que contiene el rango dado. `end` excluye la
+ * puntuación de cierre y los espacios finales (los consumidores hacen trim). La
+ * frase es la unidad de decisión del guardarraíl: se elimina entera, y un
+ * marcador de referencia solo vale si vive en la MISMA frase que la cifra.
  */
 export function sentenceRangeAt(text: string, from: number, to: number): [number, number] {
-  let start = 0;
-  for (const ch of SENTENCE_END) {
-    const i = text.lastIndexOf(ch, from - 1);
-    if (i !== -1 && i + 1 > start) start = i + 1;
+  for (const seg of segmentSentences(text)) {
+    if (from >= seg.start && from < seg.end) {
+      // Recorta la puntuación/espacios de cierre para devolver solo el contenido.
+      let end = seg.end;
+      while (end > seg.start && /[.!?\n\s]/.test(text[end - 1] ?? "")) end--;
+      return [seg.start, Math.max(end, to)];
+    }
   }
-
-  let end = text.length;
-  for (const ch of SENTENCE_END) {
-    const i = text.indexOf(ch, to);
-    if (i !== -1 && i < end) end = i;
-  }
-
-  return [start, end];
+  return [0, text.length];
 }
 
 // ── Marcador de referencia ───────────────────────────────────────────────────

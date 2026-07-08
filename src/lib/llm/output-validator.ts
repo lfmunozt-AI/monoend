@@ -24,7 +24,7 @@ import {
   CANONICAL_DISCLAIMER,
   BRANDING_REWRITES,
 } from './validator-rules';
-import { sentenceRangeAt } from '../guardrail/context';
+import { sentenceRangeAt, segmentSentences } from '../guardrail/context';
 import {
   cleanup,
   endsWithRequestOrProposal,
@@ -308,9 +308,6 @@ const SAFE_RESPONSE: Record<Language, string> = {
     "What's the goal you want to conquer?",
 };
 
-// Segmenta conservando los delimitadores (mismo criterio que el guardarraíl v2).
-const SENTENCE_SPLIT_RE = /[^.!?\n]*[.!?\n]+|[^.!?\n]+$/g;
-
 /** El texto normalizado de una oración, sin su signo final, para comparar. */
 function sentenceKey(segment: string): string {
   return segment.trim().replace(/[.!?]+$/, '').trim();
@@ -344,8 +341,9 @@ export function enforceOutputPolicy(text: string, validation: ValidationResult):
   const lang = detectLanguage(text);
   const banned = new Set(validation.violatingSentences.map(sentenceKey));
 
-  const kept = (text.match(SENTENCE_SPLIT_RE) ?? [text])
-    .filter((segment) => !banned.has(sentenceKey(segment)))
+  const kept = segmentSentences(text)
+    .filter((seg) => !banned.has(sentenceKey(seg.text)))
+    .map((seg) => seg.text)
     .join('');
 
   const limpio = cleanup(kept);

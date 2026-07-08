@@ -23,6 +23,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { BlockedFigure, GroundingResult } from "./validate";
 import { detectLanguage, DEFAULT_LANGUAGE, type Language } from "../language";
+import { segmentSentences, splitSentences } from "./context";
 
 export type PolicyMode = "mvp" | "passthrough";
 
@@ -173,13 +174,9 @@ const PROPOSAL_RE = new RegExp(
   ")\\b",
 );
 
-/** Última frase no vacía del texto. */
+/** Última frase no vacía del texto (segmentador canónico, numeric-safe). */
 function lastSentence(text: string): string {
-  const parts = text
-    .split(/(?<=[.!?])\s+|\n+/)
-    .map((s) => s.trim())
-    .filter(Boolean);
-  return parts.at(-1) ?? "";
+  return splitSentences(text).at(-1) ?? "";
 }
 
 /**
@@ -208,24 +205,7 @@ export function containsDataRequest(text: string): boolean {
   return PROPOSAL_RE.test(norm(text));
 }
 
-// ── Segmentación y limpieza ───────────────────────────────────────────────────
-
-// Segmenta el texto en frases conservando los delimitadores, de modo que
-// concatenar los segmentos reproduce el original exacto.
-interface Segment {
-  text: string;
-  start: number;
-  end: number;
-}
-function splitSentences(text: string): Segment[] {
-  const re = /[^.!?\n]*[.!?\n]+|[^.!?\n]+$/g;
-  const segs: Segment[] = [];
-  for (const m of text.matchAll(re)) {
-    const start = m.index ?? 0;
-    segs.push({ text: m[0], start, end: start + m[0].length });
-  }
-  return segs.length ? segs : [{ text, start: 0, end: text.length }];
-}
+// ── Limpieza ───────────────────────────────────────────────────────────────
 
 /**
  * Tras eliminar frases quedan espacios dobles y líneas huérfanas. Se colapsan
@@ -249,7 +229,7 @@ function removeBlockedSentences(
   text: string,
   blocked: BlockedFigure[],
 ): { texto: string; eliminadas: number } {
-  const segments = splitSentences(text);
+  const segments = segmentSentences(text);
   const kept: string[] = [];
   let eliminadas = 0;
 
