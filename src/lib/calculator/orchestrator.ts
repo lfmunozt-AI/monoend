@@ -85,7 +85,12 @@ export function buildVerifiedContext(userMessage: string): VerifiedContext {
   const byLabel = firstByLabel(facts);
 
   const realidad: Linea[] = [];
-  const referencias: Linea[] = [];
+  // Las referencias se guardan ya renderizadas: su titular es el PORCENTAJE
+  // (el estándar) y el monto es solo su aplicación al caso del usuario. No
+  // alimentan cifrasCalculadas, así que no necesitan `valor`.
+  const referencias: string[] = [];
+  const refLine = (etiqueta: string, pct: number, monto: number) =>
+    `- ${etiqueta}: ${pct}% del ingreso (= ${monto} €/mes en tu caso)`;
 
   const ingreso = byLabel.get("ingreso");
   const gasto = byLabel.get("gasto");
@@ -118,15 +123,11 @@ export function buildVerifiedContext(userMessage: string): VerifiedContext {
           });
         }
       }
-      // Referencia normativa: NO es un dato del usuario, va aparte y fuera de
-      // cifrasCalculadas.
+      // Referencia normativa: el estándar es el %, el monto es su aplicación al
+      // caso. NO es un dato del usuario y NO entra en cifrasCalculadas.
       const ref = porcentajeDe(ingreso, AHORRO_SUGERIDO_PCT);
       if (ref.ok) {
-        referencias.push({
-          etiqueta: "referencia_ahorro_sugerido",
-          valor: ref.valor,
-          formula: "estándar 10% del ingreso — usar solo como referencia etiquetada según la tercera vía",
-        });
+        referencias.push(refLine("referencia_ahorro_sugerido", AHORRO_SUGERIDO_PCT, ref.valor));
       }
     }
   } else if (ingreso !== undefined) {
@@ -134,9 +135,9 @@ export function buildVerifiedContext(userMessage: string): VerifiedContext {
     realidad.push({ etiqueta: "ingreso_mensual", valor: ingreso, formula: "dato que aportaste" });
     const r = regla503020(ingreso);
     if (r.ok) {
-      referencias.push({ etiqueta: "referencia_necesidades", valor: r.necesidades, formula: "estándar 50% del ingreso" });
-      referencias.push({ etiqueta: "referencia_ocio", valor: r.ocio, formula: "estándar 30% del ingreso" });
-      referencias.push({ etiqueta: "referencia_ahorro", valor: r.ahorro, formula: "estándar 20% del ingreso" });
+      referencias.push(refLine("referencia_necesidades", 50, r.necesidades));
+      referencias.push(refLine("referencia_ocio", 30, r.ocio));
+      referencias.push(refLine("referencia_ahorro", 20, r.ahorro));
     }
   }
 
@@ -187,8 +188,8 @@ export function buildVerifiedContext(userMessage: string): VerifiedContext {
   if (referencias.length > 0) {
     if (secciones.length > 0) secciones.push("");
     secciones.push(
-      "REFERENCIAS ESTÁNDAR (NO son datos del usuario; solo puedes citarlas etiquetadas como referencia, nunca como su cifra real):",
-      ...referencias.map(render),
+      "REFERENCIAS ESTÁNDAR (NO son datos del usuario; solo puedes citarlas etiquetadas como referencia, nunca como su cifra real; NO las menciones en preguntas de capacidad):",
+      ...referencias,
     );
   }
 

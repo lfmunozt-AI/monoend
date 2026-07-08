@@ -35,15 +35,31 @@ test("Fallo B (1): pregunta de capacidad → 12000 del sobrante, NUNCA 3600", ()
 
 test("Fallo B (2): la referencia va en su sección, etiquetada, y FUERA de cifrasCalculadas", () => {
   const { bloque, cifrasCalculadas } = buildVerifiedContext("gano 3000, gasto 2000");
-  assert.ok(
-    bloque.includes("referencia_ahorro_sugerido: 300"),
-    "el 300 aparece SOLO como referencia etiquetada",
-  );
   assert.ok(bloque.includes("REFERENCIAS ESTÁNDAR"), "sección de referencias presente");
   assert.ok(
     !cifrasCalculadas.includes(300),
     "300 NO alimenta cifrasCalculadas: sin marcador debe poder bloquearse",
   );
+});
+
+// ── BUG 2 — referencia como % personalizado; separación capacidad/norma ──────
+test("BUG 2: la referencia es un PORCENTAJE, con el monto como aplicación al caso", () => {
+  const { bloque, cifrasCalculadas } = buildVerifiedContext("gano 3000, gasto 2000");
+  assert.ok(
+    bloque.includes("referencia_ahorro_sugerido: 10% del ingreso (= 300 €/mes en tu caso)"),
+    `formato nuevo esperado, bloque:\n${bloque}`,
+  );
+  // El estándar es el %, no el monto: 300 sigue fuera de cifrasCalculadas.
+  assert.ok(!cifrasCalculadas.includes(300));
+});
+
+test("BUG 2: la sección de REALIDAD no contiene ninguna referencia (capacidad limpia)", () => {
+  const { bloque } = buildVerifiedContext("gano 3000, gasto 2000");
+  const realidad = bloque.split("REFERENCIAS ESTÁNDAR")[0];
+  assert.ok(!realidad.includes("referencia_"), "la sección de capacidad no cita normas");
+  assert.ok(!realidad.includes("10%"), "ni el porcentaje normativo");
+  // La capacidad real SÍ está para responder a preguntas de capacidad.
+  assert.ok(realidad.includes("capacidad_ahorro_anual: 12000"));
 });
 
 test("Fallo B (3): no hay re-etiquetado — el sobrante se llama sobrante, no ingreso", () => {

@@ -13,6 +13,55 @@ import { applyPolicy } from "./policy";
 import { parseModelOutput } from "./schema";
 import { parseDigitAmount, findNumberMentions } from "./numbers";
 import { runGuardrail } from "./index";
+import { splitSentences, segmentSentences, sentenceRangeAt } from "./context";
+
+// ── BUG 1 — segmentador de oraciones NUMERIC-SAFE ─────────────────────────────
+test("splitSentences: 'sobrante de 1.000 € es sólido' = 1 oración", () => {
+  assert.deepEqual(splitSentences("tu sobrante de 1.000 € es sólido"), [
+    "tu sobrante de 1.000 € es sólido",
+  ]);
+});
+
+test("splitSentences: 'gana 3,5% anual. Bien.' = 2 oraciones", () => {
+  assert.deepEqual(splitSentences("gana 3,5% anual. Bien."), ["gana 3,5% anual.", "Bien."]);
+});
+
+test("splitSentences: 1.234,56 € intacto (millares + decimales)", () => {
+  assert.deepEqual(splitSentences("Tu capacidad es 1.234,56 € este mes."), [
+    "Tu capacidad es 1.234,56 € este mes.",
+  ]);
+});
+
+test("splitSentences: no corta tras abreviatura común (etc.)", () => {
+  assert.deepEqual(splitSentences("Consulta a un asesor, etc. Ahora tu meta."), [
+    "Consulta a un asesor, etc. Ahora tu meta.",
+  ]);
+});
+
+test("segmentSentences: la partición reproduce el original exacto", () => {
+  const t = "Reserva de 9.000 €. Sobrante de 1.000 €. ¿Confirmamos?";
+  assert.equal(segmentSentences(t).map((s) => s.text).join(""), t);
+});
+
+test("BUG 1: eliminar la frase infractora no rompe la vecina con millares", () => {
+  const facts = extractInputFacts("gano 3000, gasto 2000");
+  // 1000 fundamentado (dato derivado); 27000 inventado.
+  const respuesta = "Tu sobrante de 1.000 € es sólido. El piso cuesta 27.000 €.";
+  const val = validateGrounding(respuesta, facts, [1000]);
+  const policy = applyPolicy(respuesta, val, "h");
+
+  assert.ok(policy.texto_final.includes("1.000 €"), "la cifra con millares queda ENTERA");
+  assert.ok(policy.texto_final.includes("Tu sobrante de 1.000 € es sólido"), "frase vecina completa");
+  assert.ok(!policy.texto_final.includes("27.000"), "la inventada desaparece");
+  assert.ok(!/\bde 1\.$/m.test(policy.texto_final), "NO queda el fragmento huérfano 'de 1.'");
+});
+
+test("BUG 1: sentenceRangeAt no corta dentro de una cifra con millares", () => {
+  const t = "Tu sobrante de 1.000 € es sólido y estable.";
+  const pos = t.indexOf("1.000") + 2; // dentro del punto de millares
+  const [start, end] = sentenceRangeAt(t, pos, pos + 1);
+  assert.equal(t.slice(start, end).trim(), "Tu sobrante de 1.000 € es sólido y estable");
+});
 
 // ── Núcleo numérico ────────────────────────────────────────────────────────────
 test("parseDigitAmount: convención es/LatAm", () => {

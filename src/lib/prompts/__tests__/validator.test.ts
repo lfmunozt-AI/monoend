@@ -302,6 +302,21 @@ test('8. sin cierre tras eliminar → se añade el cierre estándar del guardrai
   if (out.includes('15%')) throw new Error('no eliminó la garantía');
 });
 
+test('8b. BUG 1: violatingSentences devuelve la oración COMPLETA con millares', () => {
+  // La oración infractora contiene una cifra con separador de millares: no debe
+  // partirse en el punto de "27.000".
+  const v = validateConsigliereOutput(
+    'Tu meta llega en 18 meses con tu ahorro. Invierte 27.000 € en Bitcoin ya.',
+  );
+  if (v.severity !== 'block') throw new Error('esperaba block');
+  if (!v.violatingSentences.some((s) => s.includes('27.000 €') && s.includes('Bitcoin'))) {
+    throw new Error(`oración infractora partida: ${JSON.stringify(v.violatingSentences)}`);
+  }
+  const out = enforceOutputPolicy(v.text, v);
+  if (out.includes('27.000') || out.includes('Bitcoin')) throw new Error(`no eliminó: ${out}`);
+  if (!out.includes('18 meses')) throw new Error('borró la frase legítima');
+});
+
 test('9. texto limpio → intacto, sin enforcement', () => {
   const raw = 'Tu ritmo de ahorro cubre la meta en 18 meses. ¿Confirmamos 400€ el día 1?';
   const v = validateConsigliereOutput(raw);
