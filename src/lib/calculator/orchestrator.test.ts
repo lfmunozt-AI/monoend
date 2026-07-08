@@ -127,6 +127,46 @@ test("crédito EN: 'loan of 30000 over 36 months' → cuota detectada", () => {
   assert.ok(bloque.includes("referencia_cuota_credito: 926,31 €/mes"), `bloque:\n${bloque}`);
 });
 
+// ── PIEZA 1c — lista de gastos clasificada e inyectada ──────────────────────
+test("gastos: lista clasificada → vitales/no vitales/recorte/nueva_capacidad", () => {
+  const { bloque, cifrasCalculadas } = buildVerifiedContext(
+    "gano 10000 gasto 9500. Mis gastos: netflix 100, luz 50, agua 30, cerveza 80, mercado 90.",
+  );
+  assert.ok(bloque.includes("gastos_vitales: 170 € (luz 50, agua 30, mercado 90)"), `bloque:\n${bloque}`);
+  assert.ok(bloque.includes("gastos_no_vitales: 180 € (netflix 100, cerveza 80)"));
+  assert.ok(bloque.includes("recorte_propuesto_50pct: 90 € (supuesto: reducir no vitales a la mitad)"));
+  assert.ok(bloque.includes("nueva_capacidad: 590 € (sobrante 500 + recorte 90)"));
+  // Todas las cifras a grounding, incluidos los montos individuales.
+  for (const c of [170, 180, 90, 590, 100, 50, 30, 80]) {
+    assert.ok(cifrasCalculadas.includes(c), `${c} debe estar en cifrasCalculadas`);
+  }
+});
+
+test("gastos: los desconocidos se listan aparte, sin asumir nada", () => {
+  const { bloque } = buildVerifiedContext(
+    "gano 3000 gasto 2000. Mis gastos: netflix 100, veterinario 200.",
+  );
+  assert.ok(bloque.includes("gastos_sin_clasificar: veterinario 200 — preguntar si son fijos imprescindibles"), `bloque:\n${bloque}`);
+  // El desconocido NO entra al recorte (recorte solo sobre netflix 100 → 50).
+  assert.ok(bloque.includes("recorte_propuesto_50pct: 50 €"));
+  assert.ok(!bloque.includes("gastos_vitales"), "veterinario no es vital");
+});
+
+test("gastos: menos de 2 pares → no se trata como lista", () => {
+  const { bloque } = buildVerifiedContext("gano 3000 gasto 2000. pago netflix 100.");
+  assert.ok(!bloque.includes("gastos_no_vitales"), "un solo gasto no dispara la clasificación");
+});
+
+test("gastos + crédito conviven: cuota y clasificación en el mismo bloque", () => {
+  const { bloque } = buildVerifiedContext(
+    "gano 10000 gasto 9500. financiar un carro de 30000 a 36 meses. Gastos: netflix 100, luz 50, mercado 90.",
+  );
+  assert.ok(bloque.includes("referencia_cuota_credito"), "la cuota sigue ahí");
+  assert.ok(bloque.includes("gastos_no_vitales: 100 € (netflix 100)"), "y la clasificación también");
+  // El carro (30000) no se cuela como gasto; el crédito lo consume aparte.
+  assert.ok(!bloque.includes("carro"), "el principal del crédito no entra a la lista de gastos");
+});
+
 // ── PIEZA 3 — validateGrounding con cifrasCalculadas ────────────────────────
 test("validateGrounding con cifrasCalculadas: aprueba 1000 exacto, bloquea 999", () => {
   const cifras = [1000];

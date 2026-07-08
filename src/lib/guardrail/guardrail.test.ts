@@ -57,6 +57,36 @@ test("propuesta sin pregunta → intacta", () => {
   assert.equal(rewriteDelegativeClosing(texto, "es"), texto);
 });
 
+// ── PIEZA 3 — cierre único garantizado (fix del doble cierre) ─────────────────
+function countQuestions(t: string): number {
+  return (t.match(/\?/g) ?? []).length;
+}
+
+test("PIEZA 3: delegativo TRAS cierre válido → queda solo el válido (una pregunta)", () => {
+  const out = rewriteDelegativeClosing(
+    "Tu sobrante es 500 €. ¿Cuál es tu ingreso neto mensual? ¿Qué gastos podrías reducir?",
+    "es",
+  );
+  assert.equal(out, "Tu sobrante es 500 €. ¿Cuál es tu ingreso neto mensual?");
+  assert.equal(countQuestions(out), 1, "una sola pregunta final");
+  assert.ok(!out.includes("Me compartes"), "no añade el cierre estándar: ya pedía un dato");
+});
+
+test("PIEZA 3: delegativo solo → reemplazado por el cierre de insumo", () => {
+  const out = rewriteDelegativeClosing("Tu sobrante es 500 €. ¿Qué gastos podrías reducir?", "es");
+  assert.ok(out.includes("¿Me compartes tus gastos principales"));
+  assert.equal(countQuestions(out), 1);
+});
+
+test("PIEZA 3: dos cierres válidos duplicados → dedup a uno", () => {
+  const out = rewriteDelegativeClosing(
+    "Tu sobrante es 500 €. ¿Cuál es tu ingreso neto mensual? ¿Cuál es tu ingreso neto mensual?",
+    "es",
+  );
+  assert.equal(out, "Tu sobrante es 500 €. ¿Cuál es tu ingreso neto mensual?");
+  assert.equal(countQuestions(out), 1, "el duplicado se colapsa");
+});
+
 // ── BUG 1 — segmentador de oraciones NUMERIC-SAFE ─────────────────────────────
 test("splitSentences: 'sobrante de 1.000 € es sólido' = 1 oración", () => {
   assert.deepEqual(splitSentences("tu sobrante de 1.000 € es sólido"), [
