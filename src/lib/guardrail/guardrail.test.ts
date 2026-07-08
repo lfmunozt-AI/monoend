@@ -144,7 +144,7 @@ test("Pieza 3: sin bloqueos → respuesta intacta, sin log", () => {
   assert.equal(policy.logEntries.length, 0);
 });
 
-test("Pieza 3 (MVP): reescribe la frase con el monto inventado y loguea metadatos", () => {
+test("Pieza 3 (MVP v2): elimina la frase con el monto inventado y loguea metadatos", () => {
   const facts = extractInputFacts("Tengo 40000 en deudas");
   const respuesta =
     "Con tus 40000 de deuda vas bien. Pagarás 1500 de intereses al mes.";
@@ -154,10 +154,96 @@ test("Pieza 3 (MVP): reescribe la frase con el monto inventado y loguea metadato
   assert.equal(policy.bloqueado, true);
   assert.ok(policy.texto_final.includes("40000"), "conserva la frase válida");
   assert.ok(!policy.texto_final.includes("1500"), "elimina el monto inventado");
+  assert.ok(!policy.texto_final.includes("intereses al mes"), "elimina la frase ENTERA");
   assert.ok(policy.texto_final.includes("tasa de interés"), "pide el dato faltante");
   assert.equal(policy.logEntries.length, 1);
   assert.equal(policy.logEntries[0].cifra_bloqueada, 1500);
   assert.equal(policy.logEntries[0].pregunta_hash, "hash123");
+});
+
+// Contar apariciones de la petición de cierre: el bug de QA era la plantilla
+// repetida N veces, una por cada cifra sin grounding.
+function countRequests(text: string): number {
+  return (text.match(/Para darte/g) ?? []).length;
+}
+
+test("Pieza 3 (MVP v2): 3 cifras sin grounding → UNA sola línea de cierre", () => {
+  const facts = extractInputFacts("Gano 3000 al mes");
+  // Cifras elegidas para NO ser múltiplos limpios de 3000 (si no, el validador
+  // las aprobaría como derivadas y no habría nada que eliminar).
+  const respuesta =
+    "Tus 3000 de ingreso dan margen. " +
+    "Tu Reserva debería ser de 12700. " +
+    "Pagarás 437 de comisiones. " +
+    "El coche te costará 27000.";
+  const validation = validateGrounding(respuesta, facts);
+  assert.equal(validation.cifras_bloqueadas.length, 3, "3 montos inventados");
+
+  const policy = applyPolicy(respuesta, validation, "h");
+
+  assert.equal(countRequests(policy.texto_final), 1, "una sola petición de cierre");
+  assert.ok(!policy.texto_final.includes("437"));
+  assert.ok(!policy.texto_final.includes("12700"));
+  assert.ok(!policy.texto_final.includes("27000"));
+  assert.ok(policy.texto_final.includes("3000"), "conserva la frase fundamentada");
+  // Sin espacios dobles ni saltos huérfanos tras eliminar.
+  assert.ok(!/ {2,}/.test(policy.texto_final), "sin espacios dobles");
+  assert.ok(!/\n{3,}/.test(policy.texto_final), "sin saltos huérfanos");
+});
+
+test("Pieza 3 (MVP v2): cierre específico según la etiqueta de la cifra bloqueada", () => {
+  const facts = extractInputFacts("Gano 3000 al mes");
+  const respuesta = "Tus gastos rondan los 2750.";
+  const validation = validateGrounding(respuesta, facts);
+  const policy = applyPolicy(respuesta, validation, "h");
+
+  assert.equal(validation.cifras_bloqueadas[0].etiqueta, "gasto");
+  assert.equal(
+    policy.texto_final,
+    "Para darte esa cifra necesito tus gastos mensuales. ¿Me los compartes?",
+  );
+});
+
+test("Pieza 3 (MVP v2): etiquetas mezcladas → cierre genérico", () => {
+  const facts = extractInputFacts("Gano 3000 al mes");
+  // Las dos cifras bloqueadas apuntan a datos distintos (gasto y meta): no se
+  // puede pedir "el" dato que falta, así que el cierre es el genérico.
+  const respuesta =
+    "Tus gastos mensuales rondan los 2750, por encima de lo razonable. " +
+    "Con eso, la meta que te conviene fijar serían 90000.";
+  const validation = validateGrounding(respuesta, facts);
+  const policy = applyPolicy(respuesta, validation, "h");
+
+  assert.deepEqual(
+    validation.cifras_bloqueadas.map((c) => c.etiqueta).sort(),
+    ["gasto", "meta"],
+  );
+  assert.equal(countRequests(policy.texto_final), 1);
+  assert.ok(policy.texto_final.includes("tus gastos mensuales y tu meta"));
+});
+
+test("Pieza 2: la etiqueta de una cifra bloqueada no cruza el punto", () => {
+  const facts = extractInputFacts("Gano 3000 al mes");
+  // "ahorrar" vive en la frase SIGUIENTE: no debe etiquetar a 12700.
+  const respuesta = "Tu Reserva debería ser de 12700. La regla es ahorrar el 20%.";
+  const r = validateGrounding(respuesta, facts);
+
+  const doceMilSetecientos = r.cifras_bloqueadas.find((c) => c.valor === 12700);
+  assert.equal(doceMilSetecientos?.etiqueta, "", "sin etiqueta prestada de la frase de al lado");
+
+  // Y por tanto el cierre es el genérico, no "cuánto ahorras cada mes".
+  const policy = applyPolicy(respuesta, r, "h");
+  assert.ok(policy.texto_final.includes("tus gastos mensuales y tu meta"));
+});
+
+test("Pieza 3 (MVP v2): si ya cierra con petición, no duplica el cierre", () => {
+  const facts = extractInputFacts("Gano 3000 al mes");
+  const respuesta = "Pagarás 437 de comisiones. ¿Cuánto gastas al mes?";
+  const validation = validateGrounding(respuesta, facts);
+  const policy = applyPolicy(respuesta, validation, "h");
+
+  assert.equal(policy.texto_final, "¿Cuánto gastas al mes?");
+  assert.equal(countRequests(policy.texto_final), 0, "no añade cierre propio");
 });
 
 test("Pieza 3 (passthrough): no reescribe pero sí loguea", () => {

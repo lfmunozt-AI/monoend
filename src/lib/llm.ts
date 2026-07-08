@@ -21,6 +21,13 @@ export interface LLMError {
 const MODEL_PRIMARY = 'gpt-4o-mini';
 const TIMEOUT_MS = 30_000;
 
+/**
+ * Cap de generación del chat. El Consigliere responde en ≤120 palabras (ver
+ * REGLAS DE CONDUCTA en prompts/consigliere.ts); 400 tokens dan margen de sobra
+ * y recortan la latencia, que es lineal en tokens generados.
+ */
+const CHAT_MAX_TOKENS = 400;
+
 function getClient(): OpenAI {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
@@ -153,6 +160,12 @@ export async function callLLMJson<T = unknown>(
   }
 }
 
+/** Opciones del chat. Todas opcionales: la firma previa sigue siendo válida. */
+export interface ChatOptions {
+  /** Cap de tokens generados. Por defecto `CHAT_MAX_TOKENS` (400). */
+  maxTokens?: number;
+}
+
 /**
  * Variante con historial de conversación para el chat CFO.
  * Acepta el array completo de mensajes (incluyendo el último mensaje del usuario).
@@ -161,6 +174,7 @@ export async function callLLMJson<T = unknown>(
 export async function callLLMWithHistory(
   messages: Array<{ role: 'user' | 'assistant'; content: string }>,
   systemPrompt: string,
+  options: ChatOptions = {},
 ): Promise<LLMResponse> {
   let client: OpenAI;
 
@@ -171,12 +185,13 @@ export async function callLLMWithHistory(
   }
 
   const lastPrompt = messages.at(-1)?.content ?? '';
+  const maxTokens = Math.min(options.maxTokens ?? CHAT_MAX_TOKENS, CHAT_MAX_TOKENS);
 
   try {
     const completion = await client.chat.completions.create({
       model: MODEL_PRIMARY,
       temperature: 0.4,
-      max_tokens: 600,
+      max_tokens: maxTokens,
       messages: [
         { role: 'system', content: systemPrompt },
         ...messages.map((m) => ({ role: m.role, content: m.content })),

@@ -35,7 +35,7 @@ Una transacción es Fuga de Poder si cumple al menos uno:
 
 LEYES DEL PODER FINANCIERO
 Asigna la ley más relevante según el patrón detectado:
-- "Ley de la Reserva": el gasto reduce la capacidad de Reserva de Soberanía
+- "Ley de la Reserva": el gasto reduce la capacidad de Reserva de Imprevistos
 - "Ley del Foco": recursos dispersos en múltiples frentes sin retorno
 - "Ley del Escudo": gasto que debería estar cubierto por Escudo Familiar
 - "Ley de la Visibilidad": gasto opaco que dificulta el control financiero

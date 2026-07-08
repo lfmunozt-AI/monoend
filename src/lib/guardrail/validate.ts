@@ -13,7 +13,7 @@
 // Código PURO (regex + aritmética), edge-safe, SIN llamadas a ningún LLM.
 
 import { findNumberMentions, dedupeOverlaps, type NumberMention } from "./numbers";
-import { detectCurrency, isPercent, isTimeUnit, type Moneda } from "./context";
+import { detectCurrency, detectLabel, isPercent, isTimeUnit, type Moneda } from "./context";
 import type { VerifiedFact } from "./extract";
 
 /** Por qué se aprobó una cifra. */
@@ -32,7 +32,13 @@ export interface BlockedFigure {
   texto: string;
   moneda: Moneda;
   motivo: string;
-  /** Posición en la respuesta — la Pieza 3 la usa para reescribir la frase. */
+  /**
+   * A qué se refería la cifra inventada ("gasto", "ingreso", "meta"…) según las
+   * palabras cercanas. La Pieza 3 la usa para pedir el dato que falta de forma
+   * específica en vez de genérica. "" si no hay contexto claro.
+   */
+  etiqueta: string;
+  /** Posición en la respuesta — la Pieza 3 la usa para eliminar la frase. */
   start: number;
   end: number;
 }
@@ -162,6 +168,7 @@ export function validateGrounding(
     bloqueadas.push({
       ...base(m, moneda),
       motivo: "monto sin respaldo en los datos del usuario",
+      etiqueta: labelWithinSentence(modelResponse, m),
       start: m.start,
       end: m.end,
     });
@@ -172,4 +179,33 @@ export function validateGrounding(
 
 function base(m: NumberMention, moneda: Moneda) {
   return { valor: m.value, texto: m.text, moneda };
+}
+
+const SENTENCE_END = [".", "!", "?", "\n"];
+
+/**
+ * Etiqueta de una cifra bloqueada, acotada a SU frase.
+ *
+ * `detectLabel` mira una ventana de ±40 caracteres, que puede saltar el punto y
+ * capturar una palabra de la frase siguiente ("…ser de 12700. La regla es
+ * ahorrar el 20%" etiquetaría 12700 como "ahorro"). La Pieza 3 elimina la frase
+ * entera y pide el dato que faltaba EN ESA frase, así que la etiqueta debe salir
+ * de ahí y de ningún otro sitio. Mejor "" (cierre genérico) que una etiqueta
+ * prestada de la frase de al lado.
+ */
+function labelWithinSentence(text: string, m: NumberMention): string {
+  let start = 0;
+  for (const ch of SENTENCE_END) {
+    const i = text.lastIndexOf(ch, m.start - 1);
+    if (i !== -1 && i + 1 > start) start = i + 1;
+  }
+
+  let end = text.length;
+  for (const ch of SENTENCE_END) {
+    const i = text.indexOf(ch, m.end);
+    if (i !== -1 && i < end) end = i;
+  }
+
+  const slice = text.slice(start, end);
+  return detectLabel(slice, { ...m, start: m.start - start, end: m.end - start });
 }

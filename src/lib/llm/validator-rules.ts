@@ -142,3 +142,44 @@ export const DISCLAIMER_REGEXES: ReadonlyArray<RegExp> = [
  */
 export const CANONICAL_DISCLAIMER =
   'Esto no es asesoramiento financiero personalizado; consulta a un asesor regulado antes de actuar.';
+
+/**
+ * Categoría "branding" — reescritura determinista de terminología prohibida.
+ *
+ * La casa no usa la palabra "Soberanía" de cara al usuario (ver CLAUDE.md,
+ * REGLAS ABSOLUTAS 6). El fondo de emergencia se llama "Reserva de Imprevistos"
+ * en todos los idiomas.
+ *
+ * EL ORDEN ES SIGNIFICATIVO: las expresiones compuestas se resuelven antes que
+ * el residual `soberanía|soberano → dominio`. Si se invirtiera, "Reserva de
+ * Soberanía" quedaría como "Reserva de dominio". No reordenar sin revisar
+ * `applyBranding()` y sus tests.
+ *
+ * "fondo" es masculino y "Reserva" femenina: los artículos que lo preceden se
+ * absorben en la sustitución para no dejar "el Reserva de Imprevistos". Los
+ * posesivos (tu, su, mi) no marcan género y no necesitan regla propia.
+ *
+ * `preserveCase` copia la caja de la primera letra del match a la sustitución.
+ * Va activo solo donde la sustitución NO empieza por nombre propio: los
+ * artículos ("el fondo…" → "La Reserva…" a principio de frase) y el residual
+ * "dominio". "Reserva de Imprevistos" y "Dominio Financiero" son términos de la
+ * casa y van siempre capitalizados, aparezcan como aparezcan en el original.
+ *
+ * Todos los patrones llevan flags `g` + `i` (case-insensitive, global) y toleran
+ * la variante sin tilde.
+ */
+export interface BrandingRule {
+  pattern: RegExp;
+  replacement: string;
+  preserveCase?: boolean;
+}
+
+export const BRANDING_REWRITES: ReadonlyArray<BrandingRule> = [
+  { pattern: /\breserva\s+de\s+soberan[íi]a\b/gi, replacement: 'Reserva de Imprevistos' },
+  { pattern: /\breserva\s+de\s+emergencia\b/gi, replacement: 'Reserva de Imprevistos' },
+  { pattern: /\bel\s+fondo\s+de\s+emergencia\b/gi, replacement: 'la Reserva de Imprevistos', preserveCase: true },
+  { pattern: /\bun\s+fondo\s+de\s+emergencia\b/gi, replacement: 'una Reserva de Imprevistos', preserveCase: true },
+  { pattern: /\bfondo\s+de\s+emergencia\b/gi, replacement: 'Reserva de Imprevistos' },
+  { pattern: /\bsoberan[íi]a\s+financiera\b/gi, replacement: 'Dominio Financiero' },
+  { pattern: /\bsoberan(?:[íi]as?|[oa]s?)\b/gi, replacement: 'dominio', preserveCase: true },
+];

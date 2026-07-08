@@ -49,8 +49,8 @@ test('recomendación neutra con importes', () =>
 test('diagnóstico de Fuga de Poder', () =>
   assertPass('Detecté una Fuga de Poder de €87 en suscripciones no usadas el mes pasado.'));
 
-test('cálculo de Reserva de Soberanía', () =>
-  assertPass('Tu Reserva de Soberanía debería cubrir 4,5 meses de gastos fijos según tu perfil.'));
+test('cálculo de Reserva de Imprevistos', () =>
+  assertPass('Tu Reserva de Imprevistos debería cubrir 4,5 meses de gastos fijos según tu perfil.'));
 
 test('proyección Escenario de Poder', () =>
   assertPass('El Escenario de Poder con ahorro de €800/mes proyecta meta cumplida en 14 meses.'));
@@ -120,6 +120,85 @@ test('broker + ETF + garantía de rentabilidad', () =>
   assertBlock(
     'Si abres una cuenta en Trade Republic y compras el ETF IWDA, tienes asegurado un 8% anual.',
   ));
+
+// ─── Categoría branding: reescritura determinista ────────────────────────────
+
+console.log('\nCasos BRANDING (reescritura determinista, no bloqueante)');
+
+function assertRewrite(input: string, expected: string): void {
+  const r = validateConsigliereOutput(input);
+  if (r.text !== expected) {
+    throw new Error(`esperaba "${expected}" pero salió "${r.text}"`);
+  }
+  if (r.brandingRewrites.length === 0) {
+    throw new Error('esperaba al menos una reescritura de branding registrada');
+  }
+  if (!r.passed) {
+    throw new Error('branding no debe bloquear');
+  }
+}
+
+test('Reserva de Soberanía → Reserva de Imprevistos', () =>
+  assertRewrite(
+    'Tu Reserva de Soberanía cubre 4 meses.',
+    'Tu Reserva de Imprevistos cubre 4 meses.',
+  ));
+
+test('Reserva de Emergencia → Reserva de Imprevistos (case-insensitive)', () =>
+  assertRewrite(
+    'Levanta tu reserva de EMERGENCIA antes de invertir.',
+    'Levanta tu Reserva de Imprevistos antes de invertir.',
+  ));
+
+test('término de la casa siempre capitalizado, venga como venga', () =>
+  assertRewrite('mi reserva de soberanía', 'mi Reserva de Imprevistos'));
+
+test('fondo de emergencia → Reserva de Imprevistos (absorbe el artículo)', () =>
+  assertRewrite(
+    'Primero el fondo de emergencia, después la meta.',
+    'Primero la Reserva de Imprevistos, después la meta.',
+  ));
+
+test('artículo indefinido a principio de frase conserva la mayúscula', () =>
+  assertRewrite(
+    'Un fondo de emergencia no es opcional.',
+    'Una Reserva de Imprevistos no es opcional.',
+  ));
+
+test('fondo de emergencia sin artículo delante', () =>
+  assertRewrite(
+    'Construye fondo de emergencia antes de invertir.',
+    'Construye Reserva de Imprevistos antes de invertir.',
+  ));
+
+test('soberanía financiera → Dominio Financiero', () =>
+  assertRewrite(
+    'El objetivo es tu soberanía financiera.',
+    'El objetivo es tu Dominio Financiero.',
+  ));
+
+test('soberanía/soberano residual → dominio', () =>
+  assertRewrite(
+    'Recuperas soberanía sobre tu dinero y te vuelves soberano.',
+    'Recuperas dominio sobre tu dinero y te vuelves dominio.',
+  ));
+
+test('orden: compuesto antes que residual (no "Reserva de dominio")', () => {
+  const r = validateConsigliereOutput('Tu reserva de soberanía y tu soberanía financiera.');
+  if (r.text.includes('dominio') && !r.text.includes('Dominio Financiero')) {
+    throw new Error(`residual aplicado antes de tiempo: "${r.text}"`);
+  }
+  if (r.text !== 'Tu Reserva de Imprevistos y tu Dominio Financiero.') {
+    throw new Error(`salió "${r.text}"`);
+  }
+});
+
+test('texto limpio → sin reescrituras y severity ok', () => {
+  const r = validateConsigliereOutput('Tu Reserva de Imprevistos cubre 4 meses.');
+  if (r.brandingRewrites.length !== 0) throw new Error('no debía reescribir nada');
+  if (r.severity !== 'ok') throw new Error(`severity=${r.severity}`);
+  if (r.text !== 'Tu Reserva de Imprevistos cubre 4 meses.') throw new Error('texto alterado');
+});
 
 // ─── Resumen ─────────────────────────────────────────────────────────────────
 
