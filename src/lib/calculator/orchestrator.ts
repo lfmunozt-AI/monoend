@@ -15,6 +15,7 @@
 // Código PURO, edge-safe, SIN llamadas a ningún LLM.
 
 import { extractInputFacts, type VerifiedFact } from "../guardrail/extract";
+import { parseDigitAmount, findNumberMentions, dedupeOverlaps } from "../guardrail/numbers";
 import {
   sobrante,
   porcentajeDe,
@@ -23,6 +24,7 @@ import {
   regla503020,
   ratioDeuda,
   tiempoHastaMeta,
+  loanPayment,
 } from "./operations";
 
 // ── Supuestos del modelo financiero (documentados y configurables) ──────────
@@ -31,6 +33,53 @@ import {
 const HORIZONTE_MESES = 12; // proyección anual del sobrante.
 const MESES_FONDO = 6; // colchón de emergencia por defecto (tope del rango 3-6).
 const AHORRO_SUGERIDO_PCT = 10; // % del INGRESO: referencia estándar de ahorro.
+const TAE_REFERENCIA = 7; // % TAE de referencia para simular cuotas de crédito.
+
+function normaliza(s: string): string {
+  return s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+}
+
+// Palabras que señalan un escenario de crédito/financiación (ES/PT/EN).
+const LOAN_KEYWORDS =
+  /\b(credito|creditos|financiar|financiacion|financiamento|cuota|cuotas|prestamo|prestamos|emprestimo|prestacao|prestacoes|parcelas?|loan|financing|installments?)\b/;
+
+// Un número seguido de una unidad de plazo → meses del préstamo.
+const PLAZO_MESES =
+  /(\d[\d.,]*)\s*(?:meses|mes|months?|parcelas|prestacoes|cuotas)\b/;
+
+/**
+ * Detecta un escenario de crédito en el mensaje: palabra de crédito + un plazo
+ * en meses + un principal.
+ *
+ * El principal NO puede salir de `extractInputFacts`: "30000 a 36 meses" casa
+ * con el patrón de rango temporal ("N a M meses") y el extractor descarta el
+ * 30000 como si fuera una duración. Por eso se toma de `findNumberMentions`
+ * directamente: el mayor monto que no sea el plazo ni un ingreso/gasto ya
+ * etiquetado. Devuelve null si falta cualquiera de las tres señales.
+ */
+function detectLoanScenario(
+  message: string,
+  facts: VerifiedFact[],
+): { principal: number; months: number } | null {
+  const n = normaliza(message);
+  if (!LOAN_KEYWORDS.test(n)) return null;
+
+  const m = PLAZO_MESES.exec(n);
+  if (!m) return null;
+  const months = parseDigitAmount(m[1]);
+  if (!Number.isFinite(months) || months <= 0) return null;
+
+  const ingresoGasto = new Set(
+    facts.filter((f) => f.etiqueta === "ingreso" || f.etiqueta === "gasto").map((f) => f.valor),
+  );
+  const candidatos = dedupeOverlaps(findNumberMentions(message))
+    .map((x) => x.value)
+    .filter((v) => v > 0 && v !== months && !ingresoGasto.has(v));
+  if (candidatos.length === 0) return null;
+
+  const principal = Math.max(...candidatos);
+  return { principal, months };
+}
 
 export interface VerifiedContext {
   /** Bloque de texto a inyectar en el prompt ("" si no hay nada que calcular). */
@@ -174,6 +223,30 @@ export function buildVerifiedContext(userMessage: string): VerifiedContext {
     }
   }
 
+  // ── crédito/financiación → cuota simulada con TAE de referencia ───────────
+  // Excepción de grounding: a diferencia del resto de referencias, la cuota SÍ
+  // alimenta cifrasCalculadas para que el guardarraíl apruebe la cifra cuando el
+  // modelo la cite. Su etiqueta la mantiene explícitamente como simulación.
+  const cuotaCifras: number[] = [];
+  const loan = detectLoanScenario(userMessage, facts);
+  if (loan) {
+    const cuota = loanPayment({
+      principal: loan.principal,
+      months: loan.months,
+      annualRatePct: TAE_REFERENCIA,
+    });
+    if (cuota.ok) {
+      // Coma decimal (convención es/LatAm): el parser del guardarraíl lee "926,31"
+      // como 926.31. Con punto ("926.31") lo trocearía en 926 y 31 y no aprobaría
+      // la cuota citada.
+      const cuotaEs = String(cuota.valor).replace(".", ",");
+      referencias.push(
+        `- referencia_cuota_credito: ${cuotaEs} €/mes (simulación con TAE de referencia ~${TAE_REFERENCIA}% — NO es la tasa real del usuario; monto ${loan.principal} a ${loan.months} meses)`,
+      );
+      cuotaCifras.push(cuota.valor);
+    }
+  }
+
   if (realidad.length === 0 && referencias.length === 0) {
     return { bloque: "", cifrasCalculadas: [] };
   }
@@ -193,9 +266,11 @@ export function buildVerifiedContext(userMessage: string): VerifiedContext {
     );
   }
 
-  // Solo la realidad alimenta cifrasCalculadas: las referencias sin marcador
-  // deben seguir bloqueándose.
-  const cifrasCalculadas = realidad.map((l) => l.valor);
+  // La realidad alimenta cifrasCalculadas; las referencias normativas NO (una
+  // cifra normativa sin marcador debe seguir bloqueándose). Excepción: la cuota
+  // de crédito simulada SÍ entra, para que el guardarraíl apruebe la cifra que
+  // el modelo va a citar como simulación.
+  const cifrasCalculadas = [...realidad.map((l) => l.valor), ...cuotaCifras];
 
   return { bloque: secciones.join("\n"), cifrasCalculadas };
 }

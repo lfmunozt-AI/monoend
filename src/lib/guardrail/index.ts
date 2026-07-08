@@ -145,6 +145,8 @@ export {
   standardClosingRequest,
   endsWithRequestOrProposal,
   containsDataRequest,
+  isDelegativeClosing,
+  rewriteDelegativeClosing,
   cleanup,
   type PolicyMode,
   type PolicyOptions,

@@ -188,6 +188,47 @@ export function ratioDeuda(
 }
 
 /**
+ * Cuota mensual de un préstamo por el sistema francés (cuota constante).
+ *
+ *   r = tasa mensual = annualRatePct / 12 / 100
+ *   cuota = principal · r / (1 − (1 + r)^−months)
+ *
+ * Con `annualRatePct === 0` la fórmula degenera (0/0): la cuota es principal
+ * repartido linealmente, principal/months. `annualRatePct` es un PORCENTAJE
+ * (7 = 7%), coherente con el resto del motor. Redondeo a 2 decimales.
+ *
+ * Motiva la función: 30.000 a 36 meses NO es 30000/36 = 833; con TAE 7% la cuota
+ * real es ~926. Ignorar los intereses subestima la cuota en ~11%.
+ */
+export function loanPayment(params: {
+  principal: number;
+  months: number;
+  annualRatePct: number;
+}): CalcValor | CalcError {
+  const { principal, months, annualRatePct } = params;
+  const etiqueta = "cuota de préstamo";
+  const bad = guardEntradas(etiqueta, principal, months, annualRatePct);
+  if (bad) return bad;
+  if (months <= 0) {
+    return err("division_por_cero", etiqueta, "el plazo en meses debe ser mayor que 0");
+  }
+
+  if (annualRatePct === 0) {
+    const valor = round2(principal / months);
+    return { ok: true, valor, etiqueta, formula: `${principal} / ${months} meses = ${valor} (sin interés)` };
+  }
+
+  const r = annualRatePct / 12 / 100;
+  const valor = round2((principal * r) / (1 - Math.pow(1 + r, -months)));
+  return {
+    ok: true,
+    valor,
+    etiqueta,
+    formula: `${principal} a ${months} meses con TAE ${annualRatePct}% = ${valor}/mes`,
+  };
+}
+
+/**
  * Interés compuesto: capital × (1 + tasa)^años.
  * `tasaAnual` se interpreta como PORCENTAJE (5 = 5%), coherente con
  * `porcentajeDe`. Documentado así para evitar ambigüedad 0.05 vs 5.
