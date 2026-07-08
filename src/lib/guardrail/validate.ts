@@ -13,11 +13,28 @@
 // Código PURO (regex + aritmética), edge-safe, SIN llamadas a ningún LLM.
 
 import { findNumberMentions, dedupeOverlaps, type NumberMention } from "./numbers";
-import { detectCurrency, detectLabel, isPercent, isTimeUnit, type Moneda } from "./context";
+import {
+  detectCurrency,
+  detectLabel,
+  hasReferenceMarker,
+  isPercent,
+  isTimeUnit,
+  sentenceRangeAt,
+  type Moneda,
+} from "./context";
 import type { VerifiedFact } from "./extract";
 
-/** Por qué se aprobó una cifra. */
-export type Categoria = "hecho" | "concepto" | "calculo";
+/**
+ * Por qué se aprobó una cifra.
+ * - hecho:      la aportó el usuario.
+ * - calculo:    se deriva de un dato del usuario o del motor financiero.
+ * - concepto:   regla general (rango temporal) o porcentaje que explica una
+ *               cifra ya fundamentada en la misma frase.
+ * - referencia: estándar de la industria explícitamente etiquetado como tal
+ *               ("como referencia, el estándar ronda el 20%"). Es un puente de
+ *               conocimiento, no un diagnóstico: obliga a pedir el dato personal.
+ */
+export type Categoria = "hecho" | "concepto" | "calculo" | "referencia";
 
 export interface ApprovedFigure {
   valor: number;
@@ -134,12 +151,42 @@ export function validateGrounding(
 
   const factValues = facts.map((f) => f.valor);
 
+  // ¿Es una cifra MONETARIA fundamentada (hecho del usuario o cálculo sobre él)?
+  // Se necesita como predicado suelto: la suerte de un porcentaje depende de si
+  // su frase contiene una cifra fundamentada a la que esté explicando.
+  const isGroundedAmount = (m: NumberMention): boolean => {
+    if (isPercent(modelResponse, m) || isTimeUnit(modelResponse, m)) return false;
+    if (factValues.some((f) => approxEqual(m.value, f))) return true;
+    if (cifrasCalculadas.some((c) => exactMatch(m.value, c))) return true;
+    return isDerived(m.value, facts, explicitPercents);
+  };
+
   for (const m of figs) {
     const moneda = detectCurrency(modelResponse, m);
+    const [sentStart, sentEnd] = sentenceRangeAt(modelResponse, m.start, m.end);
+    const esReferencia = hasReferenceMarker(modelResponse.slice(sentStart, sentEnd));
 
-    // (b) Porcentaje → concepto, se mantiene.
+    // (b) Porcentaje. Ya NO se aprueba en bloque. Un porcentaje suelto y sin
+    // datos del usuario ("la cifra clave es el 20% de tus ingresos") es una
+    // cifra de manual disfrazada de diagnóstico: destruye la confianza.
     if (isPercent(modelResponse, m)) {
-      aprobadas.push({ ...base(m, moneda), categoria: "concepto", motivo: "porcentaje" });
+      if (factValues.some((f) => approxEqual(m.value, f))) {
+        aprobadas.push({ ...base(m, moneda), categoria: "hecho", motivo: "dato del usuario" });
+      } else if (esReferencia) {
+        // Tercera vía: estándar etiquetado como referencia → puente de conocimiento.
+        aprobadas.push({ ...base(m, moneda), categoria: "referencia", motivo: "estándar etiquetado como referencia" });
+      } else if (figs.some((o) => o !== m && o.start >= sentStart && o.start < sentEnd && isGroundedAmount(o))) {
+        // "ahorra 2000 (el 20%)": el porcentaje explica de dónde sale el 2000.
+        aprobadas.push({ ...base(m, moneda), categoria: "concepto", motivo: "porcentaje que explica una cifra fundamentada" });
+      } else {
+        bloqueadas.push({
+          ...base(m, moneda),
+          motivo: "estándar genérico presentado como diagnóstico, sin dato del usuario ni marca de referencia",
+          etiqueta: labelWithinSentence(modelResponse, m),
+          start: m.start,
+          end: m.end,
+        });
+      }
       continue;
     }
     // (b) Regla general temporal ("3 a 6 meses") → concepto, se mantiene.
@@ -164,6 +211,12 @@ export function validateGrounding(
       aprobadas.push({ ...base(m, moneda), categoria: "calculo", motivo: "cálculo sobre un dato del usuario" });
       continue;
     }
+    // (c2) Tercera vía para montos: sin grounding, pero la frase lo declara
+    // estándar/orientativo. Se permite como referencia, nunca como diagnóstico.
+    if (esReferencia) {
+      aprobadas.push({ ...base(m, moneda), categoria: "referencia", motivo: "estándar etiquetado como referencia" });
+      continue;
+    }
     // (d) Monto absoluto sin respaldo → se bloquea.
     bloqueadas.push({
       ...base(m, moneda),
@@ -181,8 +234,6 @@ function base(m: NumberMention, moneda: Moneda) {
   return { valor: m.value, texto: m.text, moneda };
 }
 
-const SENTENCE_END = [".", "!", "?", "\n"];
-
 /**
  * Etiqueta de una cifra bloqueada, acotada a SU frase.
  *
@@ -194,18 +245,7 @@ const SENTENCE_END = [".", "!", "?", "\n"];
  * prestada de la frase de al lado.
  */
 function labelWithinSentence(text: string, m: NumberMention): string {
-  let start = 0;
-  for (const ch of SENTENCE_END) {
-    const i = text.lastIndexOf(ch, m.start - 1);
-    if (i !== -1 && i + 1 > start) start = i + 1;
-  }
-
-  let end = text.length;
-  for (const ch of SENTENCE_END) {
-    const i = text.indexOf(ch, m.end);
-    if (i !== -1 && i < end) end = i;
-  }
-
+  const [start, end] = sentenceRangeAt(text, m.start, m.end);
   const slice = text.slice(start, end);
   return detectLabel(slice, { ...m, start: m.start - start, end: m.end - start });
 }

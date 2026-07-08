@@ -1,5 +1,6 @@
 // Detección de contexto alrededor de una cifra: moneda, porcentaje, unidad de
-// tiempo y etiqueta por proximidad. Código PURO, compartido por las piezas 1 y 2.
+// tiempo, marcador de referencia y etiqueta por proximidad. Código PURO,
+// compartido por las piezas 1 y 2.
 
 import type { NumberMention } from "./numbers";
 
@@ -8,6 +9,74 @@ export type Moneda = "EUR" | "USD" | "pesos" | "%" | "$" | null;
 
 function norm(s: string): string {
   return s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+}
+
+// ── Frase que contiene una cifra ─────────────────────────────────────────────
+const SENTENCE_END = [".", "!", "?", "\n"];
+
+/**
+ * Límites [start, end) de la frase que contiene el rango dado. La frase es la
+ * unidad de decisión del guardarraíl: se elimina entera, y un marcador de
+ * referencia solo vale si vive en la MISMA frase que la cifra.
+ */
+export function sentenceRangeAt(text: string, from: number, to: number): [number, number] {
+  let start = 0;
+  for (const ch of SENTENCE_END) {
+    const i = text.lastIndexOf(ch, from - 1);
+    if (i !== -1 && i + 1 > start) start = i + 1;
+  }
+
+  let end = text.length;
+  for (const ch of SENTENCE_END) {
+    const i = text.indexOf(ch, to);
+    if (i !== -1 && i < end) end = i;
+  }
+
+  return [start, end];
+}
+
+// ── Marcador de referencia ───────────────────────────────────────────────────
+// "Tercera vía": un estándar de la industria puede mencionarse como PUENTE DE
+// CONOCIMIENTO, nunca como diagnóstico. Lo que separa una cosa de la otra es que
+// la frase se etiquete explícitamente como referencia. Sin marcador, "el 20%" es
+// una cifra de manual disfrazada de respuesta personal.
+// ES/PT/EN — regla transversal del proyecto: toda lista de detección cubre los
+// tres idiomas. "como referencia" y "habitualmente" valen en ES y PT a la vez.
+const REFERENCE_MARKERS = [
+  // ES
+  "como referencia",
+  "de referencia",
+  "el estandar",
+  "suele",
+  "en general",
+  "orientativo",
+  "orientativa",
+  "habitualmente",
+  "tipicamente",
+  // PT
+  "o padrao",
+  "costuma",
+  "em geral",
+  "a titulo indicativo",
+  "indicativo",
+  "geralmente",
+  // EN
+  "as a reference",
+  "for reference",
+  "the standard",
+  "a rule of thumb",
+  "rule of thumb",
+  "typically",
+  "usually",
+  "generally",
+  "on average",
+  "ballpark",
+];
+
+/** ¿La frase presenta la cifra como estándar/orientación, no como diagnóstico? */
+export function hasReferenceMarker(sentence: string): boolean {
+  const n = norm(sentence);
+  return REFERENCE_MARKERS.some((mk) => n.includes(mk));
 }
 
 // ── Porcentaje ───────────────────────────────────────────────────────────────

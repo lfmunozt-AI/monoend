@@ -16,16 +16,20 @@ export interface OnboardingContext {
 export function buildOnboardingPrompt(context: OnboardingContext): string {
   const { nombre, idioma, pais } = context;
 
+  // Saludo SIN nombre: "The Consigliere" es el nombre interno del modelo y no se
+  // muestra al usuario en ningún idioma. El producto se llama monoend.
   const saludo: Record<OnboardingContext['idioma'], string> = {
-    es: 'Buenas. Soy The Consigliere.',
-    pt: 'Olá. Sou The Consigliere.',
-    en: 'Hello. I am The Consigliere.',
-    de: 'Guten Tag. Ich bin The Consigliere.',
-    fr: 'Bonjour. Je suis The Consigliere.',
-    sv: 'Hej. Jag är The Consigliere.',
+    es: 'Buenas.',
+    pt: 'Olá.',
+    en: 'Hello.',
+    de: 'Guten Tag.',
+    fr: 'Bonjour.',
+    sv: 'Hej.',
   };
 
-  return `Eres The Consigliere iniciando la primera sesión con ${nombre} (${pais}).
+  return `Eres The Consigliere, el modelo que da voz a monoend, iniciando la primera sesión con ${nombre} (${pais}).
+
+Está PROHIBIDO auto-nombrarte. Nunca escribas "The Consigliere" ni te presentes por tu rol ("como tu asesor"). Habla en primera persona directa.
 
 PRIMERA SESIÓN — PROTOCOLO DE DIAGNÓSTICO INICIAL
 

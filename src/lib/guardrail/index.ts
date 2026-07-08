@@ -21,6 +21,8 @@ import {
   type PolicyMode,
 } from "./policy";
 import { parseModelOutput } from "./schema";
+import { detectInjection } from "./injection";
+import type { Language } from "../language";
 
 export interface RunGuardrailOptions {
   /** Política a aplicar ante montos inventados. Por defecto "mvp". */
@@ -31,6 +33,20 @@ export interface RunGuardrailOptions {
   supabase?: SupabaseClient;
   /** Dueño del log (RLS). */
   userId?: string;
+  /**
+   * Cifras EXACTAS del motor financiero (`buildVerifiedContext`). Habilitan la
+   * rama de aprobación "cálculo verificado" del validador (validate.ts, c0), que
+   * sin esto es inalcanzable. Ver M1 de la auditoría.
+   */
+  cifrasCalculadas?: number[];
+  /** Idioma del cierre. Si no se da, se infiere de la respuesta del modelo. */
+  idioma?: Language;
+}
+
+/** Señal anti-inyección del mensaje del usuario. Nunca bloquea (M3). */
+export interface InjectionSignal {
+  detected: boolean;
+  patterns: string[];
 }
 
 export interface GuardrailOutcome {
@@ -46,6 +62,8 @@ export interface GuardrailOutcome {
   estructurada: boolean;
   /** Entradas de log generadas (metadatos). */
   logEntries: GuardrailLogEntry[];
+  /** Señal anti-inyección sobre el mensaje del usuario. Informativa: no bloquea. */
+  injection: InjectionSignal;
 }
 
 /**
@@ -59,6 +77,23 @@ export async function runGuardrail(
   modelResponse: string,
   options: RunGuardrailOptions = {},
 ): Promise<GuardrailOutcome> {
+  // M3 — Señal anti-inyección sobre el mensaje del usuario. Conservador por
+  // diseño: se evalúa y se expone, pero NO altera ni bloquea la respuesta.
+  const inj = detectInjection(userMessage);
+  const injection: InjectionSignal = { detected: inj.sospechoso, patterns: inj.patrones };
+
+  if (injection.detected) {
+    // La tabla `guardrail_log` (migración 009) tiene columnas NOT NULL
+    // `blocked_value`/`blocked_text` y ningún campo jsonb: no admite un evento de
+    // inyección sin falsear una cifra bloqueada. Por eso NO se persiste aquí.
+    // TODO(migración 010): añadir `event_type text` + `details jsonb` a
+    // guardrail_log y mover este warn a logGuardrailEvents.
+    console.warn(
+      "[guardrail] injection_detected",
+      JSON.stringify({ patterns: injection.patterns, user_id: options.userId ?? null }),
+    );
+  }
+
   // Pieza 1: hechos verificados del usuario.
   const hechos = extractInputFacts(userMessage);
 
@@ -67,14 +102,16 @@ export async function runGuardrail(
   const parsed = parseModelOutput(modelResponse);
   const consejo = parsed.data.consejo;
 
-  // Pieza 2: grounding de las cifras de la respuesta.
-  const validacion = validateGrounding(consejo, hechos);
+  // Pieza 2: grounding de las cifras de la respuesta. `cifrasCalculadas` viene
+  // del motor financiero (M1): sin ellas, la rama c0 del validador es inalcanzable.
+  const validacion = validateGrounding(consejo, hechos, options.cifrasCalculadas ?? []);
 
   // Pieza 3: política + log (metadatos, hash de la pregunta).
   const preguntaHash = await hashQuestion(userMessage);
   const policy = applyPolicy(consejo, validacion, preguntaHash, {
     mode: options.mode,
     dataHint: options.dataHint,
+    idioma: options.idioma,
   });
 
   if (options.supabase && options.userId && policy.logEntries.length > 0) {
@@ -88,6 +125,7 @@ export async function runGuardrail(
     validacion,
     estructurada: parsed.structured,
     logEntries: policy.logEntries,
+    injection,
   };
 }
 
@@ -104,6 +142,10 @@ export {
   applyPolicy,
   hashQuestion,
   logGuardrailEvents,
+  standardClosingRequest,
+  endsWithRequestOrProposal,
+  containsDataRequest,
+  cleanup,
   type PolicyMode,
   type PolicyOptions,
   type PolicyResult,

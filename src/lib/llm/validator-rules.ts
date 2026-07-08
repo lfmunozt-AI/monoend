@@ -80,16 +80,41 @@ export const SPECIFIC_PRODUCT_REGEXES: ReadonlyArray<RegExp> = [
  * porque el caso de uso es funcionalmente equivalente a un imperativo.
  */
 export const ABSOLUTE_RECOMMENDATION_REGEXES: ReadonlyArray<RegExp> = [
+  // ── ES ─────────────────────────────────────────────────────────────────────
   /\bcompra\s+(?:acciones?\s+de\s+|el\s+|la\s+|las\s+|los\s+|un\s+|una\s+)?/i,
   /\bvende\s+(?:todo|tus|tu|el|la|las|los|un|una)?/i,
   /\binvierte\s+en\b/i,
   /\bmete\s+(?:todo|tu|tus|tu\s+dinero|el\s+dinero)\b/i,
+  /\bpon\s+(?:todo|todo\s+tu\s+dinero)\b/i,
+  /\binvierte\s+todo\b/i,
+  /\btodo\s+tu\s+dinero\b/i,
+  /\bla\s+mejor\s+inversi[óo]n\s+sin\s+duda\b/i,
+  /\bs[íi]\s+o\s+s[íi]\b/i,
+  /\bobligatorio\s+invertir\b/i,
+  /\b[úu]nica\s+opci[óo]n\b/i,
   /\bm[ée]tete\s+sin\s+dudar\b/i,
   /\babre\s+(?:una\s+)?cuenta\s+en\b/i,
   /\bpasa\s+tu\s+dinero\s+a\b/i,
   /\btu\s+mejor\s+opci[óo]n\s+es\b/i,
   /\bes\s+el\s+mejor\b/i,
   /\bes\s+la\s+mejor\b/i,
+
+  // ── PT ─────────────────────────────────────────────────────────────────────
+  /\bmete\s+tudo\b/i,
+  /\bp[õo]e\s+tudo\b/i,
+  /\btodo\s+o\s+teu\s+dinheiro\b/i,
+  /\bsem\s+d[úu]vida\s+a\s+melhor\b/i,
+  /\b[úu]nica\s+op[çc][ãa]o\b/i,
+  /\btens\s+de\s+investir\b/i,
+
+  // ── EN ─────────────────────────────────────────────────────────────────────
+  /\ball\s+in\b/i,
+  /\b(?:put|invest)\s+everything\b/i,
+  /\ball\s+your\s+money\b/i,
+  /\bthe\s+best\s+investment\s+hands\s+down\b/i,
+  /\bmust\s+invest\b/i,
+  /\bonly\s+option\b/i,
+  /\bno-?brainer\s+investment\b/i,
 ];
 
 /**
@@ -97,18 +122,50 @@ export const ABSOLUTE_RECOMMENDATION_REGEXES: ReadonlyArray<RegExp> = [
  * Combinaciones de verbo en futuro o adjetivo absoluto + porcentaje.
  */
 export const RETURN_GUARANTEE_REGEXES: ReadonlyArray<RegExp> = [
+  // ── ES ─────────────────────────────────────────────────────────────────────
   /\bvas\s+a\s+ganar\b[^.]*?\d+\s?%/i,
   /\bte\s+van?\s+a\s+dar\b[^.]*?\d+\s?%/i,
   /\bte\s+dar[áa]\b[^.]*?\d+\s?%/i,
   /\besto\s+te\s+dar[áa]\b[^.]*?\d+\s?%/i,
   /\brentabilidad\s+(?:de|del)\s+\d+\s?%/i,
   /\bganar[áa]s\s+(?:un\s+)?\d+\s?%/i,
-  /\bgarantizad[oa]\b[^.]*?\d+\s?%/i,
-  /\basegurad[oa]\s+(?:un\s+)?\d+\s?%/i,
-  /\btienes\s+asegurad[oa]\b/i,
+  /\bgarantizad[oa]s?\b/i,
+  /\basegurad[oa]s?\b/i,
+  /\bsin\s+riesgo\b/i,
+  /\briesgo\s+cero\b/i,
+  /\b100\s?%\s+seguro\b/i,
+  /\brentabilidad\s+asegurada\b/i,
+  /\b(?:ganancia|retorno|beneficio)\s+garantizad[oa]\b/i,
+  /\bbeneficio\s+seguro\b/i,
+  /\bno\s+puedes\s+perder\b/i,
+  /\bimposible\s+perder\b/i,
+  /\bseguro\s+que\s+(?:gana|sube|vas|te)\b/i,
+  /\bte\s+aseguro\s+que\b/i,
   /\bgarantizado\s*:/i,
-  /\bes\s+seguro\s+que\s+(?:vas|te)/i,
   /\bno\s+puede\s+bajar\b/i,
+
+  // ── PT ─────────────────────────────────────────────────────────────────────
+  /\bgarantid[oa]s?\b/i,
+  /\bsem\s+risco\b/i,
+  /\brisco\s+zero\b/i,
+  /\b(?:lucro|retorno)\s+garantid[oa]\b/i,
+  /\bimposs[íi]vel\s+perder\b/i,
+  /\bcom\s+certeza\s+ganhas\b/i,
+  /\bgaranto\s+que\b/i,
+  /\b100\s?%\s+seguro\b/i,
+
+  // ── EN ─────────────────────────────────────────────────────────────────────
+  /\bguaranteed\b/i,
+  /\bassured\s+returns?\b/i,
+  /\brisk-?free\b/i,
+  /\bzero\s+risk\b/i,
+  /\b100\s?%\s+safe\b/i,
+  /\bcan'?t\s+lose\b/i,
+  /\bcannot\s+lose\b/i,
+  /\bimpossible\s+to\s+lose\b/i,
+  /\bsure\s+(?:gain|win)\b/i,
+  /\bi\s+guarantee\b/i,
+  /\bguaranteed\s+(?:profit|return)s?\b/i,
 ];
 
 /**
@@ -175,11 +232,30 @@ export interface BrandingRule {
 }
 
 export const BRANDING_REWRITES: ReadonlyArray<BrandingRule> = [
+  // ── ES ─────────────────────────────────────────────────────────────────────
   { pattern: /\breserva\s+de\s+soberan[íi]a\b/gi, replacement: 'Reserva de Imprevistos' },
   { pattern: /\breserva\s+de\s+emergencia\b/gi, replacement: 'Reserva de Imprevistos' },
   { pattern: /\bel\s+fondo\s+de\s+emergencia\b/gi, replacement: 'la Reserva de Imprevistos', preserveCase: true },
   { pattern: /\bun\s+fondo\s+de\s+emergencia\b/gi, replacement: 'una Reserva de Imprevistos', preserveCase: true },
   { pattern: /\bfondo\s+de\s+emergencia\b/gi, replacement: 'Reserva de Imprevistos' },
   { pattern: /\bsoberan[íi]a\s+financiera\b/gi, replacement: 'Dominio Financiero' },
+
+  // ── PT ─────────────────────────────────────────────────────────────────────
+  { pattern: /\breserva\s+de\s+soberania\b/gi, replacement: 'Reserva de Imprevistos' },
+  { pattern: /\breserva\s+de\s+emerg[êe]ncia\b/gi, replacement: 'Reserva de Imprevistos' },
+  { pattern: /\bo\s+fundo\s+de\s+emerg[êe]ncia\b/gi, replacement: 'a Reserva de Imprevistos', preserveCase: true },
+  { pattern: /\bum\s+fundo\s+de\s+emerg[êe]ncia\b/gi, replacement: 'uma Reserva de Imprevistos', preserveCase: true },
+  { pattern: /\bfundo\s+de\s+emerg[êe]ncia\b/gi, replacement: 'Reserva de Imprevistos' },
+  { pattern: /\bsoberania\s+financeira\b/gi, replacement: 'Dominio Financiero' },
+
+  // ── EN ─────────────────────────────────────────────────────────────────────
+  { pattern: /\b(?:an?\s+)?emergency\s+fund\b/gi, replacement: 'Reserva de Imprevistos' },
+  { pattern: /\bemergency\s+reserve\b/gi, replacement: 'Reserva de Imprevistos' },
+  { pattern: /\bsovereignty\s+reserve\b/gi, replacement: 'Reserva de Imprevistos' },
+  { pattern: /\bfinancial\s+sovereignty\b/gi, replacement: 'Dominio Financiero' },
+
+  // Residual — SIEMPRE al final: si corriera antes, "Reserva de Soberanía"
+  // quedaría como "Reserva de dominio".
   { pattern: /\bsoberan(?:[íi]as?|[oa]s?)\b/gi, replacement: 'dominio', preserveCase: true },
+  { pattern: /\bsovereign(?:ty)?\b/gi, replacement: 'dominio', preserveCase: true },
 ];

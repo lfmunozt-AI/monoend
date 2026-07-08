@@ -3,7 +3,12 @@ import { adminClient } from '@/lib/supabase/admin'
 import { buildSystemPrompt } from '@/lib/prompts/consigliere'
 import { callLLMWithHistory } from '@/lib/llm'
 import { runGuardrail } from '@/lib/guardrail'
-import { validateConsigliereOutput } from '@/lib/llm/output-validator'
+import { buildVerifiedContext } from '@/lib/calculator/orchestrator'
+import {
+  validateConsigliereOutput,
+  enforceOutputPolicy,
+  mentionsSpecificProduct,
+} from '@/lib/llm/output-validator'
 import { getICAScore } from '@/lib/ica-service'
 import { getICALevel } from '@/lib/ica'
 import { NextResponse } from 'next/server'
@@ -170,8 +175,24 @@ export async function POST(request: Request) {
   const pais = fiscal?.country ?? profile.country ?? 'desconocido'
   const currentICA = typeof icaScore === 'number' ? icaScore : (profile.ica_score ?? 0)
 
+  // ── M1 · Motor financiero: el código calcula, el modelo redacta ───────────────
+  // `buildVerifiedContext` solo acepta un string, del que extrae hechos con el
+  // mismo extractor del guardarraíl. Le añadimos los datos del perfil como texto
+  // para que el motor también los vea.
+  //
+  // Enteros a propósito: `parseDigitAmount` usa convención es/LatAm y leería el
+  // punto de "3000.00" como separador de millares → 300000.
+  const datosPerfil = [
+    ingresosMes > 0 ? `Ingresos ${Math.round(ingresosMes)} euros al mes` : '',
+    gastosMes > 0 ? `Gastos ${Math.round(gastosMes)} euros al mes` : '',
+  ].filter(Boolean).join('. ')
+
+  const verified = buildVerifiedContext(
+    datosPerfil ? `${cleanMessage}\n${datosPerfil}.` : cleanMessage,
+  )
+
   // ── System prompt ────────────────────────────────────────────────────────────
-  const systemPrompt = buildSystemPrompt({
+  const basePrompt = buildSystemPrompt({
     nombre: profile.name ?? 'Usuario',
     pais,
     idioma: (profile.language ?? 'es') as 'es' | 'pt' | 'en' | 'de' | 'fr' | 'sv',
@@ -181,6 +202,12 @@ export async function POST(request: Request) {
     fugas,
     metas,
   })
+
+  // El bloque "DATOS VERIFICADOS DE ESTA CONSULTA…" va al final: son las cifras
+  // exactas que el modelo debe usar en vez de improvisar.
+  const systemPrompt = verified.bloque
+    ? `${basePrompt}\n\n${verified.bloque}`
+    : basePrompt
 
   // ── Guardar mensaje del usuario ──────────────────────────────────────────────
   const { error: userMsgErr } = await admin.from('messages').insert({
@@ -208,21 +235,49 @@ export async function POST(request: Request) {
     mode: 'mvp',
     supabase: admin,
     userId: user.id,
+    // M1: habilita la aprobación por "cálculo verificado" (rama c0 del validador).
+    cifrasCalculadas: verified.cifrasCalculadas,
   })
   let finalContent = guardrail.texto_final
 
-  // ── BONUS: validador de política de consejos, sobre el texto ya saneado ──────
-  // El guardrail de cifras corre primero; el validador de política, después,
-  // ambos sobre `finalContent`. Detecta, reporta y corrige el branding
-  // (`validation.text` trae "Reserva de Imprevistos" en vez de "de Soberanía").
+  // M3: la señal anti-inyección no bloquea; se registra para vigilancia.
+  if (guardrail.injection.detected) {
+    console.warn('[chat] injection_detected', JSON.stringify({
+      user_id: user.id,
+      conversation_id: convId,
+      patterns: guardrail.injection.patterns,
+    }))
+  }
+
+  // ── Validador de política, sobre el texto ya saneado ─────────────────────────
+  // El guardrail de cifras corre primero; el validador de política, después.
+  // `validation.text` trae el branding corregido; `enforceOutputPolicy` hace
+  // cumplir los bloqueos (C1) eliminando la oración infractora.
   const validation = validateConsigliereOutput(finalContent)
   finalContent = validation.text
-  if (validation.severity !== 'ok') {
+
+  const enforced = enforceOutputPolicy(finalContent, validation)
+  if (enforced !== finalContent) {
+    console.warn('[chat] output_enforced', JSON.stringify({
+      user_id: user.id,
+      conversation_id: convId,
+      severity: validation.severity,
+      reasons: validation.reasons,
+      removed_sentences: validation.violatingSentences.length,
+    }))
+  } else if (validation.severity !== 'ok') {
     console.warn('[chat] output-validator:', validation.severity, validation.reasons)
   }
-  // Producto específico sin disclaimer → adjuntar el disclaimer canónico
-  // (enforcement determinista, sin segunda llamada al LLM, no bloqueante).
-  if (validation.suggestedDisclaimer && !finalContent.includes(validation.suggestedDisclaimer)) {
+  finalContent = enforced
+
+  // Producto específico sin disclaimer → adjuntar el disclaimer canónico.
+  // Solo si el producto SOBREVIVIÓ al enforcement: si su oración se eliminó, un
+  // disclaimer colgando al final no protege de nada y confunde.
+  if (
+    validation.suggestedDisclaimer &&
+    mentionsSpecificProduct(finalContent) &&
+    !finalContent.includes(validation.suggestedDisclaimer)
+  ) {
     finalContent = `${finalContent}\n\n${validation.suggestedDisclaimer}`
   }
 
