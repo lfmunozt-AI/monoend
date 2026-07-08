@@ -40,7 +40,10 @@ export function sentenceRangeAt(text: string, from: number, to: number): [number
 // CONOCIMIENTO, nunca como diagnóstico. Lo que separa una cosa de la otra es que
 // la frase se etiquete explícitamente como referencia. Sin marcador, "el 20%" es
 // una cifra de manual disfrazada de respuesta personal.
+// ES/PT/EN — regla transversal del proyecto: toda lista de detección cubre los
+// tres idiomas. "como referencia" y "habitualmente" valen en ES y PT a la vez.
 const REFERENCE_MARKERS = [
+  // ES
   "como referencia",
   "de referencia",
   "el estandar",
@@ -50,6 +53,24 @@ const REFERENCE_MARKERS = [
   "orientativa",
   "habitualmente",
   "tipicamente",
+  // PT
+  "o padrao",
+  "costuma",
+  "em geral",
+  "a titulo indicativo",
+  "indicativo",
+  "geralmente",
+  // EN
+  "as a reference",
+  "for reference",
+  "the standard",
+  "a rule of thumb",
+  "rule of thumb",
+  "typically",
+  "usually",
+  "generally",
+  "on average",
+  "ballpark",
 ];
 
 /** ¿La frase presenta la cifra como estándar/orientación, no como diagnóstico? */

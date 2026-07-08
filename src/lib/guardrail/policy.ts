@@ -22,6 +22,7 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { BlockedFigure, GroundingResult } from "./validate";
+import { detectLanguage, DEFAULT_LANGUAGE, type Language } from "../language";
 
 export type PolicyMode = "mvp" | "passthrough";
 
@@ -33,6 +34,8 @@ export interface PolicyOptions {
    * una frase genérica. NO debe contener datos sensibles del usuario.
    */
   dataHint?: string;
+  /** Idioma del cierre. Si no se da, se infiere de la respuesta del modelo. */
+  idioma?: Language;
 }
 
 /** Entrada de log: SOLO metadatos. Nunca el texto del usuario ni la respuesta. */
@@ -61,27 +64,71 @@ export interface PolicyResult {
   logEntries: GuardrailLogEntry[];
 }
 
-// ── Petición de cierre ────────────────────────────────────────────────────────
+// ── Petición de cierre (ES/PT/EN) ─────────────────────────────────────────────
+// Regla transversal del proyecto: todo mensaje del sistema existe en los tres
+// idiomas. El idioma sale de `options.idioma`, y si no se da, del propio texto.
 
 /** Cierre genérico cuando no se puede identificar qué dato faltó. */
-const GENERIC_REQUEST =
-  "Para darte cifras exactas necesito tus gastos mensuales y tu meta. ¿Me los compartes?";
+const GENERIC_REQUEST: Record<Language, string> = {
+  es: "Para darte cifras exactas necesito tus gastos mensuales y tu meta. ¿Me los compartes?",
+  pt: "Para te dar números exatos preciso das tuas despesas mensais e da tua meta. Partilhas comigo?",
+  en: "To give you exact numbers I need your monthly expenses and your goal. Can you share both?",
+};
+
+/** Plantilla del cierre con pista explícita del llamante (`dataHint`). */
+const HINT_REQUEST: Record<Language, (hint: string) => string> = {
+  es: (h) => `Para darte esa cifra necesito conocer tu ${h}. ¿Me lo compartes?`,
+  pt: (h) => `Para te dar esse número preciso de saber o teu ${h}. Partilhas comigo?`,
+  en: (h) => `To give you that number I need to know your ${h}. Can you share it?`,
+};
 
 /**
  * Petición específica por etiqueta de la cifra bloqueada. Si el modelo inventó
  * "gastarás 2000 al mes", la etiqueta es "gasto" y el dato que falta son sus
  * gastos reales. Solo se usa cuando TODAS las cifras bloqueadas comparten una
  * misma etiqueta conocida; con etiquetas mezcladas, el cierre genérico.
+ *
+ * Las claves (gasto, ingreso…) las produce `detectLabel`, que trabaja en ES: son
+ * identificadores internos, no texto de cara al usuario.
  */
-const REQUEST_BY_LABEL: Record<string, string> = {
-  gasto: "Para darte esa cifra necesito tus gastos mensuales. ¿Me los compartes?",
-  ingreso: "Para darte esa cifra necesito tus ingresos mensuales. ¿Me los compartes?",
-  meta: "Para darte esa cifra necesito tu meta y el plazo en que la quieres. ¿Me lo cuentas?",
-  ahorro: "Para darte esa cifra necesito saber cuánto ahorras cada mes. ¿Me lo compartes?",
-  deuda: "Para darte esa cifra necesito el importe pendiente de tus deudas. ¿Me lo compartes?",
-  interes: "Para darte esa cifra necesito la tasa de interés que pagas. ¿Me la compartes?",
-  renta: "Para darte esa cifra necesito cuánto pagas de alquiler al mes. ¿Me lo compartes?",
+const REQUEST_BY_LABEL: Record<Language, Record<string, string>> = {
+  es: {
+    gasto: "Para darte esa cifra necesito tus gastos mensuales. ¿Me los compartes?",
+    ingreso: "Para darte esa cifra necesito tus ingresos mensuales. ¿Me los compartes?",
+    meta: "Para darte esa cifra necesito tu meta y el plazo en que la quieres. ¿Me lo cuentas?",
+    ahorro: "Para darte esa cifra necesito saber cuánto ahorras cada mes. ¿Me lo compartes?",
+    deuda: "Para darte esa cifra necesito el importe pendiente de tus deudas. ¿Me lo compartes?",
+    interes: "Para darte esa cifra necesito la tasa de interés que pagas. ¿Me la compartes?",
+    renta: "Para darte esa cifra necesito cuánto pagas de alquiler al mes. ¿Me lo compartes?",
+  },
+  pt: {
+    gasto: "Para te dar esse número preciso das tuas despesas mensais. Partilhas comigo?",
+    ingreso: "Para te dar esse número preciso dos teus rendimentos mensais. Partilhas comigo?",
+    meta: "Para te dar esse número preciso da tua meta e do prazo. Contas-me?",
+    ahorro: "Para te dar esse número preciso de saber quanto poupas por mês. Partilhas comigo?",
+    deuda: "Para te dar esse número preciso do valor em dívida. Partilhas comigo?",
+    interes: "Para te dar esse número preciso da taxa de juro que pagas. Partilhas comigo?",
+    renta: "Para te dar esse número preciso de saber quanto pagas de renda por mês. Partilhas comigo?",
+  },
+  en: {
+    gasto: "To give you that number I need your monthly expenses. Can you share them?",
+    ingreso: "To give you that number I need your monthly income. Can you share it?",
+    meta: "To give you that number I need your goal and its deadline. Can you tell me?",
+    ahorro: "To give you that number I need to know how much you save each month. Can you share it?",
+    deuda: "To give you that number I need your outstanding debt. Can you share it?",
+    interes: "To give you that number I need the interest rate you pay. Can you share it?",
+    renta: "To give you that number I need how much rent you pay monthly. Can you share it?",
+  },
 };
+
+/**
+ * Cierre estándar (genérico) del guardarraíl v2, por idioma. Exportado para que
+ * el enforcement del validador (C1) reutilice EXACTAMENTE la misma frase en vez
+ * de mantener una réplica que se desincronice.
+ */
+export function standardClosingRequest(lang: Language = DEFAULT_LANGUAGE): string {
+  return GENERIC_REQUEST[lang];
+}
 
 /**
  * Construye la ÚNICA línea de cierre. Precedencia:
@@ -89,15 +136,18 @@ const REQUEST_BY_LABEL: Record<string, string> = {
  *   2. Etiqueta única entre las cifras bloqueadas (gasto, ingreso, meta…).
  *   3. Genérico.
  */
-function buildClosingRequest(entries: GuardrailLogEntry[], hint?: string): string {
-  if (hint) return `Para darte esa cifra necesito conocer tu ${hint}. ¿Me lo compartes?`;
+function buildClosingRequest(
+  entries: GuardrailLogEntry[],
+  hint: string | undefined,
+  lang: Language,
+): string {
+  if (hint) return HINT_REQUEST[lang](hint);
 
-  const labels = new Set(
-    entries.map((e) => e.etiqueta).filter((l) => l in REQUEST_BY_LABEL),
-  );
-  if (labels.size === 1) return REQUEST_BY_LABEL[[...labels][0]];
+  const byLabel = REQUEST_BY_LABEL[lang];
+  const labels = new Set(entries.map((e) => e.etiqueta).filter((l) => l in byLabel));
+  if (labels.size === 1) return byLabel[[...labels][0]];
 
-  return GENERIC_REQUEST;
+  return GENERIC_REQUEST[lang];
 }
 
 // ── Detección de cierre ya presente ───────────────────────────────────────────
@@ -106,9 +156,22 @@ function norm(s: string): string {
   return s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
 }
 
-// Verbos con los que el Consigliere cierra proponiendo o pidiendo un dato.
-const PROPOSAL_RE =
-  /\b(te propongo|propongo|mi propuesta|siguiente paso|empecemos|empieza por|hagamos|comparteme|compartes|comparte|dame|damelo|pasame|indicame|facilitame|dime|cuentame|enviame|mandame|necesito)\b/;
+// Verbos con los que se cierra proponiendo o pidiendo un dato (ES/PT/EN).
+// Se evalúa sobre texto normalizado (sin acentos, minúsculas).
+const PROPOSAL_RE = new RegExp(
+  "\\b(" +
+    // ES
+    "te propongo|propongo|mi propuesta|siguiente paso|empecemos|empieza por|hagamos|" +
+    "comparteme|compartes|comparte|dame|damelo|pasame|indicame|facilitame|dime|" +
+    "cuentame|enviame|mandame|necesito|" +
+    // PT
+    "proponho|a minha proposta|proximo passo|comecemos|vamos|partilhas|partilha|" +
+    "diz-me|conta-me|envia-me|preciso|" +
+    // EN
+    "i propose|my proposal|next step|let's start|share|tell me|send me|give me|" +
+    "i need|can you share|what's your" +
+  ")\\b",
+);
 
 /** Última frase no vacía del texto. */
 function lastSentence(text: string): string {
@@ -122,8 +185,11 @@ function lastSentence(text: string): string {
 /**
  * ¿El texto ya termina pidiendo un dato o proponiendo una jugada? En ese caso
  * añadir el cierre duplicaría la petición (regla 3).
+ *
+ * Exportada: el enforcement del validador (C1) la reutiliza para no añadir un
+ * cierre a una respuesta que ya lo trae.
  */
-function endsWithRequestOrProposal(text: string): boolean {
+export function endsWithRequestOrProposal(text: string): boolean {
   const last = lastSentence(text);
   if (!last) return false;
   if (last.endsWith("?")) return true;
@@ -137,7 +203,7 @@ function endsWithRequestOrProposal(text: string): boolean {
  * solo si la respuesta, en conjunto, reclama el dato personal que falta. Si no
  * lo hace, el cierre v2 se añade para cubrirla.
  */
-function containsDataRequest(text: string): boolean {
+export function containsDataRequest(text: string): boolean {
   if (text.includes("?")) return true;
   return PROPOSAL_RE.test(norm(text));
 }
@@ -165,8 +231,11 @@ function splitSentences(text: string): Segment[] {
  * Tras eliminar frases quedan espacios dobles y líneas huérfanas. Se colapsan
  * los espacios internos, se recortan las líneas y se reducen los saltos
  * múltiples a un máximo de párrafo.
+ *
+ * Exportada: el enforcement del validador (C1) elimina frases igual que aquí y
+ * necesita exactamente la misma limpieza.
  */
-function cleanup(text: string): string {
+export function cleanup(text: string): string {
   return text
     .split("\n")
     .map((line) => line.replace(/[ \t]+/g, " ").trim())
@@ -205,6 +274,7 @@ export function applyPolicy(
   options: PolicyOptions = {},
 ): PolicyResult {
   const { mode = "mvp", dataHint } = options;
+  const lang = options.idioma ?? detectLanguage(modelResponse) ?? DEFAULT_LANGUAGE;
   const blocked = validation.cifras_bloqueadas;
   const referencias = validation.cifras_aprobadas.filter((c) => c.categoria === "referencia");
 
@@ -226,7 +296,7 @@ export function applyPolicy(
     // permite, pero un estándar sin petición del dato personal se lee como
     // diagnóstico. Si la respuesta no reclama el dato, el cierre lo reclama.
     if (referencias.length > 0 && !containsDataRequest(modelResponse)) {
-      const texto_final = appendClosing(cleanup(modelResponse), buildClosingRequest([], dataHint));
+      const texto_final = appendClosing(cleanup(modelResponse), buildClosingRequest([], dataHint, lang));
       return { texto_final, bloqueado: false, logEntries };
     }
     return { texto_final: modelResponse, bloqueado: false, logEntries };
@@ -238,7 +308,7 @@ export function applyPolicy(
     return { texto_final: modelResponse, bloqueado: true, logEntries };
   }
 
-  const texto_final = appendClosing(texto, buildClosingRequest(logEntries, dataHint));
+  const texto_final = appendClosing(texto, buildClosingRequest(logEntries, dataHint, lang));
   return { texto_final, bloqueado: true, logEntries };
 }
 
