@@ -1,7 +1,7 @@
 /**
  * @module ica
- * Algoritmo ICA — Índice de Consciencia y Acción Financiera.
- * Escala 0–100: 0-30 Ceguera Financiera · 31-70 Visión Táctica · 71-100 Soberanía Total.
+ * Algoritmo ICA — Índice de Certeza Algorítmica.
+ * Escala 0–100: 0-30 Ceguera Financiera · 31-70 Visión Táctica · 71-100 Dominio Financiero.
  */
 
 export interface Transaccion {

@@ -19,7 +19,7 @@ const DATA_ITEMS = [
   },
   {
     type: 'Historial ICA',
-    reason: 'Evolución de tu Índice de Control Autónomo — para mostrarte tu progreso real.',
+    reason: 'Evolución de tu Índice de Certeza Algorítmica — para mostrarte tu progreso real.',
   },
   {
     type: 'Conversaciones con la IA',
