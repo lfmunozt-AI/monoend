@@ -85,10 +85,11 @@ export default function ChatPage() {
     const savedMessages = localStorage.getItem(`messages_${conversationId}`)
     if (savedMessages) {
       const parsed = JSON.parse(savedMessages)
-      setMessages(parsed.map((msg: any) => ({
-        ...msg,
-        timestamp: new Date(msg.timestamp)
-      })))
+      setMessages(parsed.map((msg: any) => {
+        // Sanitiza timestamps corruptos de pruebas previas → evita "Invalid Date"
+        const d = new Date(msg.timestamp)
+        return { ...msg, timestamp: isNaN(d.getTime()) ? new Date() : d }
+      }))
     }
   }
 
@@ -153,35 +154,34 @@ export default function ChatPage() {
         localStorage.setItem('activeConversationId', data.conversationId)
       }
 
-      setTimeout(() => {
-        setIsStreaming(false)
-        setConsigliereState('responding')
+      // Se pinta al llegar la respuesta — sin delay artificial de latencia.
+      setIsStreaming(false)
+      setConsigliereState('responding')
 
-        // El route devuelve { response }, no { message }; el servidor no envía
-        // timestamp → hora local del cliente
-        const responseText: string = data.response ?? 'Sin respuesta'
-        const assistantMessage: Message = {
-          id: `msg_${Date.now()}_assistant`,
-          role: 'assistant',
-          content: responseText,
-          timestamp: new Date()
-        }
+      // El route devuelve { response }, no { message }; el servidor no envía
+      // timestamp → hora local del cliente
+      const responseText: string = data.response ?? 'Sin respuesta'
+      const assistantMessage: Message = {
+        id: `msg_${Date.now()}_assistant`,
+        role: 'assistant',
+        content: responseText,
+        timestamp: new Date()
+      }
 
-        const finalMessages = [...updatedMessages, assistantMessage]
-        setMessages(finalMessages)
-        saveMessages(data.conversationId ?? activeConversationId, finalMessages)
+      const finalMessages = [...updatedMessages, assistantMessage]
+      setMessages(finalMessages)
+      saveMessages(data.conversationId ?? activeConversationId, finalMessages)
 
-        const lower = responseText.toLowerCase()
-        if (lower.includes('fuga')) {
-          setTimeout(() => setConsigliereState('alert'), 1600)
-          setTimeout(() => setConsigliereState('idle'), 2100)
-        } else if (lower.includes('excelente') || lower.includes('¡')) {
-          setTimeout(() => setConsigliereState('celebrate'), 1600)
-          setTimeout(() => setConsigliereState('idle'), 3400)
-        } else {
-          setTimeout(() => setConsigliereState('idle'), 1600)
-        }
-      }, 1000)
+      const lower = responseText.toLowerCase()
+      if (lower.includes('fuga')) {
+        setTimeout(() => setConsigliereState('alert'), 1600)
+        setTimeout(() => setConsigliereState('idle'), 2100)
+      } else if (lower.includes('excelente') || lower.includes('¡')) {
+        setTimeout(() => setConsigliereState('celebrate'), 1600)
+        setTimeout(() => setConsigliereState('idle'), 3400)
+      } else {
+        setTimeout(() => setConsigliereState('idle'), 1600)
+      }
 
     } catch (error) {
       console.error('Error sending message:', error)
