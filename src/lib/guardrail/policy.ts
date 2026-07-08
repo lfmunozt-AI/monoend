@@ -233,6 +233,13 @@ const INSUMO_REQUEST: Record<Language, string> = {
   en: "Share your main expenses with their amounts — I'll pinpoint which ones to cut.",
 };
 
+/** ¿Es la frase una petición de dato/propuesta VÁLIDA (no delegativa)? */
+function isValidRequest(sentence: string): boolean {
+  const n = norm(sentence);
+  if (DELEGATIVE_RE.test(n)) return false;
+  return sentence.trim().endsWith("?") || PROPOSAL_RE.test(n);
+}
+
 /** ¿La última frase delega el análisis en el usuario en vez de pedir un dato? */
 export function isDelegativeClosing(text: string): boolean {
   const last = lastSentence(text);
@@ -240,26 +247,62 @@ export function isDelegativeClosing(text: string): boolean {
 }
 
 /**
- * Si el texto cierra delegando el análisis, elimina esa última frase y la
- * reemplaza por la petición de insumo en el idioma del usuario. Determinista y
- * puro. Si el cierre no es delegativo, devuelve el texto intacto.
+ * Garantiza un cierre ÚNICO y no delegativo (PIEZA 3 — fix del doble cierre).
+ *
+ * Pasos, en orden:
+ *   1. Si la última frase delega el análisis ("¿qué gastos podrías reducir?"),
+ *      se elimina.
+ *   2. Se colapsa un cierre duplicado al final (dos frases idénticas seguidas).
+ *   3. Solo si tras 1-2 la respuesta NO termina ya en una petición de dato válida
+ *      (en sus últimas 2 frases) se añade el cierre estándar de insumo.
+ *
+ * Antes, el paso 1 añadía SIEMPRE el cierre estándar, aunque la respuesta ya
+ * pidiera un dato en una frase anterior → salían dos preguntas. Garantía: como
+ * mucho una pregunta final. Determinista y puro; si no hay nada que corregir,
+ * devuelve el texto intacto.
  */
 export function rewriteDelegativeClosing(
   text: string,
   lang: Language = DEFAULT_LANGUAGE,
 ): string {
-  if (!isDelegativeClosing(text)) return text;
-
   const segments = segmentSentences(text);
-  // Índice del último segmento con contenido (el cierre delegativo).
-  let lastIdx = -1;
-  for (let i = segments.length - 1; i >= 0; i--) {
-    if (segments[i].text.trim()) { lastIdx = i; break; }
+  const nonEmpty = segments
+    .map((s, i) => ({ i, t: s.text.trim() }))
+    .filter((x) => x.t !== "");
+  if (nonEmpty.length === 0) return text;
+
+  let keep = nonEmpty.length; // nº de frases con contenido que conservamos
+  let changed = false;
+
+  // 1. Elimina un cierre delegativo final.
+  if (DELEGATIVE_RE.test(norm(nonEmpty[keep - 1].t))) {
+    keep--;
+    changed = true;
   }
 
-  const kept = cleanup(segments.slice(0, lastIdx).map((s) => s.text).join(""));
+  // 2. Colapsa cierres duplicados idénticos al final.
+  while (keep >= 2 && norm(nonEmpty[keep - 1].t) === norm(nonEmpty[keep - 2].t)) {
+    keep--;
+    changed = true;
+  }
+
+  // Sin cierre delegativo ni duplicado: no había nada que arreglar. Se devuelve
+  // el texto intacto — no es tarea de esta función añadir cierres donde no hay
+  // problema (de eso se ocupa el guardarraíl de cifras en applyPolicy).
+  if (!changed) return text;
+
+  // Reconstruye conservando el formato original hasta la última frase mantenida.
+  const kept = keep > 0
+    ? cleanup(segments.slice(0, nonEmpty[keep - 1].i + 1).map((s) => s.text).join(""))
+    : "";
+
+  // ¿Lo que queda ya cierra con una petición válida (últimas 2 frases)? Entonces
+  // no se añade el cierre de insumo: evita la segunda pregunta seguida.
+  const ultimas = nonEmpty.slice(Math.max(0, keep - 2), keep).map((x) => x.t);
+  if (ultimas.some(isValidRequest)) return kept;
+
   const req = INSUMO_REQUEST[lang];
-  return kept ? `${kept}\n\n${req}` : req;
+  return kept ? `${kept}\n\n${req}` : req;         // añade UN cierre de insumo
 }
 
 // ── Limpieza ───────────────────────────────────────────────────────────────

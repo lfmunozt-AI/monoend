@@ -26,6 +26,7 @@ import {
   tiempoHastaMeta,
   loanPayment,
 } from "./operations";
+import { classifyExpenses, type ExpenseItem } from "./expenses";
 
 // ── Supuestos del modelo financiero (documentados y configurables) ──────────
 // Estas constantes definen las recomendaciones por defecto. Se centralizan aquí
@@ -37,6 +38,10 @@ const TAE_REFERENCIA = 7; // % TAE de referencia para simular cuotas de crédito
 
 function normaliza(s: string): string {
   return s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+}
+
+function round2(n: number): number {
+  return Math.round((n + Number.EPSILON) * 100) / 100;
 }
 
 // Palabras que señalan un escenario de crédito/financiación (ES/PT/EN).
@@ -79,6 +84,37 @@ function detectLoanScenario(
 
   const principal = Math.max(...candidatos);
   return { principal, months };
+}
+
+// Nombres que NO son un gasto (agregados, etiquetas de perfil, escenario de
+// crédito): se descartan al parsear una lista de gastos.
+const NO_ES_GASTO =
+  /\b(ingreso|ingresos|sueldo|salario|gano|gana|gasto|gastos|meta|objetivo|plazo|carro|coche|auto|vehiculo|prestamo|credito|financiar|ahorro|ahorros|deuda)\b/;
+
+/**
+ * Extrae una lista de gastos ("netflix 100, luz 50, …") del mensaje. Segmenta por
+ * comas, saltos y puntos, y en cada segmento busca un nombre corto seguido de un
+ * monto AL FINAL (tolerando € y "al mes"). Así "financiar un carro de 30000 a 36
+ * meses" no cuenta (el monto no está al final) y "Ingresos 10000 euros al mes" se
+ * descarta por el nombre. Devuelve [] si hay menos de 2 pares.
+ */
+function parseExpenseList(message: string): ExpenseItem[] {
+  const items: ExpenseItem[] = [];
+  const segmentos = message.split(/[,\n]|(?<=[.!?])\s+/);
+  const re =
+    /([\p{L}][\p{L} ]{0,24}?)\s+(\d[\d.,]*)\s*(?:€|eur|euros?)?\s*(?:\/\s*m[eê]s|al\s+mes|por\s+m[eê]s|per\s+month|\/mo)?\s*$/iu;
+
+  for (const seg of segmentos) {
+    const m = re.exec(seg.trim());
+    if (!m) continue;
+    const name = m[1].trim();
+    if (!name || NO_ES_GASTO.test(normaliza(name))) continue;
+    const amount = parseDigitAmount(m[2]);
+    if (!Number.isFinite(amount) || amount <= 0) continue;
+    items.push({ name, amount });
+  }
+
+  return items.length >= 2 ? items : [];
 }
 
 export interface VerifiedContext {
@@ -247,15 +283,57 @@ export function buildVerifiedContext(userMessage: string): VerifiedContext {
     }
   }
 
-  if (realidad.length === 0 && referencias.length === 0) {
+  // ── lista de gastos → clasificación + recorte del 50% de los no vitales ───
+  // Va a TU REALIDAD: son cifras del usuario (o derivadas de ellas). Todas
+  // alimentan cifrasCalculadas. El recorte usa un supuesto EXPLÍCITO (mitad de
+  // los no vitales); los desconocidos se listan aparte, sin asumir nada.
+  const gastosSinClasificar: string[] = [];
+  const itemCifras: number[] = [];
+  const items = parseExpenseList(userMessage);
+  if (items.length >= 2) {
+    const cls = classifyExpenses(items);
+    // Todos los montos individuales entran a grounding: si el modelo cita "tu
+    // netflix de 100 €", el guardarraíl debe aprobarlo.
+    itemCifras.push(...items.map((i) => i.amount));
+    const lista = (g: ExpenseItem[]) => g.map((i) => `${i.name} ${i.amount}`).join(", ");
+
+    if (cls.vitales.items.length > 0) {
+      realidad.push({ etiqueta: "gastos_vitales", valor: cls.vitales.total, formula: lista(cls.vitales.items) });
+    }
+    if (cls.noVitales.items.length > 0) {
+      realidad.push({ etiqueta: "gastos_no_vitales", valor: cls.noVitales.total, formula: lista(cls.noVitales.items) });
+      realidad.push({
+        etiqueta: "recorte_propuesto_50pct",
+        valor: cls.recortePropuesto,
+        formula: "supuesto: reducir no vitales a la mitad",
+      });
+      // nueva_capacidad solo si conocemos el sobrante real.
+      if (capacidadMensual !== null) {
+        realidad.push({
+          etiqueta: "nueva_capacidad",
+          valor: round2(capacidadMensual + cls.recortePropuesto),
+          formula: `sobrante ${capacidadMensual} + recorte ${cls.recortePropuesto}`,
+        });
+      }
+    }
+    if (cls.desconocidos.items.length > 0) {
+      gastosSinClasificar.push(
+        `gastos_sin_clasificar: ${lista(cls.desconocidos.items)} — preguntar si son fijos imprescindibles`,
+      );
+    }
+  }
+
+  if (realidad.length === 0 && referencias.length === 0 && gastosSinClasificar.length === 0) {
     return { bloque: "", cifrasCalculadas: [] };
   }
 
   const secciones: string[] = [];
-  if (realidad.length > 0) {
+  if (realidad.length > 0 || gastosSinClasificar.length > 0) {
     secciones.push(
       "TU REALIDAD (datos verificados — usa EXCLUSIVAMENTE estas cifras, no inventes ni redondees a otras):",
       ...realidad.map(render),
+      // Desconocidos: se listan sin monto agregado; no se asume nada sobre ellos.
+      ...gastosSinClasificar.map((l) => `- ${l}`),
     );
   }
   if (referencias.length > 0) {
@@ -270,7 +348,7 @@ export function buildVerifiedContext(userMessage: string): VerifiedContext {
   // cifra normativa sin marcador debe seguir bloqueándose). Excepción: la cuota
   // de crédito simulada SÍ entra, para que el guardarraíl apruebe la cifra que
   // el modelo va a citar como simulación.
-  const cifrasCalculadas = [...realidad.map((l) => l.valor), ...cuotaCifras];
+  const cifrasCalculadas = [...realidad.map((l) => l.valor), ...cuotaCifras, ...itemCifras];
 
   return { bloque: secciones.join("\n"), cifrasCalculadas };
 }
