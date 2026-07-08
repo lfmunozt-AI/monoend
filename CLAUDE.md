@@ -93,7 +93,7 @@ No tocar: [scope de otros agentes]
 
 ### "Dominio Total" reemplaza "Soberanía Total" en UI
 - Término actualizado en toda la UI a partir de hoy
-- `ICA` (Índice de Control Autónomo) mantiene el nombre técnico internamente
+- `ICA` (Índice de Certeza Algorítmica) mantiene el nombre técnico internamente
 - Actualizar cualquier string "Soberanía Total" que aparezca en componentes nuevos
 
 ### llm.ts — patrón dual de llamadas al LLM

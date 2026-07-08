@@ -250,7 +250,7 @@ VelocidadAhorro = min(100, base_score + growth_bonus)
 
 ---
 
-# ICA — Índice de Conocimiento del Asistido
+# ICA — Índice de Certeza Algorítmica
 
 ## Fórmula maestra
 

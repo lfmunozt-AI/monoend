@@ -208,7 +208,7 @@ Resumen de lo que el prompt ahora cubre:
 
 - **Identidad**: estratega italiano implícito (palabras, no acento), frío,
   protector, lealtad al patrimonio del usuario.
-- **Léxico de la casa**: Reserva de Soberanía, Fuga de Poder, Escudo Familiar,
+- **Léxico de la casa**: Reserva de Imprevistos, Fuga de Poder, Escudo Familiar,
   Escenario de Poder, Hito, Dominio Financiero, ICA Score.
 - **Lo que no hace**: nada de "tú puedes", "cree en ti", emojis enfáticos,
   anglicismos innecesarios.

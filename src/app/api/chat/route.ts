@@ -36,14 +36,39 @@ export async function POST(request: Request) {
 
   const admin = adminClient()
 
-  // ── Plan + perfil (parallel) ─────────────────────────────────────────────────
-  const [subResult, profileResult] = await Promise.all([
-    admin.from('subscriptions').select('plan, status').eq('user_id', user.id).maybeSingle(),
-    admin.from('profiles')
-      .select('name, country, language, ica_score, plan, onboarding_data')
-      .eq('user_id', user.id)
-      .maybeSingle(),
-  ])
+  const now = new Date()
+  const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1))
+    .toISOString().split('T')[0]
+
+  // ── Plan, perfil y contexto del usuario (todo en paralelo) ───────────────────
+  // Estas seis consultas solo dependen de `user.id`: no hay razón para que
+  // ninguna espere a otra. Antes, las cuatro últimas colgaban del final de la
+  // cadena perfil → rate limit → conversación, y pagaban ese round-trip triple.
+  const [subResult, profileResult, fiscalResult, txResult, leaksResult, icaScore] =
+    await Promise.all([
+      admin.from('subscriptions').select('plan, status').eq('user_id', user.id).maybeSingle(),
+      admin.from('profiles')
+        .select('name, country, language, ica_score, plan, onboarding_data')
+        .eq('user_id', user.id)
+        .maybeSingle(),
+      admin.from('fiscal_profiles')
+        .select('country, monthly_gross')
+        .eq('user_id', user.id)
+        .maybeSingle(),
+      admin.from('transactions')
+        .select('type, amount')
+        .eq('user_id', user.id)
+        .gte('date', monthStart),
+      admin.from('transactions')
+        .select('description, amount, category')
+        .eq('user_id', user.id)
+        .eq('is_leak', true)
+        .order('date', { ascending: false })
+        .limit(5),
+      // `null` en vez del fallback a profile.ica_score: `profile` aún no existe
+      // aquí. El fallback se resuelve más abajo, ya con el perfil cargado.
+      getICAScore(user.id).catch(() => null),
+    ])
 
   if (profileResult.error || !profileResult.data) {
     return NextResponse.json({ error: 'Perfil no encontrado' }, { status: 404 })
@@ -106,33 +131,14 @@ export async function POST(request: Request) {
     convId = (conv as { id: string }).id
   }
 
-  // ── Contexto del usuario (parallel) ─────────────────────────────────────────
-  const now = new Date()
-  const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1))
-    .toISOString().split('T')[0]
-
-  const [historyResult, fiscalResult, txResult, leaksResult, icaScore] = await Promise.all([
-    admin.from('messages')
-      .select('role, content')
-      .eq('conversation_id', convId)
-      .order('created_at', { ascending: false })
-      .limit(10),
-    admin.from('fiscal_profiles')
-      .select('country, monthly_gross')
-      .eq('user_id', user.id)
-      .maybeSingle(),
-    admin.from('transactions')
-      .select('type, amount')
-      .eq('user_id', user.id)
-      .gte('date', monthStart),
-    admin.from('transactions')
-      .select('description, amount, category')
-      .eq('user_id', user.id)
-      .eq('is_leak', true)
-      .order('date', { ascending: false })
-      .limit(5),
-    getICAScore(user.id).catch(() => (profile.ica_score ?? 0)),
-  ])
+  // ── Historial de la conversación ─────────────────────────────────────────────
+  // Única consulta de contexto que NO puede paralelizarse con las anteriores:
+  // necesita `convId`, que sale de crear/resolver la conversación.
+  const historyResult = await admin.from('messages')
+    .select('role, content')
+    .eq('conversation_id', convId)
+    .order('created_at', { ascending: false })
+    .limit(10)
 
   // Historial en orden cronológico para el contexto del LLM
   const contextMessages = ((historyResult.data ?? []) as Array<{ role: string; content: string }>)
@@ -189,8 +195,10 @@ export async function POST(request: Request) {
   }
 
   // ── Llamar al LLM ────────────────────────────────────────────────────────────
+  // maxTokens 400: el Consigliere responde en ≤120 palabras. Explícito aquí
+  // aunque sea también el default de llm.ts — es una decisión de latencia del chat.
   const allMessages = [...contextMessages, { role: 'user' as const, content: cleanMessage }]
-  const llmResult = await callLLMWithHistory(allMessages, systemPrompt)
+  const llmResult = await callLLMWithHistory(allMessages, systemPrompt, { maxTokens: 400 })
 
   // ── Guardarraíl de cifras (código externo al modelo) ─────────────────────────
   // Extrae los hechos del usuario, valida el grounding de las cifras de la
@@ -205,8 +213,10 @@ export async function POST(request: Request) {
 
   // ── BONUS: validador de política de consejos, sobre el texto ya saneado ──────
   // El guardrail de cifras corre primero; el validador de política, después,
-  // ambos sobre `finalContent`. Función pura: solo detecta y reporta.
+  // ambos sobre `finalContent`. Detecta, reporta y corrige el branding
+  // (`validation.text` trae "Reserva de Imprevistos" en vez de "de Soberanía").
   const validation = validateConsigliereOutput(finalContent)
+  finalContent = validation.text
   if (validation.severity !== 'ok') {
     console.warn('[chat] output-validator:', validation.severity, validation.reasons)
   }

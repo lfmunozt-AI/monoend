@@ -43,7 +43,7 @@ OBJETIVO DE ESTA SESIÓN
 PREGUNTAS DE DIAGNÓSTICO (máximo 3, una a la vez)
 Comienza con la más crítica según el contexto disponible:
 - Ingresos mensuales netos aproximados
-- Existencia y tamaño de Reserva de Soberanía
+- Existencia y tamaño de Reserva de Imprevistos
 - Deudas activas (sí/no y tipo aproximado)
 
 TONO
