@@ -28,111 +28,175 @@ import {
 // ── Supuestos del modelo financiero (documentados y configurables) ──────────
 // Estas constantes definen las recomendaciones por defecto. Se centralizan aquí
 // para que Luis pueda ajustarlas sin tocar la lógica.
-const TASA_AHORRO_SUGERIDA = 30; // % del SOBRANTE mensual destinado a ahorro.
-const HORIZONTE_MESES = 12; // proyección anual del ahorro.
+const HORIZONTE_MESES = 12; // proyección anual del sobrante.
 const MESES_FONDO = 6; // colchón de emergencia por defecto (tope del rango 3-6).
-const AHORRO_INGRESO_PCT = 20; // % del ingreso a ahorrar cuando no hay sobrante.
+const AHORRO_SUGERIDO_PCT = 10; // % del INGRESO: referencia estándar de ahorro.
 
 export interface VerifiedContext {
   /** Bloque de texto a inyectar en el prompt ("" si no hay nada que calcular). */
   bloque: string;
-  /** Cifras calculadas por el motor; el validador aprueba coincidencias exactas. */
+  /**
+   * Cifras que el validador puede aprobar como "cálculo verificado". SOLO las de
+   * TU REALIDAD (sección a). Las de REFERENCIAS ESTÁNDAR (sección b) quedan FUERA
+   * a propósito: una cifra normativa citada SIN marcador de referencia debe
+   * seguir bloqueándose (ver tercera vía en guardrail/validate.ts).
+   */
   cifrasCalculadas: number[];
 }
 
+/** Una línea del bloque: etiqueta semántica inequívoca, valor y fórmula. */
+interface Linea {
+  etiqueta: string;
+  valor: number;
+  formula: string;
+}
+
+function render(l: Linea): string {
+  return `- ${l.etiqueta}: ${l.valor} € (${l.formula})`;
+}
+
 /**
- * Mapa etiqueta→operaciones (documentado):
+ * Construye el paquete verificado a partir del mensaje del usuario.
  *
- *   ingreso + gasto → sobrante → ahorro sugerido (30% del sobrante) → proyección 12m
- *   ingreso (solo)  → regla 50/30/20
- *   gasto (solo)    → fondo de emergencia (6 meses)
+ * FALLO B (QA): el bloque mezclaba realidad y norma en una sola lista, y el
+ * modelo tomó el "ahorro sugerido" (10% del ingreso = 300) y su proyección
+ * (3600) como si fueran EL dato, ignorando el sobrante real (1000 → 12000/año) y
+ * re-etiquetando el sobrante como ingreso. Solución: DOS secciones con semántica
+ * separada.
+ *
+ * a) TU REALIDAD (datos verificados): ingreso, gastos, sobrante, capacidad de
+ *    ahorro anual (sobrante × 12). Cada cifra con etiqueta inequívoca. Alimentan
+ *    `cifrasCalculadas`.
+ * b) REFERENCIAS ESTÁNDAR (no son datos del usuario): porcentajes normativos.
+ *    NO entran en `cifrasCalculadas`.
+ *
+ * Mapa etiqueta→operaciones:
+ *   ingreso + gasto → sobrante, capacidad anual · ref: ahorro sugerido (10%)
+ *   ingreso (solo)  → ref: regla 50/30/20
+ *   gasto (solo)    → fondo de emergencia (6 meses)  [realidad: deriva de gastos]
  *   deuda + ingreso → ratio de deuda (ingreso anualizado ×12)
- *   meta + aporte   → meses hasta la meta
+ *   meta + sobrante → meses hasta la meta según la capacidad REAL
  *
- * Cada operación se ejecuta solo si tiene sus entradas; si la operación
- * devuelve error tipado, se OMITE (nunca se inyecta basura al modelo).
+ * Cada operación se ejecuta solo si tiene sus entradas; si devuelve error tipado,
+ * se OMITE (nunca se inyecta basura al modelo).
  */
 export function buildVerifiedContext(userMessage: string): VerifiedContext {
   const facts = extractInputFacts(userMessage);
   const byLabel = firstByLabel(facts);
 
-  const lineas: string[] = [];
-  const cifras: number[] = [];
-  const push = (etiqueta: string, valor: number, formula: string) => {
-    lineas.push(`- ${etiqueta}: ${valor} (${formula})`);
-    cifras.push(valor);
-  };
+  const realidad: Linea[] = [];
+  const referencias: Linea[] = [];
 
   const ingreso = byLabel.get("ingreso");
   const gasto = byLabel.get("gasto");
   const deuda = byLabel.get("deuda");
   const meta = byLabel.get("meta");
 
-  // Aporte mensual que quede disponible para la meta (lo fija la primera regla
-  // que aplique).
-  let aporteMensual: number | null = null;
+  // Capacidad de ahorro REAL disponible para la meta (el sobrante, no la norma).
+  let capacidadMensual: number | null = null;
 
-  // ── ingreso + gasto → sobrante, ahorro sugerido, proyección ───────────────
+  // ── ingreso + gasto → sobrante, capacidad anual (realidad) + ref ──────────
   if (ingreso !== undefined && gasto !== undefined) {
+    realidad.push({ etiqueta: "ingreso_mensual", valor: ingreso, formula: "dato que aportaste" });
+    realidad.push({ etiqueta: "gastos_mensuales", valor: gasto, formula: "dato que aportaste" });
+
     const s = sobrante(ingreso, gasto);
     if (s.ok) {
-      push(s.etiqueta, s.valor, s.formula);
+      realidad.push({
+        etiqueta: "sobrante_mensual",
+        valor: s.valor,
+        formula: `ingreso ${ingreso} − gastos ${gasto}`,
+      });
       if (s.valor > 0) {
-        const ap = porcentajeDe(s.valor, TASA_AHORRO_SUGERIDA);
-        if (ap.ok) {
-          aporteMensual = ap.valor;
-          push("ahorro sugerido (mensual)", ap.valor, ap.formula);
-          const proy = proyeccion(ap.valor, HORIZONTE_MESES);
-          if (proy.ok) push(proy.etiqueta, proy.valor, proy.formula);
+        capacidadMensual = s.valor;
+        const anual = proyeccion(s.valor, HORIZONTE_MESES);
+        if (anual.ok) {
+          realidad.push({
+            etiqueta: "capacidad_ahorro_anual",
+            valor: anual.valor,
+            formula: `sobrante ${s.valor} × 12`,
+          });
         }
+      }
+      // Referencia normativa: NO es un dato del usuario, va aparte y fuera de
+      // cifrasCalculadas.
+      const ref = porcentajeDe(ingreso, AHORRO_SUGERIDO_PCT);
+      if (ref.ok) {
+        referencias.push({
+          etiqueta: "referencia_ahorro_sugerido",
+          valor: ref.valor,
+          formula: "estándar 10% del ingreso — usar solo como referencia etiquetada según la tercera vía",
+        });
       }
     }
   } else if (ingreso !== undefined) {
-    // ── ingreso solo → regla 50/30/20 ───────────────────────────────────────
+    // ── ingreso solo → la regla 50/30/20 es NORMA, va a referencias ─────────
+    realidad.push({ etiqueta: "ingreso_mensual", valor: ingreso, formula: "dato que aportaste" });
     const r = regla503020(ingreso);
     if (r.ok) {
-      push("necesidades (50%)", r.necesidades, `50% de ${ingreso} = ${r.necesidades}`);
-      push("ocio (30%)", r.ocio, `30% de ${ingreso} = ${r.ocio}`);
-      push("ahorro (20%)", r.ahorro, `20% de ${ingreso} = ${r.ahorro}`);
-      aporteMensual = r.ahorro;
+      referencias.push({ etiqueta: "referencia_necesidades", valor: r.necesidades, formula: "estándar 50% del ingreso" });
+      referencias.push({ etiqueta: "referencia_ocio", valor: r.ocio, formula: "estándar 30% del ingreso" });
+      referencias.push({ etiqueta: "referencia_ahorro", valor: r.ahorro, formula: "estándar 20% del ingreso" });
     }
   }
 
-  // ── gasto solo → fondo de emergencia ──────────────────────────────────────
+  // ── gasto solo → fondo de emergencia (deriva de la realidad del usuario) ──
   if (gasto !== undefined && ingreso === undefined) {
+    realidad.push({ etiqueta: "gastos_mensuales", valor: gasto, formula: "dato que aportaste" });
     const f = fondoEmergencia(gasto, MESES_FONDO);
-    if (f.ok) push(f.etiqueta, f.valor, f.formula);
+    if (f.ok) {
+      realidad.push({ etiqueta: "reserva_imprevistos_objetivo", valor: f.valor, formula: `gastos ${gasto} × 6 meses` });
+    }
   }
 
   // ── deuda + ingreso → ratio de deuda (ingreso anualizado) ─────────────────
   if (deuda !== undefined && ingreso !== undefined) {
     const rd = ratioDeuda(deuda, ingreso * 12);
-    if (rd.ok) push(rd.etiqueta, rd.valor, `${rd.formula} (ingreso anualizado ${ingreso} x 12)`);
-  }
-
-  // ── meta → meses hasta la meta ────────────────────────────────────────────
-  if (meta !== undefined) {
-    let ap = aporteMensual;
-    if (ap === null && ingreso !== undefined) {
-      const s = porcentajeDe(ingreso, AHORRO_INGRESO_PCT);
-      if (s.ok) ap = s.valor;
-    }
-    if (ap !== null && ap > 0) {
-      const t = tiempoHastaMeta(meta, ap);
-      if (t.ok) push(t.etiqueta, t.valor, t.formula);
+    if (rd.ok) {
+      realidad.push({
+        etiqueta: "ratio_deuda_ingreso",
+        valor: rd.valor,
+        formula: `${rd.formula} (ingreso anualizado ${ingreso} × 12)`,
+      });
     }
   }
 
-  if (lineas.length === 0) {
+  // ── meta → meses hasta la meta según la capacidad REAL (nunca la norma) ───
+  if (meta !== undefined && capacidadMensual !== null && capacidadMensual > 0) {
+    const t = tiempoHastaMeta(meta, capacidadMensual);
+    if (t.ok) {
+      realidad.push({
+        etiqueta: "meses_hasta_meta",
+        valor: t.valor,
+        formula: `meta ${meta} ÷ capacidad ${capacidadMensual}/mes`,
+      });
+    }
+  }
+
+  if (realidad.length === 0 && referencias.length === 0) {
     return { bloque: "", cifrasCalculadas: [] };
   }
 
-  const bloque = [
-    "DATOS VERIFICADOS DE ESTA CONSULTA (usa EXCLUSIVAMENTE estas cifras; no inventes ni redondees a otras):",
-    ...lineas,
-  ].join("\n");
+  const secciones: string[] = [];
+  if (realidad.length > 0) {
+    secciones.push(
+      "TU REALIDAD (datos verificados — usa EXCLUSIVAMENTE estas cifras, no inventes ni redondees a otras):",
+      ...realidad.map(render),
+    );
+  }
+  if (referencias.length > 0) {
+    if (secciones.length > 0) secciones.push("");
+    secciones.push(
+      "REFERENCIAS ESTÁNDAR (NO son datos del usuario; solo puedes citarlas etiquetadas como referencia, nunca como su cifra real):",
+      ...referencias.map(render),
+    );
+  }
 
-  return { bloque, cifrasCalculadas: cifras };
+  // Solo la realidad alimenta cifrasCalculadas: las referencias sin marcador
+  // deben seguir bloqueándose.
+  const cifrasCalculadas = realidad.map((l) => l.valor);
+
+  return { bloque: secciones.join("\n"), cifrasCalculadas };
 }
 
 /** Primer valor por etiqueta (ignora etiquetas vacías). */

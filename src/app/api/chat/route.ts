@@ -4,6 +4,7 @@ import { buildSystemPrompt } from '@/lib/prompts/consigliere'
 import { callLLMWithHistory } from '@/lib/llm'
 import { runGuardrail } from '@/lib/guardrail'
 import { buildVerifiedContext } from '@/lib/calculator/orchestrator'
+import { detectLanguage } from '@/lib/language'
 import {
   validateConsigliereOutput,
   enforceOutputPolicy,
@@ -203,11 +204,20 @@ export async function POST(request: Request) {
     metas,
   })
 
-  // El bloque "DATOS VERIFICADOS DE ESTA CONSULTA…" va al final: son las cifras
-  // exactas que el modelo debe usar en vez de improvisar.
-  const systemPrompt = verified.bloque
-    ? `${basePrompt}\n\n${verified.bloque}`
-    : basePrompt
+  // FALLO A — idioma espejo del usuario. El perfil (profile.language) puede
+  // diferir del idioma en que el usuario escribe AHORA; manda el último mensaje.
+  const LANG_NAME: Record<'es' | 'pt' | 'en', string> = { es: 'ES', pt: 'PT', en: 'EN' }
+  const userLang = detectLanguage(cleanMessage)
+  const idiomaObligatorio =
+    `IDIOMA OBLIGATORIO: el usuario escribe en ${LANG_NAME[userLang]}. ` +
+    `Responde ÍNTEGRAMENTE en ese idioma.`
+
+  // El bloque del motor ("TU REALIDAD…" / "REFERENCIAS ESTÁNDAR…") va al final:
+  // son las cifras exactas que el modelo debe usar en vez de improvisar. La regla
+  // de idioma va la última, para que sea lo más reciente en el contexto.
+  const systemPrompt = [basePrompt, verified.bloque, idiomaObligatorio]
+    .filter(Boolean)
+    .join('\n\n')
 
   // ── Guardar mensaje del usuario ──────────────────────────────────────────────
   const { error: userMsgErr } = await admin.from('messages').insert({
@@ -237,6 +247,8 @@ export async function POST(request: Request) {
     userId: user.id,
     // M1: habilita la aprobación por "cálculo verificado" (rama c0 del validador).
     cifrasCalculadas: verified.cifrasCalculadas,
+    // Fallo A: el cierre del guardarraíl en el idioma del usuario, no el del modelo.
+    idioma: userLang,
   })
   let finalContent = guardrail.texto_final
 
