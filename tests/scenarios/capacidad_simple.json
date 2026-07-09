@@ -1,0 +1,29 @@
+{
+  "name": "capacidad_simple",
+  "playbook": "PB1",
+  "language": "es",
+  "description": "Capacidad de ahorro con datos del perfil sintético. El T2 no aporta ningún dato: si el contexto no tuviera estado, el guardarraíl bloquearía la cifra anual por falta de respaldo. Que la apruebe demuestra la memoria entre turnos. PB1 prohíbe citar la referencia normativa.",
+  "profile": { "archetype": "ahorrador", "country": "ES" },
+  "turns": [
+    {
+      "user": "Gano {{monthlyNet}} euros al mes y mis gastos son {{gastosMes}}. ¿Cuánto puedo ahorrar al año?",
+      "fixtureResponse": "Tu sobrante mensual es de {{sobrante}} € y tu capacidad de ahorro anual es de {{sobranteAnual}} €. ¿Arrancamos destinando ese sobrante a tu meta?",
+      "expectConcept": {
+        "sobrante": { "value": {{sobrante}}, "tol": 0 },
+        "capacidad": { "value": {{sobranteAnual}}, "tol": 0 }
+      },
+      "expectNotContains": ["10%", "referencia", "estándar"],
+      "expectBlocked": false,
+      "expectFallback": false,
+      "expectScenarioState": { "ingreso": {{monthlyNet}}, "gastos": {{gastosMes}} }
+    },
+    {
+      "user": "¿Y cuánto es eso al año?",
+      "fixtureResponse": "Ya con tus datos: tu capacidad de ahorro anual es de {{sobranteAnual}} €. ¿Arrancamos con ese plan?",
+      "expectConcept": { "capacidad": { "value": {{sobranteAnual}}, "tol": 0 } },
+      "expectBlocked": false,
+      "expectFallback": false,
+      "expectScenarioState": { "ingreso": {{monthlyNet}}, "gastos": {{gastosMes}} }
+    }
+  ]
+}

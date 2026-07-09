@@ -358,3 +358,134 @@ ALLOW_SYNTHETIC_CLEANUP=1 npx tsx scripts/cleanup-synthetic-profiles.ts
 - Ejecución real contra staging cuando AG01/operador disponga del entorno.
 - Extender seeder para insertar `goals` cuando AG06 termine la migración 007.
 - Considerar un script auxiliar `reset-synthetic-ica.ts` que pone `ica_score=0` y truncate `ica_history` de los sintéticos si las pruebas necesitan ICAs distribuidos en vez de saturados a 100.
+
+---
+
+# INFORME — AG07 · Harness de regresión conversacional multi-turno
+
+**Misión:** probar la maquinaria determinista completa, multi-turno, sin depender del LLM.
+**Branch:** `agent/07` · **Worktree:** `../wt-ag07-testing/` · **Fecha:** 2026-07-09
+
+## Entregables
+
+| Archivo | Función |
+|---|---|
+| `scripts/regression-harness.ts` | Runner. Modo fixture (default) y `--live`. Asserts por turno. |
+| `scripts/harness/scenario.ts` | Loader: prefiere `src/lib/calculator/scenario.ts` (AG08); cae al shim. |
+| `scripts/harness/scenario-provisional.ts` | **PROVISIONAL** — implementación AG07 del contrato de AG08. |
+| `scripts/lib/synthetic-profiles.ts` | Núcleo puro extraído del seeder. Fuente única de los 100 perfiles. |
+| `tests/scenarios/*.json` | 13 escenarios multi-turno (26 turnos). |
+
+## El fallo que motiva la tanda
+
+`buildVerifiedContext` (orchestrator) es **sin estado**: recibe un único string.
+
+    T1  "Gano 2500, gasto 1500. Financiar un carro de 30000 a 36 meses."
+    T2  "El banco me ofrece 9%."
+
+En T2 el orquestador ve un mensaje sin ingreso, sin gastos y sin préstamo:
+devuelve `bloque: ""` y `cifrasCalculadas: []`. El 9% se pierde (el extractor lo
+etiqueta `""`). Verificado en vivo antes de escribir una línea de harness.
+
+La cadena `extractScenarioDelta → mergeScenario → buildScenarioContext` mantiene el
+estado y recalcula la cuota con la TAE **real**: 30000 a 36 meses al 9% = **953,99 €/mes**
+(al 7% de referencia serían 926,31). Corrección semántica clave: cuando la TAE la
+aporta el usuario, la cuota deja de ser REFERENCIA y pasa a TU REALIDAD
+(`cuota_credito_real`), entrando en `cifrasCalculadas`.
+
+## Hallazgo — el guardarraíl es VALUE-BASED, no concept-based
+
+Con el estado correcto (`cifrasCalculadas = [2500, 1500, 1000, 12000, 953.99]`), la
+respuesta alucinada **"La cuota rondaría los 1.000 €/mes"** pasa el guardarraíl
+**sin bloqueo**: `1.000` parsea a `1000`, que es el *sobrante* legítimo. El
+guardarraíl aprueba cualquier cifra que coincida con una calculada, esté donde esté.
+
+Solo un assert de CONCEPTO lo detecta:
+
+    expectConcept.cuota: esperaba 954 ±1, encontré 1000
+
+Por eso `expectConcept` no es azúcar: es la única red para esta clase de fallo.
+`conceptValue()` prefiere el número que **sigue** a la palabra del concepto
+(ES/PT/EN lo escriben así); sin esa direccionalidad, en "sobrante 984 € y capacidad
+anual 11808 €" el ancla `capacidad` elegiría el 984 de detrás.
+
+## Bug encontrado y corregido en la capa de escenario
+
+`"Mis gastos: netflix 15, luz 80, …"` → el extractor etiqueta `gasto` por proximidad
+al **primer ítem** (15) y lo tomaba como gasto mensual agregado, machacando el 1400
+real del turno anterior (sobrante saltaba a 1985). Guard añadido: si el supuesto
+agregado coincide con un monto de la lista, no es un agregado — se descarta y el
+`gastos` previo se conserva. Cubierto por `entrega_gastos` (mutación C, abajo).
+
+## Escenarios (13 · 26 turnos)
+
+Los 6 playbooks en ES + los críticos en PT/EN:
+
+`capacidad_simple` (PB1) · `normativa_referencia` (PB2) · `credito_tae_update` (PB3) ·
+`entrega_gastos` (PB4) · `meta_definicion` (PB5) · `seguimiento_desviacion` (PB6) ·
+`garantia_bloqueada` · `fallback_sustancia` · `negacion_permitida` · `cuota_semantica` ·
+`delegativo_reemplazado` · `idioma_espejo_en` (EN) · `credito_pt` (PT)
+
+Los perfiles salen del banco de 100 sintéticos (`canonicalProfiles()`, seed `20260526`).
+El JSON se plantilla (`{{monthlyNet}}`, `{{sobrante}}`, …) **antes** de parsearse, así el
+token vale igual dentro de una cadena que en posición de número.
+
+## Verificación — mutación (los asserts muerden)
+
+Verde a la primera es sospechoso. Se reintrodujeron los bugs a mano:
+
+| Mutación | Turnos rojos | Escenarios que lo cazan |
+|---|---|---|
+| A · ignorar la TAE del usuario (bug original) | 3 | credito_tae_update, cuota_semantica, credito_pt |
+| B · `mergeScenario` sin memoria | 10 | 10 escenarios (la memoria es load-bearing) |
+| C · quitar el guard de lista de gastos | 1 | entrega_gastos |
+| D · fixture alucinada `"1.000"` | 1 | credito_tae_update (**solo** vía expectConcept) |
+
+Suites existentes tras el cambio: `npm test` 49/49 · `test:guardrail` OK · `test:calculator` OK.
+`tsc --strict` limpio sobre los cuatro archivos nuevos y sobre el seeder refactorizado.
+
+## Refactor del seeder — sin cambio de comportamiento
+
+El núcleo puro (PRNG mulberry32, distribuciones, `buildAssignments`, `salaryRange`,
+pools de nombres) se movió a `scripts/lib/synthetic-profiles.ts`. El seeder no era
+importable: `main()` corre al cargar y los guards hacen `process.exit(1)`.
+
+El `rng` se **inyecta**, y `buildAssignments` sigue siendo su primer consumidor, así que
+el orden de consumo del PRNG no cambia. Snapshot dorado de los 100 perfiles tomado
+ANTES del refactor y comparado después: **sha256 `c11b60c4fb3267f6`, idéntico**.
+
+## Coordinación con AG08
+
+Sus tres exports (`extractScenarioDelta`, `mergeScenario`, `buildScenarioContext`) **no
+están en develop**. Se implementó el contrato del prompt en un shim provisional y
+`scripts/harness/scenario.ts` prefiere `src/lib/calculator/scenario.ts` si existe y
+exporta las tres funciones. Cuando AG08 mergee, el harness prueba SU código sin tocar
+una línea; el shim se borra. El harness imprime en cada arranque cuál está usando.
+
+Contrato acordado (`ScenarioState`):
+
+    { ingreso?, gastos?, deuda?, ahorro?, meta?, expenses?[],
+      loan?: { principal?, months?, tae?, taeSource?: 'referencia'|'usuario' } }
+
+## Limitaciones documentadas (no bloquean)
+
+- **`extractInputFacts` sólo etiqueta en ES.** "Ganho…/despesas…" (PT) y "I earn…" (EN)
+  devuelven `etiqueta: ""`. Por eso `credito_pt` extrae el préstamo y la TAE (patrones
+  multi-idioma) pero no los ingresos, y `idioma_espejo_en` prueba el idioma del cierre,
+  no la extracción. Cubrirlo es trabajo de AG08/AG06.
+- **`detectLanguage` falla en PT corto.** `"O banco oferece-me 9%."` → `es`. Los turnos PT
+  del escenario son deliberadamente más largos. Vale la pena un fix aparte.
+- `SAFE_RESPONSE` no se exporta desde `output-validator.ts`: el harness detecta el
+  fallback por su primera frase en cada idioma. Si AG08 la exporta, sustituir el marcador.
+- `package.json` usa `npx tsx` (no `tsx` pelado, como pedía el prompt) para no añadir
+  `tsx` a devDependencies y tocar `package-lock.json`, compartido con otros agentes.
+  Es lo que ya hacen `test`, `test:guardrail` y `test:calculator`.
+
+## Cómo se ejecuta
+
+```bash
+npm run test:regression                      # fixture, determinista, sin red
+npm run test:regression -- --filter=credito  # subconjunto
+npm run test:regression -- --verbose         # imprime texto final y cifras por turno
+LLM_API_KEY=sk-... npm run test:regression -- --live   # contra el LLM real
+```

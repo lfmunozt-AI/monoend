@@ -18,47 +18,20 @@
 
 import { createClient, SupabaseClient } from '@supabase/supabase-js'
 import { randomUUID } from 'node:crypto'
+import {
+  buildAssignments,
+  mulberry32,
+  EMAIL_DOMAIN,
+  RNG_SEED,
+  type Assignment,
+  type Country,
+  type Archetype,
+} from './lib/synthetic-profiles'
 
-// ─── Configuración fija ────────────────────────────────────────────────────
-
-const EMAIL_DOMAIN = 'audit.andgcore.test'
-const TOTAL_USERS = 100
-const RNG_SEED = 20260526 // determinista — re-runs generan los mismos perfiles
-
-// Distribuciones (suman 100)
-const COUNTRY_PLAN: Record<Country, number> = { PT: 60, ES: 40 }
-const AGE_PLAN: Record<AgeBucket, number> = {
-  '25-34': 25,
-  '35-49': 40,
-  '50-64': 25,
-  '65-80': 10,
-}
-const ARCHETYPE_PLAN: Record<Archetype, number> = {
-  ahorrador: 20,
-  gastador: 25,
-  impulsivo: 15,
-  conservador: 20,
-  endeudado: 20,
-}
 
 // ─── Tipos ─────────────────────────────────────────────────────────────────
 
-type Country = 'PT' | 'ES'
-type AgeBucket = '25-34' | '35-49' | '50-64' | '65-80'
-type Archetype = 'ahorrador' | 'gastador' | 'impulsivo' | 'conservador' | 'endeudado'
 type PowerLaw = 'vital' | 'important' | 'discretionary' | 'leak' | 'debt'
-
-interface Assignment {
-  index: number
-  email: string
-  name: string
-  country: Country
-  age: number
-  archetype: Archetype
-  language: 'es' | 'pt'
-  monthsBack: number
-  monthlyNet: number
-}
 
 interface TxRow {
   user_id: string
@@ -73,31 +46,12 @@ interface TxRow {
 
 // ─── RNG determinista (mulberry32) ─────────────────────────────────────────
 
-function mulberry32(seed: number): () => number {
-  let s = seed >>> 0
-  return () => {
-    s = (s + 0x6d2b79f5) >>> 0
-    let t = s
-    t = Math.imul(t ^ (t >>> 15), t | 1)
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61)
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
-  }
-}
-
 const rng = mulberry32(RNG_SEED)
 const rand = () => rng()
 const randInt = (min: number, max: number) => Math.floor(rand() * (max - min + 1)) + min
 const randFloat = (min: number, max: number) => rand() * (max - min) + min
 function pick<T>(arr: readonly T[]): T {
   return arr[Math.floor(rand() * arr.length)]
-}
-function shuffle<T>(arr: T[]): T[] {
-  const out = [...arr]
-  for (let i = out.length - 1; i > 0; i--) {
-    const j = Math.floor(rand() * (i + 1))
-    ;[out[i], out[j]] = [out[j], out[i]]
-  }
-  return out
 }
 
 // ─── Safety guards ─────────────────────────────────────────────────────────
@@ -129,29 +83,6 @@ const admin: SupabaseClient = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
 })
 
 // ─── Datos de soporte ──────────────────────────────────────────────────────
-
-const PT_FIRST = [
-  'João', 'Maria', 'Pedro', 'Ana', 'Rui', 'Inês', 'Tiago', 'Sofia', 'Diogo',
-  'Catarina', 'Miguel', 'Beatriz', 'André', 'Mariana', 'Bruno', 'Joana',
-  'Ricardo', 'Carolina', 'Luís', 'Filipa', 'Nuno', 'Margarida', 'Hugo',
-  'Rita', 'Vasco',
-]
-const PT_LAST = [
-  'Silva', 'Santos', 'Oliveira', 'Costa', 'Pereira', 'Almeida', 'Ferreira',
-  'Martins', 'Rodrigues', 'Ribeiro', 'Carvalho', 'Sousa', 'Pinto', 'Lopes',
-  'Gomes', 'Fonseca', 'Marques', 'Cardoso',
-]
-const ES_FIRST = [
-  'Javier', 'María', 'Carlos', 'Lucía', 'Alejandro', 'Carmen', 'Miguel',
-  'Ana', 'David', 'Laura', 'Antonio', 'Elena', 'Manuel', 'Paula',
-  'Francisco', 'Marta', 'Jorge', 'Sara', 'Diego', 'Cristina', 'Pablo',
-  'Isabel', 'Sergio', 'Nuria', 'Raúl',
-]
-const ES_LAST = [
-  'García', 'López', 'Martínez', 'Sánchez', 'Pérez', 'Gómez', 'Fernández',
-  'Rodríguez', 'Hernández', 'Díaz', 'Moreno', 'Álvarez', 'Romero', 'Jiménez',
-  'Ruiz', 'Torres', 'Navarro', 'Castro',
-]
 
 const SUPER_BRANDS: Record<Country, string[]> = {
   PT: ['Pingo Doce', 'Continente', 'Lidl', 'Auchan', 'Mini-Preço'],
@@ -323,86 +254,6 @@ function monthsBackList(monthsBack: number): { year: number; month: number }[] {
     out.push({ year: d.getUTCFullYear(), month: d.getUTCMonth() + 1 })
   }
   return out
-}
-
-// ─── Distribución de asignaciones ──────────────────────────────────────────
-
-function buildAssignments(): Assignment[] {
-  const countries: Country[] = []
-  ;(Object.entries(COUNTRY_PLAN) as [Country, number][]).forEach(([c, n]) => {
-    for (let i = 0; i < n; i++) countries.push(c)
-  })
-
-  const ages: AgeBucket[] = []
-  ;(Object.entries(AGE_PLAN) as [AgeBucket, number][]).forEach(([a, n]) => {
-    for (let i = 0; i < n; i++) ages.push(a)
-  })
-
-  const archetypes: Archetype[] = []
-  ;(Object.entries(ARCHETYPE_PLAN) as [Archetype, number][]).forEach(([a, n]) => {
-    for (let i = 0; i < n; i++) archetypes.push(a)
-  })
-
-  const c = shuffle(countries)
-  const a = shuffle(ages)
-  const k = shuffle(archetypes)
-
-  const assignments: Assignment[] = []
-  for (let i = 0; i < TOTAL_USERS; i++) {
-    const country = c[i]
-    const ageBucket = a[i]
-    const archetype = k[i]
-
-    const ageRange: Record<AgeBucket, [number, number]> = {
-      '25-34': [25, 34],
-      '35-49': [35, 49],
-      '50-64': [50, 64],
-      '65-80': [65, 80],
-    }
-    const age = randInt(ageRange[ageBucket][0], ageRange[ageBucket][1])
-
-    const firstPool = country === 'PT' ? PT_FIRST : ES_FIRST
-    const lastPool = country === 'PT' ? PT_LAST : ES_LAST
-    const name = `${pick(firstPool)} ${pick(lastPool)}`
-
-    const [minSal, maxSal] = salaryRange(country, archetype)
-    const monthlyNet = Math.round(randFloat(minSal, maxSal))
-
-    const monthsBack = randInt(3, 6)
-
-    assignments.push({
-      index: i + 1,
-      email: `synth_${String(i + 1).padStart(3, '0')}@${EMAIL_DOMAIN}`,
-      name,
-      country,
-      age,
-      archetype,
-      language: country === 'PT' ? 'pt' : 'es',
-      monthsBack,
-      monthlyNet,
-    })
-  }
-  return assignments
-}
-
-function salaryRange(country: Country, archetype: Archetype): [number, number] {
-  if (country === 'PT') {
-    switch (archetype) {
-      case 'ahorrador':   return [1800, 2800]
-      case 'gastador':    return [1800, 3500]
-      case 'impulsivo':   return [1400, 2600]
-      case 'conservador': return [1400, 2400]
-      case 'endeudado':   return [800,  1800]
-    }
-  } else {
-    switch (archetype) {
-      case 'ahorrador':   return [2200, 3500]
-      case 'gastador':    return [2200, 4500]
-      case 'impulsivo':   return [1800, 3200]
-      case 'conservador': return [1800, 2800]
-      case 'endeudado':   return [1100, 2200]
-    }
-  }
 }
 
 // ─── Goals y miedos por arquetipo ──────────────────────────────────────────
@@ -783,7 +634,7 @@ function printPlan(assignments: Assignment[]): void {
 // ─── Main ──────────────────────────────────────────────────────────────────
 
 async function main() {
-  const assignments = buildAssignments()
+  const assignments = buildAssignments(rng)
   console.log(`Plan: ${assignments.length} perfiles`)
   printPlan(assignments)
   console.log('─'.repeat(80))

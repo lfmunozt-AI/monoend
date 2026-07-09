@@ -1,0 +1,23 @@
+{
+  "name": "meta_definicion",
+  "playbook": "PB5",
+  "language": "es",
+  "description": "PB5: el usuario plantea la meta en el T2. El estado la retiene y el motor calcula los meses contra la capacidad REAL, no contra la norma. El cierre confirma el acuerdo.",
+  "profile": { "archetype": "conservador", "country": "ES" },
+  "turns": [
+    {
+      "user": "Gano {{monthlyNet}} euros al mes y mis gastos son {{gastosMes}}.",
+      "fixtureResponse": "Anotado. Tu sobrante mensual es de {{sobrante}} €. ¿Cuál es la meta que quieres conquistar y en qué plazo?",
+      "expectBlocked": false,
+      "expectScenarioState": { "ingreso": {{monthlyNet}}, "gastos": {{gastosMes}} }
+    },
+    {
+      "user": "Mi meta es juntar 12000 euros en 24 meses.",
+      "fixtureResponse": "Con tu sobrante de {{sobrante}} € al mes, alcanzas los 12000 € en unos 20 meses. ¿Arrancamos con este plan?",
+      "expectContains": ["¿Arrancamos con este plan?"],
+      "expectBlocked": false,
+      "expectFallback": false,
+      "expectScenarioState": { "meta": 12000, "ingreso": {{monthlyNet}}, "gastos": {{gastosMes}} }
+    }
+  ]
+}

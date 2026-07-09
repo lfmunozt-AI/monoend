@@ -1,0 +1,22 @@
+{
+  "name": "seguimiento_desviacion",
+  "playbook": "PB6",
+  "language": "es",
+  "description": "PB6: hay un plan activo y llega un dato nuevo que desvía el gasto. El estado se ACTUALIZA (el delta manda sobre lo previo) y el sobrante se recalcula.",
+  "turns": [
+    {
+      "user": "Gano 2500 euros al mes y mis gastos son 1500.",
+      "fixtureResponse": "Anotado. Tu sobrante mensual es de 1000 €. ¿Cuál es tu meta?",
+      "expectBlocked": false,
+      "expectScenarioState": { "ingreso": 2500, "gastos": 1500 }
+    },
+    {
+      "user": "Este mes mis gastos fueron 1800.",
+      "fixtureResponse": "Tus gastos subieron a 1800 €, así que tu sobrante mensual baja a 700 €. ¿Confirmamos el ajuste del plan?",
+      "expectConcept": { "sobrante": { "value": 700, "tol": 0 } },
+      "expectBlocked": false,
+      "expectFallback": false,
+      "expectScenarioState": { "ingreso": 2500, "gastos": 1800 }
+    }
+  ]
+}

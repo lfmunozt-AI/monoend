@@ -1,0 +1,26 @@
+{
+  "name": "credito_pt",
+  "playbook": "PB3",
+  "language": "pt",
+  "description": "Crédito en portugués. El préstamo y la TAE sí se extraen (patrones PT), pero los ingresos NO: extractInputFacts sólo etiqueta en ES ('ganho'/'despesas' no están en LABEL_KEYWORDS). Aun así la cuota se recalcula con la tasa real y el cierre sale en PT.",
+  "turns": [
+    {
+      "user": "Quero financiar um carro de 30000 euros a 36 meses. Quanto seria a prestação?",
+      "fixtureResponse": "Com uma taxa anual de referência de 7%, a prestação seria de 926,31 €/mês. Qual é a taxa que o teu banco te oferece?",
+      "expectConcept": { "cuota": { "value": 926.31, "tol": 1 } },
+      "expectBlocked": false,
+      "expectScenarioState": { "loan": { "principal": 30000, "months": 36 } }
+    },
+    {
+      "user": "O meu banco oferece-me uma taxa anual de 9%. Qual seria a prestação mensal?",
+      "fixtureResponse": "Com a taxa de 9% do teu banco, a prestação seria de 953,99 €/mês. Partilhas comigo as tuas despesas mensais?",
+      "expectConcept": { "cuota": { "value": 954, "tol": 1 } },
+      "expectContains": ["953,99"],
+      "expectNotContains": ["926,31"],
+      "expectBlocked": false,
+      "expectScenarioState": {
+        "loan": { "principal": 30000, "months": 36, "tae": 9, "taeSource": "usuario" }
+      }
+    }
+  ]
+}

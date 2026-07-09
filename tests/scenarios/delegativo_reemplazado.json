@@ -1,0 +1,21 @@
+{
+  "name": "delegativo_reemplazado",
+  "playbook": "PB4",
+  "language": "es",
+  "description": "El cierre delegativo ('¿qué gastos podrías reducir?') delega el análisis en el usuario y viola el ADN de monoend. Se sustituye de forma determinista por una petición de insumo + promesa de análisis.",
+  "turns": [
+    {
+      "user": "Gano 2500 euros al mes y mis gastos son 1500.",
+      "fixtureResponse": "Anotado. Tu sobrante mensual es de 1000 €. ¿Cuál es tu meta?",
+      "expectBlocked": false
+    },
+    {
+      "user": "Quiero recortar gastos.",
+      "fixtureResponse": "Tu sobrante mensual es de 1000 € al mes. ¿Qué gastos podrías reducir?",
+      "expectNotContains": ["podrías reducir"],
+      "expectContains": ["Yo identifico cuáles recortar"],
+      "expectBlocked": false,
+      "expectFallback": false
+    }
+  ]
+}

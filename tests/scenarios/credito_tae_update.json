@@ -1,0 +1,35 @@
+{
+  "name": "credito_tae_update",
+  "playbook": "PB3",
+  "language": "es",
+  "description": "EL caso que falló. T1 fija ingresos, gastos y el crédito del carro; T2 solo aporta la TAE real del banco. El estado debe conservar principal y plazo, recalcular la cuota al 9% (953,99) y NO redondear a 1.000. Con buildVerifiedContext (sin estado) el T2 devolvía bloque vacío.",
+  "turns": [
+    {
+      "user": "Gano 2500 euros al mes y mis gastos son 1500. Quiero financiar un carro de 30000 a 36 meses.",
+      "fixtureResponse": "Con una TAE (tasa anual) de referencia del 7% aprox., la cuota sería de 926,31 €/mes. Tu sobrante mensual es de 1000 €, así que cabe. ¿Cuál es la TAE que te ofrece tu banco?",
+      "expectConcept": { "cuota": { "value": 926.31, "tol": 1 } },
+      "expectNotContains": ["1.000"],
+      "expectBlocked": false,
+      "expectFallback": false,
+      "expectScenarioState": {
+        "ingreso": 2500,
+        "gastos": 1500,
+        "loan": { "principal": 30000, "months": 36 }
+      }
+    },
+    {
+      "user": "El banco me ofrece 9%",
+      "fixtureResponse": "Con la TAE del 9% que te da tu banco, la cuota exacta es de 953,99 €/mes. Tu sobrante mensual es de 1000 €, así que cabe con margen. ¿Confirmamos ese plan?",
+      "expectConcept": { "cuota": { "value": 954, "tol": 1 } },
+      "expectContains": ["953,99"],
+      "expectNotContains": ["1.000", "926,31"],
+      "expectBlocked": false,
+      "expectFallback": false,
+      "expectScenarioState": {
+        "ingreso": 2500,
+        "gastos": 1500,
+        "loan": { "principal": 30000, "months": 36, "tae": 9, "taeSource": "usuario" }
+      }
+    }
+  ]
+}
