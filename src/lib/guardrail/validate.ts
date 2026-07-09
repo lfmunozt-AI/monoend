@@ -196,6 +196,27 @@ export function validateGrounding(
     const [sentStart, sentEnd] = sentenceRangeAt(modelResponse, m.start, m.end);
     const esReferencia = hasReferenceMarker(modelResponse.slice(sentStart, sentEnd));
 
+    // (POSICIONAL · FIX 4) — PRIORIDAD sobre el chequeo por frase. Si la cifra
+    // está ADYACENTE a un patrón de rol ("crédito de <X>", "cuota … <X>",
+    // "a <X> meses") y el motor conoce ese concepto, la cifra DEBE ser ese
+    // concepto (±1). Impide que la cuota se cite como el monto del crédito.
+    const rol = roleConcept(modelResponse, m);
+    if (rol && rol in conceptos && !isPercent(modelResponse, m)) {
+      if (Math.abs(m.value - conceptos[rol]) <= 1) {
+        aprobadas.push({ ...base(m, moneda), categoria: "calculo", motivo: `coincide con el concepto verificado (${rol}, por posición)` });
+      } else {
+        bloqueadas.push({
+          ...base(m, moneda),
+          motivo: `posición de ${rol} pero no coincide con su valor verificado`,
+          etiqueta: labelWithinSentence(modelResponse, m),
+          start: m.start,
+          end: m.end,
+          correccion: conceptos[rol],
+        });
+      }
+      continue;
+    }
+
     // (b) Porcentaje. Ya NO se aprueba en bloque. Un porcentaje suelto y sin
     // datos del usuario ("la cifra clave es el 20% de tus ingresos") es una
     // cifra de manual disfrazada de diagnóstico: destruye la confianza.
@@ -288,6 +309,30 @@ export function validateGrounding(
 
 function base(m: NumberMention, moneda: Moneda) {
   return { valor: m.value, texto: m.text, moneda };
+}
+
+function normLite(s: string): string {
+  return s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+}
+
+// Roles posicionales: qué concepto denota una cifra por su vecindad (FIX 4).
+const ROLE_MONTO_BEFORE =
+  /\b(credito|prestamo|emprestimo|loan|financiacion|financiamento|financiar)\s+(?:de\s+|of\s+)?$/;
+const ROLE_CUOTA_BEFORE = /\b(cuota|prestacao|mensualidad|mensualidade|payment|installment)\b/;
+const ROLE_PLAZO_AFTER = /^\s*(?:€\s*)?(meses|mes|months?|parcelas|prestacoes)\b/;
+
+/**
+ * Concepto que denota la cifra `m` por adyacencia, o null. Orden de precisión:
+ * plazo (sufijo "meses") → monto ("crédito de <X>", justo antes) → cuota (la
+ * palabra aparece en la ventana previa).
+ */
+function roleConcept(text: string, m: NumberMention): string | null {
+  const before = normLite(text.slice(Math.max(0, m.start - 40), m.start));
+  const after = normLite(text.slice(m.end, m.end + 14));
+  if (ROLE_PLAZO_AFTER.test(after)) return "plazo";
+  if (ROLE_MONTO_BEFORE.test(before)) return "monto";
+  if (ROLE_CUOTA_BEFORE.test(before)) return "cuota";
+  return null;
 }
 
 /**

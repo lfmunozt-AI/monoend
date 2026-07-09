@@ -55,6 +55,12 @@ function norm(s: string): string {
 const RATE_CONTEXT = /(tae|tasa|tipo|juros|interes|interest|apr|banco|ofrec|oferec|offer)/;
 const PERCENT = /(\d[\d.,]*)\s*%/;
 
+// El mensaje ENTERO es esencialmente un porcentaje (respuesta directa a la
+// pregunta por la tasa). Cubre "18%", "es un 9", "de 9%", "9 por ciento",
+// "9 percent", "it's 9". Anclado a ^…$ para exigir que no haya otras señales.
+const BARE_RATE =
+  /^\s*(?:es\s+un\s+|es\s+|un\s+|de\s+|it'?s\s+|the\s+rate\s+is\s+)?(\d[\d.,]*)\s*(?:%|por\s*ciento|por\s*cento|percent)?\s*\.?\s*$/i;
+
 // Plazo en meses o años.
 const PLAZO = /(\d[\d.,]*)\s*(a[ñn]os?|anos?|years?|meses|mes|months?)\b/;
 
@@ -82,6 +88,7 @@ function toMonths(value: number, unit: string): number {
 export function extractScenarioDelta(
   message: string,
   lang: Language = "es",
+  prev?: Partial<ScenarioState>,
 ): Partial<ScenarioState> {
   void lang; // los patrones ya cubren ES/PT/EN; el idioma queda para afinar a futuro
   const delta: Partial<ScenarioState> = {};
@@ -98,6 +105,19 @@ export function extractScenarioDelta(
     const p = PERCENT.exec(n);
     if (p) {
       const tae = parseDigitAmount(p[1]);
+      if (Number.isFinite(tae) && tae > 0 && tae < 100) {
+        delta.credito = { monto: 0, plazo_meses: 0, tae_pct: tae, tae_es_referencia: false };
+      }
+    }
+  }
+
+  // FIX 2 — respuesta CORTA de TAE. Si ya hay un crédito en el estado y el
+  // mensaje es esencialmente un porcentaje ("18%", "es un 9", "9 por ciento",
+  // "9 percent") sin otras señales → es la respuesta a "¿cuál es esa tasa?".
+  if (!delta.credito?.tae_pct && prev?.credito) {
+    const m = BARE_RATE.exec(n);
+    if (m) {
+      const tae = parseDigitAmount(m[1]);
       if (Number.isFinite(tae) && tae > 0 && tae < 100) {
         delta.credito = { monto: 0, plazo_meses: 0, tae_pct: tae, tae_es_referencia: false };
       }

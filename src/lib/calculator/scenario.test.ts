@@ -101,6 +101,32 @@ test("A: ingreso + gastos + crédito en un mismo mensaje, sin cruzarse", () => {
   assert.equal(d.credito?.plazo_meses, 36);
 });
 
+// ── FIX 2 — respuesta corta de TAE con crédito previo ────────────────────────
+test("FIX 2: estado con crédito + '18%' → tae 18 real", () => {
+  const prev = { credito: { monto: 30000, plazo_meses: 36, tae_es_referencia: true } };
+  const d = extractScenarioDelta("18%", "es", prev);
+  assert.equal(d.credito?.tae_pct, 18);
+  assert.equal(d.credito?.tae_es_referencia, false);
+});
+
+test("FIX 2: SIN crédito previo + '18%' → NO extrae nada", () => {
+  assert.deepEqual(extractScenarioDelta("18%", "es"), {});
+  assert.deepEqual(extractScenarioDelta("18%", "es", {}), {});
+});
+
+test("FIX 2: variantes cortas con crédito previo (es un 9 / 9 por ciento / 9 percent)", () => {
+  const prev = { credito: { monto: 30000, plazo_meses: 36, tae_es_referencia: true } };
+  assert.equal(extractScenarioDelta("es un 9", "es", prev).credito?.tae_pct, 9);
+  assert.equal(extractScenarioDelta("9 por ciento", "es", prev).credito?.tae_pct, 9);
+  assert.equal(extractScenarioDelta("9 percent", "en", prev).credito?.tae_pct, 9);
+});
+
+test("FIX 2: mensaje con otras señales NO se toma como TAE corta", () => {
+  const prev = { credito: { monto: 30000, plazo_meses: 36, tae_es_referencia: true } };
+  // "gano 2500" no es 'esencialmente un porcentaje' → no toca la TAE.
+  assert.equal(extractScenarioDelta("gano 2500", "es", prev).credito?.tae_pct, undefined);
+});
+
 // ── DEFECTO B — una lista de gastos NO machaca el agregado ───────────────────
 test("B: agregado 2372 en T1; lista en T2 → gastos siguen 2372 (jamás 15)", () => {
   let s = mergeScenario({}, extractScenarioDelta("Gano 2636 euros al mes y mis gastos son 2372."));

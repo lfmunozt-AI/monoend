@@ -188,7 +188,8 @@ export async function POST(request: Request) {
   const seed: Partial<ScenarioState> = { ...prevScenario }
   if (ingresosMes > 0) seed.ingreso_mensual = Math.round(ingresosMes)
   if (gastosMes > 0) seed.gastos_mensuales = Math.round(gastosMes)
-  const delta = extractScenarioDelta(cleanMessage, userLangEarly)
+  // `seed` (con el crédito previo) habilita la respuesta corta de TAE (FIX 2).
+  const delta = extractScenarioDelta(cleanMessage, userLangEarly, seed)
   const scenario = mergeScenario(seed, delta)
 
   const verified = buildScenarioContext(scenario, cleanMessage)
