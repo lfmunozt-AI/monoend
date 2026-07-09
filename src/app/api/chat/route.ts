@@ -2,8 +2,9 @@ import { createClient } from '@/lib/supabase/server'
 import { adminClient } from '@/lib/supabase/admin'
 import { buildSystemPrompt } from '@/lib/prompts/consigliere'
 import { callLLMWithHistory } from '@/lib/llm'
-import { runGuardrail, rewriteDelegativeClosing } from '@/lib/guardrail'
-import { buildVerifiedContext } from '@/lib/calculator/orchestrator'
+import { runGuardrail, rewriteDelegativeClosing, ensureSubstance } from '@/lib/guardrail'
+import { buildScenarioContext } from '@/lib/calculator/orchestrator'
+import { extractScenarioDelta, mergeScenario, type ScenarioState } from '@/lib/calculator/scenario'
 import { detectLanguage } from '@/lib/language'
 import {
   validateConsigliereOutput,
@@ -113,6 +114,7 @@ export async function POST(request: Request) {
 
   // ── Conversación: obtener o crear ────────────────────────────────────────────
   let convId: string
+  let prevScenario: Partial<ScenarioState> = {}
   if (!conversationId) {
     const { data: newConv, error: convErr } = await admin
       .from('conversations')
@@ -127,7 +129,7 @@ export async function POST(request: Request) {
   } else {
     const { data: conv } = await admin
       .from('conversations')
-      .select('id')
+      .select('id, scenario_state')
       .eq('id', conversationId)
       .eq('user_id', user.id)
       .maybeSingle()
@@ -135,6 +137,8 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'Conversación no encontrada' }, { status: 404 })
     }
     convId = (conv as { id: string }).id
+    // El motor recuerda: el escenario acumulado del diálogo (migración 010).
+    prevScenario = ((conv as { scenario_state?: Partial<ScenarioState> }).scenario_state) ?? {}
   }
 
   // ── Historial de la conversación ─────────────────────────────────────────────
@@ -176,21 +180,18 @@ export async function POST(request: Request) {
   const pais = fiscal?.country ?? profile.country ?? 'desconocido'
   const currentICA = typeof icaScore === 'number' ? icaScore : (profile.ica_score ?? 0)
 
-  // ── M1 · Motor financiero: el código calcula, el modelo redacta ───────────────
-  // `buildVerifiedContext` solo acepta un string, del que extrae hechos con el
-  // mismo extractor del guardarraíl. Le añadimos los datos del perfil como texto
-  // para que el motor también los vea.
-  //
-  // Enteros a propósito: `parseDigitAmount` usa convención es/LatAm y leería el
-  // punto de "3000.00" como separador de millares → 300000.
-  const datosPerfil = [
-    ingresosMes > 0 ? `Ingresos ${Math.round(ingresosMes)} euros al mes` : '',
-    gastosMes > 0 ? `Gastos ${Math.round(gastosMes)} euros al mes` : '',
-  ].filter(Boolean).join('. ')
+  // ── SCENARIO STATE · el motor calcula desde el estado completo del diálogo ────
+  // Antes el motor era stateless (solo veía el último mensaje): "el banco me
+  // ofrece un 9%" no recalculaba nada. Ahora se acumula el escenario.
+  const userLangEarly = detectLanguage(cleanMessage)
+  // Semilla: el perfil (transacciones del mes) rellena ingreso/gasto si los hay.
+  const seed: Partial<ScenarioState> = { ...prevScenario }
+  if (ingresosMes > 0) seed.ingreso_mensual = Math.round(ingresosMes)
+  if (gastosMes > 0) seed.gastos_mensuales = Math.round(gastosMes)
+  const delta = extractScenarioDelta(cleanMessage, userLangEarly)
+  const scenario = mergeScenario(seed, delta)
 
-  const verified = buildVerifiedContext(
-    datosPerfil ? `${cleanMessage}\n${datosPerfil}.` : cleanMessage,
-  )
+  const verified = buildScenarioContext(scenario, cleanMessage)
 
   // ── System prompt ────────────────────────────────────────────────────────────
   const basePrompt = buildSystemPrompt({
@@ -207,7 +208,7 @@ export async function POST(request: Request) {
   // FALLO A — idioma espejo del usuario. El perfil (profile.language) puede
   // diferir del idioma en que el usuario escribe AHORA; manda el último mensaje.
   const LANG_NAME: Record<'es' | 'pt' | 'en', string> = { es: 'ES', pt: 'PT', en: 'EN' }
-  const userLang = detectLanguage(cleanMessage)
+  const userLang = userLangEarly
   const idiomaObligatorio =
     `IDIOMA OBLIGATORIO: el usuario escribe en ${LANG_NAME[userLang]}. ` +
     `Responde ÍNTEGRAMENTE en ese idioma.`
@@ -245,8 +246,8 @@ export async function POST(request: Request) {
     mode: 'mvp',
     supabase: admin,
     userId: user.id,
-    // M1: habilita la aprobación por "cálculo verificado" (rama c0 del validador).
-    cifrasCalculadas: verified.cifrasCalculadas,
+    // Grounding: valores exactos (c0) + conceptos semánticos (PIEZA 2).
+    cifrasCalculadas: { valores: verified.valores, conceptos: verified.conceptos },
     // Fallo A: el cierre del guardarraíl en el idioma del usuario, no el del modelo.
     idioma: userLang,
   })
@@ -306,6 +307,19 @@ export async function POST(request: Request) {
     }))
   }
 
+  // PIEZA 3 — fallback de sustancia: si el guardrail vació la respuesta a un
+  // esqueleto sin cifras, se sustituye por una petición segura del dato que falta
+  // (scenario.missing[0]) con promesa de cálculo. Nunca más respuestas-esqueleto.
+  const beforeSubstance = finalContent
+  finalContent = ensureSubstance(finalContent, { lang: userLang, missing: scenario.missing })
+  if (finalContent !== beforeSubstance) {
+    console.warn('[chat] substance_fallback', JSON.stringify({
+      user_id: user.id,
+      conversation_id: convId,
+      missing: scenario.missing,
+    }))
+  }
+
   // ── Guardar respuesta + actualizar conversación (parallel) ───────────────────
   const [assistantMsgResult, updateConvResult] = await Promise.all([
     admin.from('messages').insert({
@@ -316,7 +330,7 @@ export async function POST(request: Request) {
       tokens_used: llmResult.tokensUsed,
     }),
     admin.from('conversations')
-      .update({ updated_at: new Date().toISOString() })
+      .update({ updated_at: new Date().toISOString(), scenario_state: scenario })
       .eq('id', convId),
   ])
 

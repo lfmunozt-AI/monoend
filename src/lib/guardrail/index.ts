@@ -12,7 +12,7 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { extractInputFacts, type VerifiedFact } from "./extract";
-import { validateGrounding, type GroundingResult } from "./validate";
+import { validateGrounding, type GroundingResult, type GroundingCifras } from "./validate";
 import {
   applyPolicy,
   hashQuestion,
@@ -34,11 +34,11 @@ export interface RunGuardrailOptions {
   /** Dueño del log (RLS). */
   userId?: string;
   /**
-   * Cifras EXACTAS del motor financiero (`buildVerifiedContext`). Habilitan la
-   * rama de aprobación "cálculo verificado" del validador (validate.ts, c0), que
-   * sin esto es inalcanzable. Ver M1 de la auditoría.
+   * Cifras del motor financiero. `number[]` (histórico) o `{valores, conceptos}`
+   * para el grounding semántico (PIEZA 2). Habilitan la rama de "cálculo
+   * verificado" del validador (c0) y el bloqueo por concepto conocido.
    */
-  cifrasCalculadas?: number[];
+  cifrasCalculadas?: number[] | GroundingCifras;
   /** Idioma del cierre. Si no se da, se infiere de la respuesta del modelo. */
   idioma?: Language;
 }
@@ -134,6 +134,7 @@ export { extractInputFacts, type VerifiedFact } from "./extract";
 export {
   validateGrounding,
   type GroundingResult,
+  type GroundingCifras,
   type ApprovedFigure,
   type BlockedFigure,
   type Categoria,
@@ -147,6 +148,7 @@ export {
   containsDataRequest,
   isDelegativeClosing,
   rewriteDelegativeClosing,
+  ensureSubstance,
   cleanup,
   type PolicyMode,
   type PolicyOptions,

@@ -164,6 +164,27 @@ export function hasReferenceMarker(sentence: string): boolean {
   return REFERENCE_MARKERS.some((mk) => n.includes(mk));
 }
 
+// ── Conceptos financieros (grounding semántico, PIEZA 2) ─────────────────────
+// Keywords ES/PT/EN → concepto canónico. Si una frase nombra un concepto y el
+// motor conoce su valor exacto, la cifra de esa frase DEBE coincidir con él: la
+// heurística de multiplicadores no aplica cuando hay un concepto conocido.
+const CONCEPT_KEYWORDS: [RegExp, string][] = [
+  [/\b(cuota|cuotas|mensualidad|mensualidade|prestacao|prestacoes|payment|installment)\b/, "cuota"],
+  [/\b(sobrante|excedente|surplus|left ?over)\b/, "sobrante"],
+  [/\b(recorte|corte|cut)\b/, "recorte"],
+  [/\b(capacidad (?:de ahorro )?anual|capacidad anual|annual capacity|yearly (?:savings|capacity))\b/, "capacidad_anual"],
+];
+
+/** Conceptos financieros nombrados en la frase (canónicos, sin repetir). */
+export function conceptsInSentence(sentence: string): string[] {
+  const n = norm(sentence);
+  const out: string[] = [];
+  for (const [re, concepto] of CONCEPT_KEYWORDS) {
+    if (re.test(n) && !out.includes(concepto)) out.push(concepto);
+  }
+  return out;
+}
+
 // ── Porcentaje ───────────────────────────────────────────────────────────────
 // "%" pegado o casi pegado tras la cifra, o "por ciento"/"porciento".
 export function isPercent(text: string, m: NumberMention): boolean {

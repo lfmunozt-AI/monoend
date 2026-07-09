@@ -23,7 +23,8 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { BlockedFigure, GroundingResult } from "./validate";
 import { detectLanguage, DEFAULT_LANGUAGE, type Language } from "../language";
-import { segmentSentences, splitSentences } from "./context";
+import { segmentSentences, splitSentences, isPercent, isTimeUnit } from "./context";
+import { findNumberMentions } from "./numbers";
 
 export type PolicyMode = "mvp" | "passthrough";
 
@@ -303,6 +304,87 @@ export function rewriteDelegativeClosing(
 
   const req = INSUMO_REQUEST[lang];
   return kept ? `${kept}\n\n${req}` : req;         // añade UN cierre de insumo
+}
+
+// ── PIEZA 3 — fallback de sustancia ──────────────────────────────────────────
+//
+// Cuando el guardarraíl vacía una respuesta (todas sus cifras eran inventadas),
+// lo que queda es un esqueleto: frases genéricas + un cierre, sin ningún número.
+// En vez de entregar eso, se sustituye por una respuesta segura que pide EL dato
+// que falta (scenario.missing[0]) con promesa de cálculo.
+
+/** ¿El texto contiene alguna cifra monetaria real (no un %, no una duración)? */
+function hasRealFigure(text: string): boolean {
+  return findNumberMentions(text).some(
+    (m) => !isPercent(text, m) && !isTimeUnit(text, m),
+  );
+}
+
+// Aperturas de relleno típicas de un esqueleto sin datos.
+const GENERIC_SKELETON =
+  /\b(necesito m[aá]s (?:informaci[oó]n|datos)|para ayudarte mejor|cu[eé]ntame m[aá]s|no tengo (?:suficientes )?datos|preciso de mais|i need more (?:info|information|details))\b/i;
+
+/** Petición segura por dato faltante, con promesa de cálculo (ES/PT/EN). */
+const SAFE_ASK: Record<string, Record<Language, string>> = {
+  tae: {
+    es: "Con la TAE real de tu banco te doy la cuota exacta — ¿me la confirmas?",
+    pt: "Com a TAE real do teu banco dou-te a prestação exata — confirmas?",
+    en: "With your bank's real APR I'll give you the exact payment — can you confirm it?",
+  },
+  gastos: {
+    es: "Con tus gastos mensuales te calculo la capacidad exacta — ¿me los compartes?",
+    pt: "Com as tuas despesas mensais calculo a capacidade exata — partilhas?",
+    en: "With your monthly expenses I'll compute the exact capacity — can you share them?",
+  },
+  ingreso: {
+    es: "Con tu ingreso neto mensual te doy la cifra exacta — ¿cuál es?",
+    pt: "Com o teu rendimento líquido mensal dou-te o número exato — qual é?",
+    en: "With your net monthly income I'll give you the exact figure — what is it?",
+  },
+  monto: {
+    es: "Con el monto del crédito te calculo la cuota — ¿cuánto es?",
+    pt: "Com o valor do crédito calculo a prestação — quanto é?",
+    en: "With the loan amount I'll compute the payment — how much is it?",
+  },
+  plazo: {
+    es: "Con el plazo te calculo el ritmo exacto — ¿en cuántos meses lo quieres?",
+    pt: "Com o prazo calculo o ritmo exato — em quantos meses o queres?",
+    en: "With the term I'll compute the exact pace — over how many months?",
+  },
+  meta: {
+    es: "Con el monto de tu meta te armo el plan — ¿cuánto necesitas juntar?",
+    pt: "Com o valor da tua meta monto o plano — quanto precisas de juntar?",
+    en: "With your goal amount I'll build the plan — how much do you need to save?",
+  },
+};
+
+const SAFE_GENERIC: Record<Language, string> = {
+  es: "Para darte una cifra exacta necesito un dato concreto — ¿me compartes tus ingresos y gastos mensuales?",
+  pt: "Para te dar um número exato preciso de um dado concreto — partilhas os teus rendimentos e despesas mensais?",
+  en: "To give you an exact figure I need one concrete data point — can you share your monthly income and expenses?",
+};
+
+function safeAsk(missing: string | undefined, lang: Language): string {
+  const key = missing === "meta_monto" ? "meta" : missing;
+  const table = key ? SAFE_ASK[key] : undefined;
+  return (table ?? SAFE_GENERIC)[lang];
+}
+
+/**
+ * Garantiza que la respuesta tenga sustancia. Si NO contiene ninguna cifra real
+ * Y es corta (<220) o solo relleno genérico, la sustituye por una petición segura
+ * del dato que falta. Si ya trae una cifra real, la deja intacta. Puro.
+ */
+export function ensureSubstance(
+  text: string,
+  opts: { lang?: Language; missing?: string[] } = {},
+): string {
+  const lang = opts.lang ?? detectLanguage(text);
+  if (hasRealFigure(text)) return text; // tiene una cifra concreta: hay sustancia
+  const esCorto = text.trim().length < 220;
+  const esGenerico = GENERIC_SKELETON.test(text);
+  if (!esCorto && !esGenerico) return text; // largo y con contenido: se respeta
+  return safeAsk(opts.missing?.[0], lang);
 }
 
 // ── Limpieza ───────────────────────────────────────────────────────────────

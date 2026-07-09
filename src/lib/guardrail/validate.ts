@@ -14,6 +14,7 @@
 
 import { findNumberMentions, dedupeOverlaps, type NumberMention } from "./numbers";
 import {
+  conceptsInSentence,
   detectCurrency,
   detectLabel,
   hasReferenceMarker,
@@ -23,6 +24,26 @@ import {
   type Moneda,
 } from "./context";
 import type { VerifiedFact } from "./extract";
+
+/**
+ * Cifras del motor para el grounding. Forma evolucionada (PIEZA 2):
+ * - `valores`: todas las cifras aprobables por coincidencia exacta (c0).
+ * - `conceptos`: mapa semántico concepto→valor exacto ("cuota"→926.31). Cuando
+ *   una frase nombra un concepto conocido, la cifra DEBE coincidir con su valor;
+ *   la heurística de multiplicadores no aplica.
+ * Se acepta también el `number[]` histórico (equivale a `{valores, conceptos:{}}`).
+ */
+export interface GroundingCifras {
+  valores: number[];
+  conceptos?: Record<string, number>;
+}
+
+function normalizeCifras(
+  c: number[] | GroundingCifras,
+): { valores: number[]; conceptos: Record<string, number> } {
+  if (Array.isArray(c)) return { valores: c, conceptos: {} };
+  return { valores: c.valores ?? [], conceptos: c.conceptos ?? {} };
+}
 
 /**
  * Por qué se aprobó una cifra.
@@ -133,7 +154,7 @@ function exactMatch(a: number, b: number): boolean {
 export function validateGrounding(
   modelResponse: string,
   facts: VerifiedFact[],
-  cifrasCalculadas: number[] = [],
+  cifrasCalculadas: number[] | GroundingCifras = [],
 ): GroundingResult {
   const aprobadas: ApprovedFigure[] = [];
   const bloqueadas: BlockedFigure[] = [];
@@ -141,6 +162,8 @@ export function validateGrounding(
   if (!modelResponse || !modelResponse.trim()) {
     return { cifras_aprobadas: aprobadas, cifras_bloqueadas: bloqueadas };
   }
+
+  const { valores, conceptos } = normalizeCifras(cifrasCalculadas);
 
   const figs = dedupeOverlaps(findNumberMentions(modelResponse));
 
@@ -157,7 +180,7 @@ export function validateGrounding(
   const isGroundedAmount = (m: NumberMention): boolean => {
     if (isPercent(modelResponse, m) || isTimeUnit(modelResponse, m)) return false;
     if (factValues.some((f) => approxEqual(m.value, f))) return true;
-    if (cifrasCalculadas.some((c) => exactMatch(m.value, c))) return true;
+    if (valores.some((c) => exactMatch(m.value, c))) return true;
     return isDerived(m.value, facts, explicitPercents);
   };
 
@@ -202,8 +225,28 @@ export function validateGrounding(
     // (c0) Coincide EXACTAMENTE con una cifra del motor financiero. Se prueba
     // ANTES de las heurísticas: si el código ya calculó esta cifra, es cálculo
     // verificado, no una coincidencia aproximada.
-    if (cifrasCalculadas.some((c) => exactMatch(m.value, c))) {
+    if (valores.some((c) => exactMatch(m.value, c))) {
       aprobadas.push({ ...base(m, moneda), categoria: "calculo", motivo: "cálculo verificado por el motor financiero" });
+      continue;
+    }
+    // (c1) GROUNDING SEMÁNTICO (PIEZA 2): si la frase nombra un concepto que el
+    // motor conoce (cuota, sobrante, recorte, capacidad_anual), la cifra DEBE
+    // coincidir con su valor exacto (±1). La heurística de multiplicadores NO
+    // aplica: un "1.000" no puede colarse como cuota por ser el 10% del ingreso.
+    const sentenceConcepts = conceptsInSentence(modelResponse.slice(sentStart, sentEnd))
+      .filter((c) => c in conceptos);
+    if (sentenceConcepts.length > 0) {
+      if (sentenceConcepts.some((c) => Math.abs(m.value - conceptos[c]) <= 1)) {
+        aprobadas.push({ ...base(m, moneda), categoria: "calculo", motivo: `coincide con el concepto verificado (${sentenceConcepts.join("/")})` });
+      } else {
+        bloqueadas.push({
+          ...base(m, moneda),
+          motivo: `no coincide con el concepto verificado por el motor (${sentenceConcepts.join("/")})`,
+          etiqueta: labelWithinSentence(modelResponse, m),
+          start: m.start,
+          end: m.end,
+        });
+      }
       continue;
     }
     // (c) Se deriva por cálculo de un hecho.

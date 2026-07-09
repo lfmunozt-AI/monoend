@@ -27,6 +27,7 @@ import {
   loanPayment,
 } from "./operations";
 import { classifyExpenses, type ExpenseItem } from "./expenses";
+import type { ScenarioState } from "./scenario";
 
 // ── Supuestos del modelo financiero (documentados y configurables) ──────────
 // Estas constantes definen las recomendaciones por defecto. Se centralizan aquí
@@ -137,7 +138,9 @@ interface Linea {
 }
 
 function render(l: Linea): string {
-  return `- ${l.etiqueta}: ${l.valor} € (${l.formula})`;
+  // Coma decimal (convención es/LatAm): el parser del guardarraíl lee "953,99"
+  // como 953.99; con punto lo trocearía. Los enteros quedan igual.
+  return `- ${l.etiqueta}: ${String(l.valor).replace(".", ",")} € (${l.formula})`;
 }
 
 /**
@@ -360,4 +363,147 @@ function firstByLabel(facts: VerifiedFact[]): Map<string, number> {
     if (f.etiqueta && !m.has(f.etiqueta)) m.set(f.etiqueta, f.valor);
   }
   return m;
+}
+
+/** Convierte un number a la convención es/LatAm ("926.31" → "926,31"). */
+function esNum(n: number): string {
+  return String(n).replace(".", ",");
+}
+
+export interface ScenarioContext {
+  /** Bloque a inyectar en el prompt ("TU REALIDAD…" / "REFERENCIAS…"). */
+  bloque: string;
+  /** Mapa semántico concepto→valor exacto para el grounding (PIEZA 2). */
+  conceptos: Record<string, number>;
+  /** Todas las cifras aprobables por el guardarraíl (superset de `conceptos`). */
+  valores: number[];
+  /** Qué falta para el playbook activo (de scenario.missing). */
+  missing: string[];
+}
+
+/**
+ * Construye el contexto a partir del ESTADO COMPLETO del escenario (no solo el
+ * último mensaje). Es la pieza que corrige la causa raíz: "el banco me ofrece un
+ * 9%" recalcula la cuota porque el crédito (monto+plazo) vive en el estado.
+ *
+ * - crédito con TAE real → cuota en TU REALIDAD, sin etiqueta de simulación.
+ * - crédito sin TAE → cuota en REFERENCIAS con TAE de referencia del 7%.
+ * - lista de gastos en el mensaje → clasificación + recorte del 50%.
+ * `conceptos` alimenta el grounding semántico; `valores` es el superset numérico.
+ */
+export function buildScenarioContext(
+  scenario: ScenarioState,
+  userMessage: string,
+): ScenarioContext {
+  const realidad: Linea[] = [];
+  const referencias: string[] = [];
+  const sinClasificar: string[] = [];
+  const conceptos: Record<string, number> = {};
+  const extraValores: number[] = [];
+
+  const ingreso = scenario.ingreso_mensual;
+  const gasto = scenario.gastos_mensuales;
+
+  let capacidadMensual: number | null = null;
+
+  if (ingreso !== undefined) {
+    realidad.push({ etiqueta: "ingreso_mensual", valor: ingreso, formula: "dato que aportaste" });
+  }
+  if (gasto !== undefined) {
+    realidad.push({ etiqueta: "gastos_mensuales", valor: gasto, formula: "dato que aportaste" });
+  }
+  if (ingreso !== undefined && gasto !== undefined) {
+    const s = sobrante(ingreso, gasto);
+    if (s.ok) {
+      realidad.push({ etiqueta: "sobrante_mensual", valor: s.valor, formula: `ingreso ${ingreso} − gastos ${gasto}` });
+      conceptos.sobrante = s.valor;
+      if (s.valor > 0) {
+        capacidadMensual = s.valor;
+        const anual = proyeccion(s.valor, HORIZONTE_MESES);
+        if (anual.ok) {
+          realidad.push({ etiqueta: "capacidad_ahorro_anual", valor: anual.valor, formula: `sobrante ${s.valor} × 12` });
+          conceptos.capacidad_anual = anual.valor;
+        }
+      }
+    }
+    const ref = porcentajeDe(ingreso, AHORRO_SUGERIDO_PCT);
+    if (ref.ok) referencias.push(refLineFor("referencia_ahorro_sugerido", AHORRO_SUGERIDO_PCT, ref.valor));
+  }
+
+  // ── Crédito desde el estado ────────────────────────────────────────────────
+  if (scenario.credito && scenario.credito.monto > 0 && scenario.credito.plazo_meses > 0) {
+    const c = scenario.credito;
+    const usarReferencia = c.tae_es_referencia || c.tae_pct === undefined;
+    const tae = usarReferencia ? TAE_REFERENCIA : (c.tae_pct as number);
+    const cuota = loanPayment({ principal: c.monto, months: c.plazo_meses, annualRatePct: tae });
+    if (cuota.ok) {
+      conceptos.cuota = cuota.valor;
+      extraValores.push(cuota.valor);
+      if (usarReferencia) {
+        referencias.push(
+          `- referencia_cuota_credito: ${esNum(cuota.valor)} €/mes (simulación con TAE de referencia ~${TAE_REFERENCIA}% — NO es la tasa real del usuario; monto ${c.monto} a ${c.plazo_meses} meses)`,
+        );
+      } else {
+        // TAE real del usuario: la cuota es su cifra real, no una simulación.
+        realidad.push({
+          etiqueta: "cuota_credito",
+          valor: cuota.valor,
+          formula: `TAE real ${tae}% del banco; monto ${c.monto} a ${c.plazo_meses} meses`,
+        });
+      }
+    }
+  }
+
+  // ── Lista de gastos en el mensaje → clasificación ─────────────────────────
+  const items = parseExpenseList(userMessage);
+  if (items.length >= 2) {
+    const cls = classifyExpenses(items);
+    const listaTxt = (g: ExpenseItem[]) => g.map((i) => `${i.name} ${i.amount}`).join(", ");
+    extraValores.push(...items.map((i) => i.amount));
+    if (cls.vitales.items.length > 0) {
+      realidad.push({ etiqueta: "gastos_vitales", valor: cls.vitales.total, formula: listaTxt(cls.vitales.items) });
+    }
+    if (cls.noVitales.items.length > 0) {
+      realidad.push({ etiqueta: "gastos_no_vitales", valor: cls.noVitales.total, formula: listaTxt(cls.noVitales.items) });
+      realidad.push({ etiqueta: "recorte_propuesto_50pct", valor: cls.recortePropuesto, formula: "supuesto: reducir no vitales a la mitad" });
+      conceptos.recorte = cls.recortePropuesto;
+      if (capacidadMensual !== null) {
+        realidad.push({ etiqueta: "nueva_capacidad", valor: round2(capacidadMensual + cls.recortePropuesto), formula: `sobrante ${capacidadMensual} + recorte ${cls.recortePropuesto}` });
+      }
+    }
+    if (cls.desconocidos.items.length > 0) {
+      sinClasificar.push(`gastos_sin_clasificar: ${listaTxt(cls.desconocidos.items)} — preguntar si son fijos imprescindibles`);
+    }
+  }
+
+  // ── Meta ───────────────────────────────────────────────────────────────────
+  if (scenario.meta?.monto !== undefined && capacidadMensual !== null && capacidadMensual > 0) {
+    const t = tiempoHastaMeta(scenario.meta.monto, capacidadMensual);
+    if (t.ok) {
+      realidad.push({ etiqueta: "meses_hasta_meta", valor: t.valor, formula: `meta ${scenario.meta.monto} ÷ capacidad ${capacidadMensual}/mes` });
+    }
+  }
+
+  const secciones: string[] = [];
+  if (realidad.length > 0 || sinClasificar.length > 0) {
+    secciones.push(
+      "TU REALIDAD (datos verificados — usa EXCLUSIVAMENTE estas cifras, no inventes ni redondees a otras):",
+      ...realidad.map(render),
+      ...sinClasificar.map((l) => `- ${l}`),
+    );
+  }
+  if (referencias.length > 0) {
+    if (secciones.length > 0) secciones.push("");
+    secciones.push(
+      "REFERENCIAS ESTÁNDAR (NO son datos del usuario; solo puedes citarlas etiquetadas como referencia, nunca como su cifra real; NO las menciones en preguntas de capacidad):",
+      ...referencias,
+    );
+  }
+
+  const valores = [...realidad.map((l) => l.valor), ...extraValores];
+  return { bloque: secciones.join("\n"), conceptos, valores, missing: scenario.missing ?? [] };
+}
+
+function refLineFor(etiqueta: string, pct: number, monto: number): string {
+  return `- ${etiqueta}: ${pct}% del ingreso (= ${monto} €/mes en tu caso)`;
 }
