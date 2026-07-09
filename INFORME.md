@@ -417,14 +417,14 @@ real del turno anterior (sobrante saltaba a 1985). Guard añadido: si el supuest
 agregado coincide con un monto de la lista, no es un agregado — se descarta y el
 `gastos` previo se conserva. Cubierto por `entrega_gastos` (mutación C, abajo).
 
-## Escenarios (13 · 26 turnos)
+## Escenarios (14 · 28 turnos)
 
 Los 6 playbooks en ES + los críticos en PT/EN:
 
 `capacidad_simple` (PB1) · `normativa_referencia` (PB2) · `credito_tae_update` (PB3) ·
 `entrega_gastos` (PB4) · `meta_definicion` (PB5) · `seguimiento_desviacion` (PB6) ·
 `garantia_bloqueada` · `fallback_sustancia` · `negacion_permitida` · `cuota_semantica` ·
-`delegativo_reemplazado` · `idioma_espejo_en` (EN) · `credito_pt` (PT)
+`delegativo_reemplazado` · `idioma_espejo_en` (EN) · `credito_pt` (PT) · `cuota_colision_valor`
 
 Los perfiles salen del banco de 100 sintéticos (`canonicalProfiles()`, seed `20260526`).
 El JSON se plantilla (`{{monthlyNet}}`, `{{sobrante}}`, …) **antes** de parsearse, así el
@@ -441,7 +441,8 @@ Verde a la primera es sospechoso. Se reintrodujeron los bugs a mano:
 | C · quitar el guard de lista de gastos | 1 | entrega_gastos |
 | D · fixture alucinada `"1.000"` | 1 | credito_tae_update (**solo** vía expectConcept) |
 
-Suites existentes tras el cambio: `npm test` 49/49 · `test:guardrail` OK · `test:calculator` OK.
+Suites existentes tras el cambio: `npm test` 49/49 · `test:guardrail` OK · `test:calculator` OK
+(incluye `scenario.test.ts` de AG08, que pasa: sus tests no cubren los defectos A y B).
 `tsc --strict` limpio sobre los cuatro archivos nuevos y sobre el seeder refactorizado.
 
 ## Refactor del seeder — sin cambio de comportamiento
@@ -454,18 +455,44 @@ El `rng` se **inyecta**, y `buildAssignments` sigue siendo su primer consumidor,
 el orden de consumo del PRNG no cambia. Snapshot dorado de los 100 perfiles tomado
 ANTES del refactor y comparado después: **sha256 `c11b60c4fb3267f6`, idéntico**.
 
-## Coordinación con AG08
+## Coordinación con AG08 — mergeó, y el harness pasó a probar SU código
 
-Sus tres exports (`extractScenarioDelta`, `mergeScenario`, `buildScenarioContext`) **no
-están en develop**. Se implementó el contrato del prompt en un shim provisional y
-`scripts/harness/scenario.ts` prefiere `src/lib/calculator/scenario.ts` si existe y
-exporta las tres funciones. Cuando AG08 mergee, el harness prueba SU código sin tocar
-una línea; el shim se borra. El harness imprime en cada arranque cuál está usando.
+El loader cumplió su función: AG08 mergeó (`e5b7db7`), el shim provisional se borró y
+el harness importa ahora su cadena real. Su contrato quedó repartido:
+`extractScenarioDelta`/`mergeScenario` en `calculator/scenario.ts`, y
+`buildScenarioContext(scenario, userMessage)` en `calculator/orchestrator.ts`.
+`cifrasCalculadas` pasó a `{valores, conceptos}` y hay un paso nuevo,
+`ensureSubstance`, replicado aquí en el mismo orden que `route.ts`.
 
-Contrato acordado (`ScenarioState`):
+## RESULTADO: 21/28 turnos verdes · 7 rojos = 4 defectos reales del motor
 
-    { ingreso?, gastos?, deuda?, ahorro?, meta?, expenses?[],
-      loan?: { principal?, months?, tae?, taeSource?: 'referencia'|'usuario' } }
+El rojo ES el entregable. Cada fallo se reprodujo y se atribuye a un defecto concreto
+de la tanda recién mergeada. No se tocó `src/`: son ficheros de AG08.
+
+**A · `calculator/scenario.ts` — `credito.monto` toma el primer número del mensaje.**
+`AMOUNT = /(\d[\d.,]*)/` no está anclada y se aplica al mensaje entero, así que
+"Gano 2500 … financiar un carro de 30000 a 36 meses" fija `monto = 2500` (el ingreso).
+Cuota 79,5 € en vez de 953,99 €. Depende del orden: con el crédito primero, acierta.
+Los 8 tests de `scenario.test.ts` sólo pasan el crédito aislado y siembran el ingreso
+como objeto literal, así que nunca cruzan ambos en un mismo mensaje.
+→ credito_tae_update T1/T2 · cuota_semantica T1 · cuota_colision_valor T1
+
+**B · `calculator/scenario.ts` — la lista de gastos machaca el agregado.**
+"Mis gastos: netflix 15, luz 80, …" fija `gastos_mensuales = 15` (el primer ítem) y
+borra los 2372 del turno anterior. Sobrante 2621 en vez de 264.
+→ entrega_gastos T2
+
+**C · `guardrail/validate.ts` — el orden de ramas anula el grounding semántico.**
+`(c0)` coincidencia exacta con `valores` corre ANTES de `(c1)` `conceptos`. La cuota
+alucinada "1.000" coincide con el sobrante (1000) y se aprueba como cálculo verificado.
+Es el caso que el propio comentario de (c1) dice impedir.
+→ cuota_colision_valor T2
+
+**D · `guardrail/policy.ts` — `ensureSubstance` destruye el ejemplo canónico de PB2.**
+El texto literal de `prompts/consigliere.ts:125` ("Como referencia, el estándar ronda el
+20% del ingreso — …") no tiene "cifra real" (20% es porcentaje) y mide 145 chars, así
+que se sustituye por `safeAsk`. El prompt de AG08 contradice a su propio enforcement.
+→ normativa_referencia T2
 
 ## Limitaciones documentadas (no bloquean)
 
@@ -480,6 +507,8 @@ Contrato acordado (`ScenarioState`):
 - `package.json` usa `npx tsx` (no `tsx` pelado, como pedía el prompt) para no añadir
   `tsx` a devDependencies y tocar `package-lock.json`, compartido con otros agentes.
   Es lo que ya hacen `test`, `test:guardrail` y `test:calculator`.
+- `npm run build` necesita `.env.local` (Supabase). Sin él falla también en `origin/develop`
+  limpio; con variables dummy pasa. No es un fallo de esta tanda.
 
 ## Cómo se ejecuta
 
