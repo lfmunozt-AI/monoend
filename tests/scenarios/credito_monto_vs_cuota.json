@@ -1,0 +1,27 @@
+{
+  "name": "credito_monto_vs_cuota",
+  "playbook": "PB3",
+  "language": "es",
+  "description": "El bug de los 3 incidentes: el modelo intercambia monto y cuota, citando la cuota (953,99) como el importe del crédito ('crédito de 953,99 €'). Con monto/plazo/tae de primera clase (FIX 1) y el grounding posicional por adyacencia (FIX 4), la cifra en posición de monto debe coincidir con conceptos.monto (30000) o corregirse; el resultado nunca dice 'crédito de 953' y sí menciona el monto real 30000.",
+  "turns": [
+    {
+      "user": "Gano 2500 euros al mes y mis gastos son 1500. Quiero financiar un carro de 30000 a 36 meses.",
+      "fixtureResponse": "Para el crédito de 30000 € a 36 meses con TAE de referencia ~7% aprox., la cuota sería de 926,31 €/mes. Tu sobrante mensual es de 1000 €, así que cabe. ¿Cuál es la TAE que te ofrece tu banco?",
+      "expectBlocked": false,
+      "expectContains": ["30000"],
+      "expectScenarioState": {
+        "credito": { "monto": 30000, "plazo_meses": 36, "tae_es_referencia": true }
+      }
+    },
+    {
+      "user": "El banco me ofrece 9%",
+      "fixtureResponse": "La cuota mensual para un crédito de 953,99 € a 36 meses sería de aproximadamente 953,99 €/mes.",
+      "expectBlocked": true,
+      "expectNotContains": ["crédito de 953", "credito de 953"],
+      "expectContains": ["30000"],
+      "expectScenarioState": {
+        "credito": { "monto": 30000, "plazo_meses": 36, "tae_pct": 9, "tae_es_referencia": false }
+      }
+    }
+  ]
+}

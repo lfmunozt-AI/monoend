@@ -42,6 +42,32 @@ test("C: la política corrige la cuota EN SU SITIO (1.000 → 954), conserva la 
   assert.ok(p.texto_final.includes("¿Confirmamos ese plan?"), "la frase se conserva, no se borra");
 });
 
+// ── FIX 4 — grounding POSICIONAL por adyacencia ───────────────────────────────
+const CIF_CREDITO = {
+  valores: [2500, 1500, 1000, 12000, 30000, 36, 9, 953.99],
+  conceptos: { cuota: 953.99, monto: 30000, plazo: 36, sobrante: 1000, tae: 9 },
+};
+
+test("FIX 4: la frase real del bug (cuota citada como monto) → BLOQUEADA", () => {
+  const bug = "la cuota mensual para un crédito de 953,99 € a 36 meses sería de aproximadamente 953,99 €";
+  const r = validateGrounding(bug, [], CIF_CREDITO);
+  const bloq = r.cifras_bloqueadas.find((c) => Math.abs(c.valor - 953.99) < 0.01);
+  assert.ok(bloq, "953,99 en posición de monto se bloquea");
+  assert.equal(bloq?.correccion, 30000, "corrección al monto real");
+});
+
+test("FIX 4: la plantilla correcta de PB3 → APROBADA", () => {
+  const ok = "Para el crédito de 30000 € a 36 meses con TAE del 9%, la cuota es de 953,99 €/mes.";
+  const r = validateGrounding(ok, [], CIF_CREDITO);
+  assert.equal(r.cifras_bloqueadas.length, 0, "cada cifra en su hueco");
+});
+
+test("FIX 4: 'a 36 meses' → rol plazo, aprobado; 'crédito de 30000' → rol monto, aprobado", () => {
+  const r = validateGrounding("Para el crédito de 30000 € a 36 meses la cuota es de 953,99 €.", [], CIF_CREDITO);
+  const v = r.cifras_aprobadas.map((c) => c.valor);
+  assert.ok(v.includes(30000) && v.includes(953.99));
+});
+
 // ── DEFECTO D — sustancia normativa (PB2) sobrevive ───────────────────────────
 // Texto LITERAL del ejemplo canónico de consigliere.ts.
 const PB2_CANONICO =
@@ -80,7 +106,8 @@ const FACTS_SEM = [{ valor: 10000, etiqueta: "ingreso", moneda: "EUR" as const }
 test("semántico: cuota 1000 con conceptos.cuota=926.31 → BLOQUEADA (no vale el 10%)", () => {
   const r = validateGrounding("La cuota sería de 1.000 € al mes.", FACTS_SEM, CIF_SEM);
   assert.ok(r.cifras_bloqueadas.some((c) => c.valor === 1000), "1000 se bloquea pese a ser 10% de 10000");
-  assert.match(r.cifras_bloqueadas[0].motivo, /concepto verificado/);
+  // Bloqueada por concepto (por frase o por posición — "cuota" está adyacente).
+  assert.match(r.cifras_bloqueadas[0].motivo, /concepto verificado|posici[oó]n de cuota/);
 });
 
 test("semántico: cuota 926 (±1 de 926.31) → APROBADA", () => {
@@ -145,6 +172,21 @@ test("propuesta sin pregunta → intacta", () => {
   const texto = "Tu sobrante es 500 €. Sube la aportación a 400 € este mes.";
   assert.equal(isDelegativeClosing(texto), false);
   assert.equal(rewriteDelegativeClosing(texto, "es"), texto);
+});
+
+// ── FIX 5 — cierres delegativos que se escaparon (ES/PT/EN) ───────────────────
+test("FIX 5: '¿cómo deseas proceder?' → detectado y reemplazado (ES)", () => {
+  assert.equal(isDelegativeClosing("Tu sobrante es 500 €. ¿Cómo deseas proceder?"), true);
+  const out = rewriteDelegativeClosing("Tu sobrante es 500 €. ¿Cómo deseas proceder?", "es");
+  assert.ok(!/deseas proceder/i.test(out));
+  assert.ok(out.includes("¿Me compartes"));
+});
+
+test("FIX 5: '¿qué prefieres?' (ES), 'o que preferes?' (PT), 'how do you want to proceed?' (EN)", () => {
+  assert.equal(isDelegativeClosing("Vale. ¿Qué prefieres?"), true);
+  assert.equal(isDelegativeClosing("Certo. O que preferes?"), true);
+  assert.equal(isDelegativeClosing("Right. How do you want to proceed?"), true);
+  assert.equal(isDelegativeClosing("Right. What would you prefer?"), true);
 });
 
 // ── PIEZA 3 — cierre único garantizado (fix del doble cierre) ─────────────────

@@ -353,7 +353,8 @@ async function runTurn(
   const userLang = detectLanguage(turn.user)
 
   // 1-3 · estado conversacional → contexto verificado (cadena de AG08)
-  const delta = extractScenarioDelta(turn.user, userLang)
+  // `prevState` habilita la respuesta corta de TAE (FIX 2), igual que el route.
+  const delta = extractScenarioDelta(turn.user, userLang, prevState)
   const state = mergeScenario(prevState, delta)
   const verified = buildScenarioContext(state, turn.user)
 

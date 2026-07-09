@@ -104,12 +104,15 @@ interface Linea {
   etiqueta: string;
   valor: number;
   formula: string;
+  /** Unidad tras el valor. "€" por defecto; "meses"/"%" para plazo/tae. */
+  unidad?: string;
 }
 
 function render(l: Linea): string {
   // Coma decimal (convención es/LatAm): el parser del guardarraíl lee "953,99"
   // como 953.99; con punto lo trocearía. Los enteros quedan igual.
-  return `- ${l.etiqueta}: ${String(l.valor).replace(".", ",")} € (${l.formula})`;
+  const unidad = l.unidad ?? "€";
+  return `- ${l.etiqueta}: ${String(l.valor).replace(".", ",")} ${unidad} (${l.formula})`;
 }
 
 /**
@@ -404,6 +407,20 @@ export function buildScenarioContext(
     const c = scenario.credito;
     const usarReferencia = c.tae_es_referencia || c.tae_pct === undefined;
     const tae = usarReferencia ? TAE_REFERENCIA : (c.tae_pct as number);
+
+    // FIX 1 — monto, plazo y TAE son DATOS DE PRIMERA CLASE: van a TU REALIDAD y
+    // a `conceptos` con su propia etiqueta, antes que la cuota. Así el 30000 tiene
+    // su hueco (y entra a `valores`), y el grounding puede distinguir monto de
+    // cuota en vez de que el modelo cite una como la otra.
+    realidad.push({ etiqueta: "monto_credito", valor: c.monto, formula: "dato que aportaste" });
+    realidad.push({ etiqueta: "plazo_credito_meses", valor: c.plazo_meses, formula: "dato que aportaste", unidad: "meses" });
+    conceptos.monto = c.monto;
+    conceptos.plazo = c.plazo_meses;
+    if (!usarReferencia) {
+      realidad.push({ etiqueta: "tae_credito_pct", valor: tae, formula: "TAE real de tu banco", unidad: "%" });
+      conceptos.tae = tae;
+    }
+
     const cuota = loanPayment({ principal: c.monto, months: c.plazo_meses, annualRatePct: tae });
     if (cuota.ok) {
       conceptos.cuota = cuota.valor;

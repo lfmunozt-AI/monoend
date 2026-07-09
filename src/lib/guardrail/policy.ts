@@ -219,11 +219,13 @@ const DELEGATIVE_RE = new RegExp(
     "podrias\\s+reducir|podrias\\s+recortar|crees\\s+que|te\\s+parece|piensa\\s+en|" +
     "evalua|considera\\s+cuales|que\\s+gastos\\s+(?:podrias|crees)|que\\s+recortarias|" +
     "en\\s+que\\s+(?:crees\\s+que\\s+)?gastas\\s+de\\s+mas|" +
+    "como\\s+deseas\\s+proceder|como\\s+quieres\\s+proceder|que\\s+prefieres|como\\s+prefieres|" +
     // PT
     "achas\\s+que|consegues\\s+reduzir|o\\s+que\\s+achas|pensa\\s+em|avalia|" +
+    "como\\s+preferes|o\\s+que\\s+preferes|como\\s+desejas\\s+proceder|" +
     // EN
     "could\\s+you\\s+cut|do\\s+you\\s+think|consider\\s+which|what\\s+do\\s+you\\s+think|" +
-    "think\\s+about\\s+which" +
+    "think\\s+about\\s+which|how\\s+do\\s+you\\s+want\\s+to\\s+proceed|what\\s+would\\s+you\\s+prefer" +
   ")",
 );
 
