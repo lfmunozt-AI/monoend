@@ -14,7 +14,57 @@ import { parseModelOutput } from "./schema";
 import { parseDigitAmount, findNumberMentions } from "./numbers";
 import { runGuardrail } from "./index";
 import { splitSentences, segmentSentences, sentenceRangeAt } from "./context";
-import { rewriteDelegativeClosing, isDelegativeClosing } from "./policy";
+import { rewriteDelegativeClosing, isDelegativeClosing, ensureSubstance } from "./policy";
+
+// ── PIEZA 3 — fallback de sustancia ───────────────────────────────────────────
+test("sustancia: esqueleto sin cifras → fallback con el missing correcto (tae)", () => {
+  const out = ensureSubstance("Necesito más información para ayudarte.", { lang: "es", missing: ["tae"] });
+  assert.match(out, /TAE real de tu banco/);
+  assert.ok(out.includes("?"), "pide el dato");
+});
+
+test("sustancia: respuesta con cifra verificada → intacta", () => {
+  const texto = "Tu cuota sería 953,99 €/mes con la TAE real del 9%.";
+  assert.equal(ensureSubstance(texto, { lang: "es", missing: ["tae"] }), texto);
+});
+
+test("sustancia: fallback en EN con el missing 'gastos'", () => {
+  const out = ensureSubstance("I need more info.", { lang: "en", missing: ["gastos"] });
+  assert.match(out, /monthly expenses/);
+});
+
+// ── PIEZA 2 — grounding semántico por concepto ────────────────────────────────
+const CIF_SEM = { valores: [10000, 926.31, 500], conceptos: { cuota: 926.31, sobrante: 500 } };
+const FACTS_SEM = [{ valor: 10000, etiqueta: "ingreso", moneda: "EUR" as const }];
+
+test("semántico: cuota 1000 con conceptos.cuota=926.31 → BLOQUEADA (no vale el 10%)", () => {
+  const r = validateGrounding("La cuota sería de 1.000 € al mes.", FACTS_SEM, CIF_SEM);
+  assert.ok(r.cifras_bloqueadas.some((c) => c.valor === 1000), "1000 se bloquea pese a ser 10% de 10000");
+  assert.match(r.cifras_bloqueadas[0].motivo, /concepto verificado/);
+});
+
+test("semántico: cuota 926 (±1 de 926.31) → APROBADA", () => {
+  const r = validateGrounding("La cuota sería de 926 € al mes.", FACTS_SEM, CIF_SEM);
+  assert.equal(r.cifras_bloqueadas.length, 0);
+  assert.ok(r.cifras_aprobadas.some((c) => c.valor === 926 && c.categoria === "calculo"));
+});
+
+test("semántico: sobrante 500 correcto → APROBADO", () => {
+  const r = validateGrounding("Tu sobrante mensual es de 500 €.", FACTS_SEM, CIF_SEM);
+  assert.equal(r.cifras_bloqueadas.length, 0);
+  assert.ok(r.cifras_aprobadas.some((c) => c.valor === 500));
+});
+
+test("semántico: cifra SIN concepto conocido sigue con la heurística", () => {
+  // "1000" sin keyword de concepto en la frase: la heurística (10% de 10000) aprueba.
+  const r = validateGrounding("Podrías apartar 1.000 € para tu meta.", FACTS_SEM, CIF_SEM);
+  assert.equal(r.cifras_bloqueadas.length, 0, "sin concepto, la heurística intacta");
+});
+
+test("semántico: compat retro — number[] equivale a {valores, conceptos:{}}", () => {
+  const r = validateGrounding("Tu sobrante es de 999 €.", [], [1000]);
+  assert.ok(r.cifras_bloqueadas.some((c) => c.valor === 999), "sin conceptos, comportamiento previo");
+});
 
 // ── TAREA 1 — cierre delegativo (monoend pide el insumo, él analiza) ──────────
 test("cierre delegativo ES → reemplazado por petición de insumo", () => {
