@@ -9,6 +9,7 @@
 // extrae — mejor no tocar el estado que corromperlo. Código PURO, edge-safe.
 
 import { parseDigitAmount } from "../guardrail/numbers";
+import { parseExpenseList, classifyExpenses } from "./expenses";
 import type { Language } from "../language";
 
 export interface GastosDetalle {
@@ -35,6 +36,8 @@ export interface ScenarioState {
   ingreso_mensual?: number;
   gastos_mensuales?: number;
   gastos_detalle?: GastosDetalle;
+  /** true si `gastos_detalle` vino de una lista desglosada (defecto B). */
+  gastos_es_detalle?: boolean;
   credito?: CreditoState;
   meta?: MetaState;
   /** Qué falta para completar el playbook activo. Recalculado en cada merge. */
@@ -84,6 +87,12 @@ export function extractScenarioDelta(
   const delta: Partial<ScenarioState> = {};
   const n = norm(message);
 
+  // Defecto B: si el mensaje es una LISTA de gastos, se trata aparte — NUNCA se
+  // deja que la extracción por keyword tome un ítem individual (netflix 15) como
+  // el gasto mensual agregado.
+  const listItems = parseExpenseList(message);
+  const esLista = listItems.length >= 2;
+
   // ── Tasa real (TAE) — porcentaje en contexto de interés/banco ─────────────
   if (RATE_CONTEXT.test(n)) {
     const p = PERCENT.exec(n);
@@ -95,10 +104,13 @@ export function extractScenarioDelta(
     }
   }
 
-  // ── Crédito: monto + plazo en la misma frase de precio/financiación ───────
+  // ── Crédito: monto + plazo ANCLADOS al contexto del crédito (defecto A) ────
+  // El monto se busca DESDE la keyword de crédito/compra, no como primer número
+  // global: en "gano 2500 ... carro de 30000 a 36 meses" el monto es 30000.
   if (PRECIO_CTX.test(n)) {
+    const desdeCredito = n.slice(n.search(PRECIO_CTX)).replace(PLAZO, " ");
     const plazo = PLAZO.exec(n);
-    const amount = AMOUNT.exec(n.replace(PLAZO, " ")); // no confundir el plazo con el monto
+    const amount = AMOUNT.exec(desdeCredito);
     if (plazo && amount) {
       const meses = toMonths(parseDigitAmount(plazo[1]), plazo[2]);
       const monto = parseDigitAmount(amount[1]);
@@ -112,7 +124,7 @@ export function extractScenarioDelta(
     }
   }
 
-  // ── Ingreso ────────────────────────────────────────────────────────────────
+  // ── Ingreso — anclado a su keyword ─────────────────────────────────────────
   if (INGRESO_CTX.test(n)) {
     const a = AMOUNT.exec(n.slice(n.search(INGRESO_CTX)));
     if (a) {
@@ -121,8 +133,19 @@ export function extractScenarioDelta(
     }
   }
 
-  // ── Gasto (agregado) ───────────────────────────────────────────────────────
-  if (GASTO_CTX.test(n)) {
+  // ── Gastos ──────────────────────────────────────────────────────────────────
+  if (esLista) {
+    // Lista desglosada: gastos_detalle con totales por grupo. NO se toca
+    // gastos_mensuales (el merge conserva el agregado previo — defecto B).
+    const cls = classifyExpenses(listItems);
+    delta.gastos_detalle = {
+      vitales: cls.vitales.total,
+      noVitales: cls.noVitales.total,
+      desconocidos: cls.desconocidos.total,
+    };
+    delta.gastos_es_detalle = true;
+  } else if (GASTO_CTX.test(n)) {
+    // Agregado en una sola cifra ("mis gastos son 1500").
     const a = AMOUNT.exec(n.slice(n.search(GASTO_CTX)));
     if (a) {
       const v = parseDigitAmount(a[1]);
@@ -160,6 +183,7 @@ export function mergeScenario(
   if (delta.ingreso_mensual !== undefined) base.ingreso_mensual = delta.ingreso_mensual;
   if (delta.gastos_mensuales !== undefined) base.gastos_mensuales = delta.gastos_mensuales;
   if (delta.gastos_detalle !== undefined) base.gastos_detalle = delta.gastos_detalle;
+  if (delta.gastos_es_detalle !== undefined) base.gastos_es_detalle = delta.gastos_es_detalle;
   if (delta.meta !== undefined) base.meta = { ...(base.meta ?? {}), ...delta.meta };
 
   if (delta.credito !== undefined) {

@@ -78,3 +78,36 @@ test("plazo en años → meses ('3 años' = 36)", () => {
   const s = extractScenarioDelta("financiar una casa de 200000 a 3 años");
   assert.equal(s.credito?.plazo_meses, 36);
 });
+
+// ── DEFECTO A — extracción anclada al contexto (campos cruzados) ─────────────
+test("A: 'gano 2500 y quiero un carro de 30000 a 36 meses' → cada campo el suyo", () => {
+  const d = extractScenarioDelta("gano 2500 euros al mes y quiero un carro de 30000 a 36 meses");
+  assert.equal(d.ingreso_mensual, 2500, "ingreso anclado a 'gano'");
+  assert.equal(d.credito?.monto, 30000, "monto anclado al crédito, NO el primer número");
+  assert.equal(d.credito?.plazo_meses, 36);
+});
+
+test("A: orden inverso (crédito primero) sigue funcionando", () => {
+  const d = extractScenarioDelta("quiero un carro de 30000 a 36 meses y gano 2500");
+  assert.equal(d.credito?.monto, 30000);
+  assert.equal(d.ingreso_mensual, 2500);
+});
+
+test("A: ingreso + gastos + crédito en un mismo mensaje, sin cruzarse", () => {
+  const d = extractScenarioDelta("gano 2500 euros al mes y mis gastos son 1500. Quiero financiar un carro de 30000 a 36 meses.");
+  assert.equal(d.ingreso_mensual, 2500);
+  assert.equal(d.gastos_mensuales, 1500);
+  assert.equal(d.credito?.monto, 30000);
+  assert.equal(d.credito?.plazo_meses, 36);
+});
+
+// ── DEFECTO B — una lista de gastos NO machaca el agregado ───────────────────
+test("B: agregado 2372 en T1; lista en T2 → gastos siguen 2372 (jamás 15)", () => {
+  let s = mergeScenario({}, extractScenarioDelta("Gano 2636 euros al mes y mis gastos son 2372."));
+  assert.equal(s.gastos_mensuales, 2372);
+  s = mergeScenario(s, extractScenarioDelta("Mis gastos: netflix 15, luz 80, agua 30, cerveza 120, mercado 400"));
+  assert.equal(s.gastos_mensuales, 2372, "la lista NO sustituye el agregado por el primer ítem (15)");
+  assert.equal(s.gastos_es_detalle, true, "pero sí se marca el detalle");
+  assert.equal(s.gastos_detalle?.vitales, 510);
+  assert.equal(s.gastos_detalle?.noVitales, 135);
+});

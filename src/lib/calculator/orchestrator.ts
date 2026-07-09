@@ -26,7 +26,7 @@ import {
   tiempoHastaMeta,
   loanPayment,
 } from "./operations";
-import { classifyExpenses, type ExpenseItem } from "./expenses";
+import { classifyExpenses, parseExpenseList, type ExpenseItem } from "./expenses";
 import type { ScenarioState } from "./scenario";
 
 // ── Supuestos del modelo financiero (documentados y configurables) ──────────
@@ -85,37 +85,6 @@ function detectLoanScenario(
 
   const principal = Math.max(...candidatos);
   return { principal, months };
-}
-
-// Nombres que NO son un gasto (agregados, etiquetas de perfil, escenario de
-// crédito): se descartan al parsear una lista de gastos.
-const NO_ES_GASTO =
-  /\b(ingreso|ingresos|sueldo|salario|gano|gana|gasto|gastos|meta|objetivo|plazo|carro|coche|auto|vehiculo|prestamo|credito|financiar|ahorro|ahorros|deuda)\b/;
-
-/**
- * Extrae una lista de gastos ("netflix 100, luz 50, …") del mensaje. Segmenta por
- * comas, saltos y puntos, y en cada segmento busca un nombre corto seguido de un
- * monto AL FINAL (tolerando € y "al mes"). Así "financiar un carro de 30000 a 36
- * meses" no cuenta (el monto no está al final) y "Ingresos 10000 euros al mes" se
- * descarta por el nombre. Devuelve [] si hay menos de 2 pares.
- */
-function parseExpenseList(message: string): ExpenseItem[] {
-  const items: ExpenseItem[] = [];
-  const segmentos = message.split(/[,\n]|(?<=[.!?])\s+/);
-  const re =
-    /([\p{L}][\p{L} ]{0,24}?)\s+(\d[\d.,]*)\s*(?:€|eur|euros?)?\s*(?:\/\s*m[eê]s|al\s+mes|por\s+m[eê]s|per\s+month|\/mo)?\s*$/iu;
-
-  for (const seg of segmentos) {
-    const m = re.exec(seg.trim());
-    if (!m) continue;
-    const name = m[1].trim();
-    if (!name || NO_ES_GASTO.test(normaliza(name))) continue;
-    const amount = parseDigitAmount(m[2]);
-    if (!Number.isFinite(amount) || amount <= 0) continue;
-    items.push({ name, amount });
-  }
-
-  return items.length >= 2 ? items : [];
 }
 
 export interface VerifiedContext {

@@ -79,6 +79,13 @@ export interface BlockedFigure {
   /** Posición en la respuesta — la Pieza 3 la usa para eliminar la frase. */
   start: number;
   end: number;
+  /**
+   * Valor correcto cuando el bloqueo es por MISMATCH de un concepto conocido
+   * (la cuota debía ser 953,99 y el modelo escribió 1.000). Si está presente, la
+   * Pieza 3 corrige la cifra EN SU SITIO en vez de eliminar la frase: el motor
+   * sabe la respuesta buena, así que la sustituye. Ausente → se elimina la frase.
+   */
+  correccion?: number;
 }
 
 export interface GroundingResult {
@@ -217,36 +224,42 @@ export function validateGrounding(
       aprobadas.push({ ...base(m, moneda), categoria: "concepto", motivo: "regla temporal" });
       continue;
     }
-    // (a) Coincide con un hecho verificado.
-    if (factValues.some((f) => approxEqual(m.value, f))) {
-      aprobadas.push({ ...base(m, moneda), categoria: "hecho", motivo: "dato del usuario" });
-      continue;
-    }
-    // (c0) Coincide EXACTAMENTE con una cifra del motor financiero. Se prueba
-    // ANTES de las heurísticas: si el código ya calculó esta cifra, es cálculo
-    // verificado, no una coincidencia aproximada.
-    if (valores.some((c) => exactMatch(m.value, c))) {
-      aprobadas.push({ ...base(m, moneda), categoria: "calculo", motivo: "cálculo verificado por el motor financiero" });
-      continue;
-    }
-    // (c1) GROUNDING SEMÁNTICO (PIEZA 2): si la frase nombra un concepto que el
-    // motor conoce (cuota, sobrante, recorte, capacidad_anual), la cifra DEBE
-    // coincidir con su valor exacto (±1). La heurística de multiplicadores NO
-    // aplica: un "1.000" no puede colarse como cuota por ser el 10% del ingreso.
+    // (c1) GROUNDING SEMÁNTICO (PIEZA 2 · defecto C): si la frase nombra un
+    // concepto que el motor conoce (cuota, sobrante, recorte…), el SEMÁNTICO
+    // decide PRIMERO — antes que la coincidencia genérica c0. Un "1.000 €" como
+    // cuota debe bloquearse aunque 1000 esté en `valores` como sobrante.
+    // Un dato crudo del usuario (hecho) sí se respeta como escape.
     const sentenceConcepts = conceptsInSentence(modelResponse.slice(sentStart, sentEnd))
       .filter((c) => c in conceptos);
     if (sentenceConcepts.length > 0) {
-      if (sentenceConcepts.some((c) => Math.abs(m.value - conceptos[c]) <= 1)) {
+      if (factValues.some((f) => approxEqual(m.value, f))) {
+        aprobadas.push({ ...base(m, moneda), categoria: "hecho", motivo: "dato del usuario" });
+      } else if (sentenceConcepts.some((c) => Math.abs(m.value - conceptos[c]) <= 1)) {
         aprobadas.push({ ...base(m, moneda), categoria: "calculo", motivo: `coincide con el concepto verificado (${sentenceConcepts.join("/")})` });
       } else {
+        // El motor conoce el valor correcto del concepto → se ofrece como
+        // corrección en su sitio (la Pieza 3 decide sustituir vs eliminar).
+        const conceptoRef = sentenceConcepts[0];
         bloqueadas.push({
           ...base(m, moneda),
           motivo: `no coincide con el concepto verificado por el motor (${sentenceConcepts.join("/")})`,
           etiqueta: labelWithinSentence(modelResponse, m),
           start: m.start,
           end: m.end,
+          correccion: conceptos[conceptoRef],
         });
       }
+      continue;
+    }
+    // (a) Coincide con un hecho verificado.
+    if (factValues.some((f) => approxEqual(m.value, f))) {
+      aprobadas.push({ ...base(m, moneda), categoria: "hecho", motivo: "dato del usuario" });
+      continue;
+    }
+    // (c0) Coincide EXACTAMENTE con una cifra del motor financiero (sin concepto
+    // conocido en la frase). Es cálculo verificado, no coincidencia aproximada.
+    if (valores.some((c) => exactMatch(m.value, c))) {
+      aprobadas.push({ ...base(m, moneda), categoria: "calculo", motivo: "cálculo verificado por el motor financiero" });
       continue;
     }
     // (c) Se deriva por cálculo de un hecho.
