@@ -55,7 +55,7 @@
 import { readdirSync, readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 
-import { runGuardrail, rewriteDelegativeClosing } from '../src/lib/guardrail'
+import { runGuardrail, rewriteDelegativeClosing, ensureSubstance } from '../src/lib/guardrail'
 import {
   validateConsigliereOutput,
   enforceOutputPolicy,
@@ -65,7 +65,16 @@ import { detectLanguage, type Language } from '../src/lib/language'
 import { findNumberMentions, dedupeOverlaps } from '../src/lib/guardrail/numbers'
 import { isPercent } from '../src/lib/guardrail/context'
 
-import { loadScenarioModule, type ScenarioModule, type ScenarioState } from './harness/scenario'
+// La cadena de escenario de AG08, ya en develop. El shim provisional de AG07 se
+// borró: el harness prueba SU código. Ojo — el contrato real quedó repartido:
+// extractScenarioDelta/mergeScenario viven en `scenario.ts`, y buildScenarioContext
+// en `orchestrator.ts`, con firma (scenario, userMessage).
+import {
+  extractScenarioDelta,
+  mergeScenario,
+  type ScenarioState,
+} from '../src/lib/calculator/scenario'
+import { buildScenarioContext } from '../src/lib/calculator/orchestrator'
 import {
   canonicalProfiles,
   derivedFinancials,
@@ -174,9 +183,16 @@ function conceptValue(text: string, concept: string): number | undefined {
 
 // ── Detección de la respuesta segura (fallback) ─────────────────────────────
 //
-// `SAFE_RESPONSE` NO se exporta desde output-validator.ts. Reflejamos aquí su
-// primera frase por idioma. Si AG08 la exporta algún día, sustituir por el
-// import y borrar estos marcadores.
+// "Fallback" = el texto del modelo se descartó entero y se sustituyó por una
+// respuesta enlatada segura. Hoy hay dos fuentes:
+//
+//   1. `SAFE_RESPONSE` de output-validator.ts — cuando, tras borrar las oraciones
+//      infractoras, no queda sustancia. NO se exporta: se detecta por su primera
+//      frase en cada idioma.
+//   2. `safeAsk()` de policy.ts, vía `ensureSubstance` — cuando la respuesta no
+//      contiene ninguna cifra real. Tampoco se exporta, pero SÍ se puede computar:
+//      `ensureSubstance("", {lang, missing})` devuelve exactamente ese texto. Se
+//      calcula en vez de copiarlo, así no se desincroniza con AG08.
 
 const SAFE_RESPONSE_MARKERS: Record<Language, string> = {
   es: 'No puedo prometerte resultados de inversión',
@@ -184,8 +200,9 @@ const SAFE_RESPONSE_MARKERS: Record<Language, string> = {
   en: "I can't promise you investment returns",
 }
 
-function isFallback(text: string): boolean {
-  return Object.values(SAFE_RESPONSE_MARKERS).some((m) => text.includes(m))
+function isFallback(text: string, lang: Language, missing: string[]): boolean {
+  if (Object.values(SAFE_RESPONSE_MARKERS).some((m) => text.includes(m))) return true
+  return text.trim() === ensureSubstance('', { lang, missing }).trim()
 }
 
 // ── Subconjunto profundo, para expectScenarioState ──────────────────────────
@@ -281,7 +298,10 @@ interface TurnOutcome {
   blocked: boolean
   state: ScenarioState
   bloque: string
-  cifrasCalculadas: number[]
+  valores: number[]
+  conceptos: Record<string, number>
+  missing: string[]
+  lang: Language
 }
 
 async function modelResponse(
@@ -325,26 +345,25 @@ async function modelResponse(
 async function runTurn(
   scenario: Scenario,
   turn: Turn,
-  prevState: ScenarioState,
-  mod: ScenarioModule,
+  prevState: Partial<ScenarioState>,
   live: boolean,
   history: Array<{ role: 'user' | 'assistant'; content: string }>,
   profile: Assignment | undefined,
 ): Promise<TurnOutcome> {
-  // 1-3 · estado conversacional → contexto verificado
-  const delta = mod.extractScenarioDelta(turn.user)
-  const state = mod.mergeScenario(prevState, delta)
-  const { bloque, cifrasCalculadas } = mod.buildScenarioContext(state)
-
-  // 4 · el modelo (fixture o real)
-  const response = await modelResponse(turn, live, scenario, bloque, history, profile)
-
   const userLang = detectLanguage(turn.user)
 
-  // 5 · guardarraíl de cifras
+  // 1-3 · estado conversacional → contexto verificado (cadena de AG08)
+  const delta = extractScenarioDelta(turn.user, userLang)
+  const state = mergeScenario(prevState, delta)
+  const verified = buildScenarioContext(state, turn.user)
+
+  // 4 · el modelo (fixture o real)
+  const response = await modelResponse(turn, live, scenario, verified.bloque, history, profile)
+
+  // 5 · guardarraíl de cifras: valores exactos + conceptos semánticos
   const guardrail = await runGuardrail(turn.user, response, {
     mode: 'mvp',
-    cifrasCalculadas,
+    cifrasCalculadas: { valores: verified.valores, conceptos: verified.conceptos },
     idioma: userLang,
   })
   let finalText = guardrail.texto_final
@@ -366,7 +385,19 @@ async function runTurn(
   // 9 · cierre delegativo
   finalText = rewriteDelegativeClosing(finalText, userLang)
 
-  return { finalText, blocked: guardrail.bloqueado, state, bloque, cifrasCalculadas }
+  // 10 · sustancia: si no queda una cifra concreta, pide el dato que falta
+  finalText = ensureSubstance(finalText, { lang: userLang, missing: state.missing })
+
+  return {
+    finalText,
+    blocked: guardrail.bloqueado,
+    state,
+    bloque: verified.bloque,
+    valores: verified.valores,
+    conceptos: verified.conceptos,
+    missing: state.missing,
+    lang: userLang,
+  }
 }
 
 // ── Asserts ─────────────────────────────────────────────────────────────────
@@ -397,7 +428,7 @@ function checkTurn(turn: Turn, out: TurnOutcome, live: boolean): string[] {
   }
 
   if (turn.expectFallback !== undefined) {
-    const got = isFallback(text)
+    const got = isFallback(text, out.lang, out.missing)
     if (got !== turn.expectFallback) {
       errs.push(`expectFallback: esperaba ${turn.expectFallback}, encontré ${got}`)
     }
@@ -441,8 +472,6 @@ async function main() {
     }
   }
 
-  const { mod, source } = await loadScenarioModule()
-
   const files = readdirSync(SCENARIOS_DIR)
     .filter((f) => f.endsWith('.json'))
     .sort()
@@ -455,9 +484,7 @@ async function main() {
 
   console.log(`${BOLD}Harness de regresión conversacional — AG07${RESET}`)
   console.log(`  modo:      ${live ? 'LIVE (LLM real)' : 'FIXTURE (sin LLM, determinista)'}`)
-  console.log(
-    `  escenario: ${source === 'ag08' ? 'src/lib/calculator/scenario.ts (AG08)' : `${YELLOW}shim provisional AG07${RESET} — AG08 aún no mergeó`}`,
-  )
+  console.log(`  escenario: src/lib/calculator/scenario.ts + orchestrator.ts (AG08)`)
   console.log(`  ficheros:  ${files.length}\n`)
 
   let okTurns = 0
@@ -472,12 +499,12 @@ async function main() {
     const subtitle = profile ? `${DIM}perfil #${profile.index} ${profile.name} (${profile.archetype}, ${profile.country})${RESET}` : ''
     console.log(`${header} ${subtitle}`)
 
-    let state: ScenarioState = {}
+    let state: Partial<ScenarioState> = {}
     const history: Array<{ role: 'user' | 'assistant'; content: string }> = []
     let scenarioFailed = false
 
     for (const [i, turn] of scenario.turns.entries()) {
-      const out = await runTurn(scenario, turn, state, mod, live, history, profile)
+      const out = await runTurn(scenario, turn, state, live, history, profile)
       state = out.state
       history.push({ role: 'user', content: turn.user }, { role: 'assistant', content: out.finalText })
 
@@ -493,12 +520,12 @@ async function main() {
         for (const e of errs) console.log(`      ${RED}${e}${RESET}`)
         console.log(`      ${DIM}final: ${JSON.stringify(out.finalText)}${RESET}`)
         console.log(`      ${DIM}estado: ${JSON.stringify(out.state)}${RESET}`)
-        console.log(`      ${DIM}cifras: [${out.cifrasCalculadas.join(', ')}]${RESET}`)
+        console.log(`      ${DIM}valores: [${out.valores.join(', ')}] · conceptos: ${JSON.stringify(out.conceptos)}${RESET}`)
       }
 
       if (verbose && errs.length === 0) {
         console.log(`      ${DIM}final: ${JSON.stringify(out.finalText)}${RESET}`)
-        console.log(`      ${DIM}cifras: [${out.cifrasCalculadas.join(', ')}]${RESET}`)
+        console.log(`      ${DIM}valores: [${out.valores.join(', ')}] · conceptos: ${JSON.stringify(out.conceptos)}${RESET}`)
       }
     }
 

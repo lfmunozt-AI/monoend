@@ -17,7 +17,7 @@
       "expectNotContains": ["926,31"],
       "expectContains": ["1000"],
       "expectFallback": false,
-      "expectScenarioState": { "loan": { "tae": 9, "taeSource": "usuario" } }
+      "expectScenarioState": { "credito": { "tae_pct": 9, "tae_es_referencia": false } }
     }
   ]
 }

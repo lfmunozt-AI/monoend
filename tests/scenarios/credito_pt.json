@@ -9,7 +9,7 @@
       "fixtureResponse": "Com uma taxa anual de referência de 7%, a prestação seria de 926,31 €/mês. Qual é a taxa que o teu banco te oferece?",
       "expectConcept": { "cuota": { "value": 926.31, "tol": 1 } },
       "expectBlocked": false,
-      "expectScenarioState": { "loan": { "principal": 30000, "months": 36 } }
+      "expectScenarioState": { "credito": { "monto": 30000, "plazo_meses": 36, "tae_es_referencia": true } }
     },
     {
       "user": "O meu banco oferece-me uma taxa anual de 9%. Qual seria a prestação mensal?",
@@ -19,7 +19,7 @@
       "expectNotContains": ["926,31"],
       "expectBlocked": false,
       "expectScenarioState": {
-        "loan": { "principal": 30000, "months": 36, "tae": 9, "taeSource": "usuario" }
+        "credito": { "monto": 30000, "plazo_meses": 36, "tae_pct": 9, "tae_es_referencia": false }
       }
     }
   ]

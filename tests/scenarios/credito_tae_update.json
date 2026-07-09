@@ -12,9 +12,9 @@
       "expectBlocked": false,
       "expectFallback": false,
       "expectScenarioState": {
-        "ingreso": 2500,
-        "gastos": 1500,
-        "loan": { "principal": 30000, "months": 36 }
+        "ingreso_mensual": 2500,
+        "gastos_mensuales": 1500,
+        "credito": { "monto": 30000, "plazo_meses": 36, "tae_es_referencia": true }
       }
     },
     {
@@ -26,9 +26,9 @@
       "expectBlocked": false,
       "expectFallback": false,
       "expectScenarioState": {
-        "ingreso": 2500,
-        "gastos": 1500,
-        "loan": { "principal": 30000, "months": 36, "tae": 9, "taeSource": "usuario" }
+        "ingreso_mensual": 2500,
+        "gastos_mensuales": 1500,
+        "credito": { "monto": 30000, "plazo_meses": 36, "tae_pct": 9, "tae_es_referencia": false }
       }
     }
   ]

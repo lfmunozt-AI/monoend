@@ -9,7 +9,7 @@
       "user": "Gano {{monthlyNet}} euros al mes y mis gastos son {{gastosMes}}.",
       "fixtureResponse": "Anotado. Tu sobrante mensual es de {{sobrante}} €. ¿Me compartes tus gastos principales con sus montos?",
       "expectBlocked": false,
-      "expectScenarioState": { "ingreso": {{monthlyNet}}, "gastos": {{gastosMes}} }
+      "expectScenarioState": { "ingreso_mensual": {{monthlyNet}}, "gastos_mensuales": {{gastosMes}} }
     },
     {
       "user": "Mis gastos: netflix 15, luz 80, agua 30, cerveza 120, mercado 400",
@@ -19,7 +19,7 @@
       "expectNotContains": ["alcohol", "vicio", "deberías dejar", "malgastas", "dejar de beber"],
       "expectBlocked": false,
       "expectFallback": false,
-      "expectScenarioState": { "ingreso": {{monthlyNet}}, "gastos": {{gastosMes}} }
+      "expectScenarioState": { "ingreso_mensual": {{monthlyNet}}, "gastos_mensuales": {{gastosMes}} }
     }
   ]
 }

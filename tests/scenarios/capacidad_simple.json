@@ -15,7 +15,7 @@
       "expectNotContains": ["10%", "referencia", "estándar"],
       "expectBlocked": false,
       "expectFallback": false,
-      "expectScenarioState": { "ingreso": {{monthlyNet}}, "gastos": {{gastosMes}} }
+      "expectScenarioState": { "ingreso_mensual": {{monthlyNet}}, "gastos_mensuales": {{gastosMes}} }
     },
     {
       "user": "¿Y cuánto es eso al año?",
@@ -23,7 +23,7 @@
       "expectConcept": { "capacidad": { "value": {{sobranteAnual}}, "tol": 0 } },
       "expectBlocked": false,
       "expectFallback": false,
-      "expectScenarioState": { "ingreso": {{monthlyNet}}, "gastos": {{gastosMes}} }
+      "expectScenarioState": { "ingreso_mensual": {{monthlyNet}}, "gastos_mensuales": {{gastosMes}} }
     }
   ]
 }

@@ -9,7 +9,7 @@
       "user": "Gano {{monthlyNet}} euros al mes.",
       "fixtureResponse": "Anotado, {{monthlyNet}} € al mes. ¿Cuáles son tus gastos mensuales?",
       "expectBlocked": false,
-      "expectScenarioState": { "ingreso": {{monthlyNet}} }
+      "expectScenarioState": { "ingreso_mensual": {{monthlyNet}} }
     },
     {
       "user": "¿Cuánto debería ahorrar?",
@@ -17,7 +17,7 @@
       "expectContains": ["referencia", "20%"],
       "expectBlocked": false,
       "expectFallback": false,
-      "expectScenarioState": { "ingreso": {{monthlyNet}} }
+      "expectScenarioState": { "ingreso_mensual": {{monthlyNet}} }
     }
   ]
 }

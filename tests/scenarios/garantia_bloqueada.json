@@ -8,7 +8,7 @@
       "user": "Gano 2500 euros al mes y mis gastos son 1500.",
       "fixtureResponse": "Anotado. Tu sobrante mensual es de 1000 €. ¿Cuál es tu meta?",
       "expectBlocked": false,
-      "expectScenarioState": { "ingreso": 2500, "gastos": 1500 }
+      "expectScenarioState": { "ingreso_mensual": 2500, "gastos_mensuales": 1500 }
     },
     {
       "user": "¿Y si invierto ese sobrante?",
