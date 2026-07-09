@@ -23,7 +23,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { BlockedFigure, GroundingResult } from "./validate";
 import { detectLanguage, DEFAULT_LANGUAGE, type Language } from "../language";
-import { segmentSentences, splitSentences, isPercent, isTimeUnit } from "./context";
+import { segmentSentences, splitSentences, isPercent, isTimeUnit, hasReferenceMarker } from "./context";
 import { findNumberMentions } from "./numbers";
 
 export type PolicyMode = "mvp" | "passthrough";
@@ -320,6 +320,23 @@ function hasRealFigure(text: string): boolean {
   );
 }
 
+/**
+ * ¿El texto tiene SUSTANCIA VÁLIDA? (defecto D)
+ *   (a) un porcentaje acompañado de marcador de referencia en la MISMA frase
+ *       (respuesta normativa PB2: "Como referencia… el 20%…"),
+ *   (b) una cifra monetaria real (cuota, sobrante, propuesta con importe).
+ * Sin esto, una respuesta normativa válida (solo % + marcador, <220 chars) se
+ * destruía porque `hasRealFigure` ignora los porcentajes.
+ */
+function hasValidSubstance(text: string): boolean {
+  if (hasRealFigure(text)) return true; // (b)
+  // (a) porcentaje etiquetado como referencia en su propia frase.
+  for (const sentence of splitSentences(text)) {
+    if (hasReferenceMarker(sentence) && /\d[\d.,]*\s*%/.test(sentence)) return true;
+  }
+  return false;
+}
+
 // Aperturas de relleno típicas de un esqueleto sin datos.
 const GENERIC_SKELETON =
   /\b(necesito m[aá]s (?:informaci[oó]n|datos)|para ayudarte mejor|cu[eé]ntame m[aá]s|no tengo (?:suficientes )?datos|preciso de mais|i need more (?:info|information|details))\b/i;
@@ -380,7 +397,7 @@ export function ensureSubstance(
   opts: { lang?: Language; missing?: string[] } = {},
 ): string {
   const lang = opts.lang ?? detectLanguage(text);
-  if (hasRealFigure(text)) return text; // tiene una cifra concreta: hay sustancia
+  if (hasValidSubstance(text)) return text; // cifra real o referencia % etiquetada
   const esCorto = text.trim().length < 220;
   const esGenerico = GENERIC_SKELETON.test(text);
   if (!esCorto && !esGenerico) return text; // largo y con contenido: se respeta
@@ -406,22 +423,52 @@ export function cleanup(text: string): string {
     .trim();
 }
 
-/** Elimina por completo cada frase que contenga una cifra bloqueada. */
+/** Formatea a convención es/LatAm ("953.99" → "953,99"). */
+function esNum(n: number): string {
+  return String(n).replace(".", ",");
+}
+
+/**
+ * Procesa las cifras bloqueadas frase a frase:
+ *   · con `correccion` (mismatch de un concepto que el motor SÍ conoce) → la
+ *     cifra se corrige EN SU SITIO y la frase se conserva. El motor sabe el valor
+ *     bueno, así que lo pone en vez de borrar información útil.
+ *   · sin `correccion` (monto inventado sin respaldo) → se elimina la frase entera.
+ * Cuenta `eliminadas` (frases borradas) y `corregidas` (cifras sustituidas).
+ */
 function removeBlockedSentences(
   text: string,
   blocked: BlockedFigure[],
-): { texto: string; eliminadas: number } {
+): { texto: string; eliminadas: number; corregidas: number } {
   const segments = segmentSentences(text);
   const kept: string[] = [];
   let eliminadas = 0;
+  let corregidas = 0;
 
   for (const seg of segments) {
-    const hit = blocked.some((b) => b.start >= seg.start && b.start < seg.end);
-    if (hit) eliminadas++;
-    else kept.push(seg.text);
+    const enFrase = blocked.filter((b) => b.start >= seg.start && b.start < seg.end);
+    const aEliminar = enFrase.some((b) => b.correccion === undefined);
+
+    if (aEliminar) {
+      eliminadas++;
+      continue;
+    }
+    if (enFrase.length === 0) {
+      kept.push(seg.text);
+      continue;
+    }
+    // Solo correcciones: sustituye cada cifra por su valor correcto, de derecha a
+    // izquierda para no invalidar los offsets de las anteriores.
+    let s = seg.text;
+    for (const b of enFrase.sort((a, c) => c.start - a.start)) {
+      const rel = b.start - seg.start;
+      s = s.slice(0, rel) + esNum(b.correccion as number) + s.slice(rel + (b.end - b.start));
+      corregidas++;
+    }
+    kept.push(s);
   }
 
-  return { texto: cleanup(kept.join("")), eliminadas };
+  return { texto: cleanup(kept.join("")), eliminadas, corregidas };
 }
 
 /**
@@ -464,10 +511,18 @@ export function applyPolicy(
     return { texto_final: modelResponse, bloqueado: false, logEntries };
   }
 
-  // MODO MVP (v2): elimina las frases con montos inventados y cierra UNA vez.
-  const { texto, eliminadas } = removeBlockedSentences(modelResponse, blocked);
+  // MODO MVP (v2): corrige las cifras de concepto conocido en su sitio, elimina
+  // las frases con montos inventados y, si hubo eliminaciones, cierra UNA vez.
+  const { texto, eliminadas, corregidas } = removeBlockedSentences(modelResponse, blocked);
+
+  // Solo hubo correcciones (ninguna frase borrada): el texto corregido es la
+  // respuesta final, sin añadir cierre — la información útil se conserva.
   if (eliminadas === 0) {
-    return { texto_final: modelResponse, bloqueado: true, logEntries };
+    return {
+      texto_final: corregidas > 0 ? texto : modelResponse,
+      bloqueado: true,
+      logEntries,
+    };
   }
 
   const texto_final = appendClosing(texto, buildClosingRequest(logEntries, dataHint, lang));

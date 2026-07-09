@@ -16,6 +16,46 @@ import { runGuardrail } from "./index";
 import { splitSentences, segmentSentences, sentenceRangeAt } from "./context";
 import { rewriteDelegativeClosing, isDelegativeClosing, ensureSubstance } from "./policy";
 
+// ── DEFECTO C — el grounding semántico decide ANTES que c0 ────────────────────
+test("C: 'cuota 1.000 €' con conceptos.cuota=954 → BLOQUEADA aunque 1000 esté en valores", () => {
+  const cif = { valores: [2500, 1500, 1000, 12000, 954], conceptos: { cuota: 954, sobrante: 1000 } };
+  const r = validateGrounding("La cuota rondaría los 1.000 €/mes.", [], cif);
+  assert.ok(r.cifras_bloqueadas.some((c) => c.valor === 1000), "c0 no puede aprobar 1000 como cuota");
+  assert.equal(r.cifras_bloqueadas[0].correccion, 954, "ofrece la corrección al valor correcto");
+});
+
+test("C: 'tu sobrante es 1.000 €' → APROBADA (el concepto sobrante sí es 1000)", () => {
+  const cif = { valores: [2500, 1500, 1000, 12000, 954], conceptos: { cuota: 954, sobrante: 1000 } };
+  const r = validateGrounding("Tu sobrante mensual es de 1.000 €.", [], cif);
+  assert.equal(r.cifras_bloqueadas.length, 0);
+  assert.ok(r.cifras_aprobadas.some((c) => c.valor === 1000));
+});
+
+test("C: la política corrige la cuota EN SU SITIO (1.000 → 954), conserva la frase", () => {
+  const cif = { valores: [2500, 1500, 1000, 12000, 954], conceptos: { cuota: 954, sobrante: 1000 } };
+  const resp = "La cuota rondaría los 1.000 €/mes. ¿Confirmamos ese plan?";
+  const v = validateGrounding(resp, [], cif);
+  const p = applyPolicy(resp, v, "h");
+  assert.equal(p.bloqueado, true);
+  assert.ok(!p.texto_final.includes("1.000"), "la cifra errónea desaparece");
+  assert.ok(p.texto_final.includes("954"), "se sustituye por la correcta");
+  assert.ok(p.texto_final.includes("¿Confirmamos ese plan?"), "la frase se conserva, no se borra");
+});
+
+// ── DEFECTO D — sustancia normativa (PB2) sobrevive ───────────────────────────
+// Texto LITERAL del ejemplo canónico de consigliere.ts.
+const PB2_CANONICO =
+  "Como referencia, el estándar ronda el 20% del ingreso — pero tu número real depende de tus gastos y tu meta. Dame ambos y te digo el tuyo exacto.";
+
+test("D: el ejemplo canónico de PB2 sobrevive intacto a ensureSubstance", () => {
+  assert.equal(ensureSubstance(PB2_CANONICO, { lang: "es", missing: ["gastos"] }), PB2_CANONICO);
+});
+
+test("D: un % SIN marcador de referencia sigue sin contar como sustancia", () => {
+  const out = ensureSubstance("Deberías ahorrar el 20%.", { lang: "es", missing: ["gastos"] });
+  assert.notEqual(out, "Deberías ahorrar el 20%.", "sin 'como referencia' es esqueleto");
+});
+
 // ── PIEZA 3 — fallback de sustancia ───────────────────────────────────────────
 test("sustancia: esqueleto sin cifras → fallback con el missing correcto (tae)", () => {
   const out = ensureSubstance("Necesito más información para ayudarte.", { lang: "es", missing: ["tae"] });
