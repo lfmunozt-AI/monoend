@@ -1,0 +1,26 @@
+{
+  "name": "negacion_permitida",
+  "playbook": "PB1",
+  "language": "es",
+  "description": "El guardián de negación: 'ninguna inversión está libre de riesgo' y 'ningún retorno está garantizado' son la VERDAD que el Consigliere debe poder decir. Sin el guardián, el enforcement borraría justo la frase que la regla persigue proteger.",
+  "turns": [
+    {
+      "user": "Gano 2500 euros al mes y mis gastos son 1500. ¿Existe alguna inversión sin riesgo?",
+      "fixtureResponse": "Ninguna inversión está libre de riesgo. Ningún retorno está garantizado. Tu sobrante mensual es de 1000 €. ¿Me compartes tu meta y su plazo?",
+      "expectContains": [
+        "Ninguna inversión está libre de riesgo",
+        "Ningún retorno está garantizado",
+        "1000"
+      ],
+      "expectBlocked": false,
+      "expectFallback": false
+    },
+    {
+      "user": "Entonces, ¿nada es seguro?",
+      "fixtureResponse": "Correcto: no existe rentabilidad asegurada en ningún producto. Lo que sí puedo calcular es tu plan con tus 1000 € de sobrante. ¿Cuál es tu meta?",
+      "expectContains": ["no existe rentabilidad asegurada"],
+      "expectBlocked": false,
+      "expectFallback": false
+    }
+  ]
+}

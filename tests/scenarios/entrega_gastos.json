@@ -1,0 +1,25 @@
+{
+  "name": "entrega_gastos",
+  "playbook": "PB4",
+  "language": "es",
+  "description": "Entrega de gastos. Verifica (a) la clasificación vital/no vital, (b) el recorte del 50% con supuesto explícito, (c) que NO se moraliza sobre la cerveza, y (d) que la lista NO machaca el gasto mensual agregado del T1 (el extractor etiqueta 'gastos:' con el primer ítem, 15).",
+  "profile": { "archetype": "gastador", "country": "ES" },
+  "turns": [
+    {
+      "user": "Gano {{monthlyNet}} euros al mes y mis gastos son {{gastosMes}}.",
+      "fixtureResponse": "Anotado. Tu sobrante mensual es de {{sobrante}} €. ¿Me compartes tus gastos principales con sus montos?",
+      "expectBlocked": false,
+      "expectScenarioState": { "ingreso_mensual": {{monthlyNet}}, "gastos_mensuales": {{gastosMes}} }
+    },
+    {
+      "user": "Mis gastos: netflix 15, luz 80, agua 30, cerveza 120, mercado 400",
+      "fixtureResponse": "Tus gastos vitales suman 510 € y los no vitales 135 €. Asumiendo que reduces los no vitales a la mitad (50%), liberas 67,5 € al mes. El ocio importa: la clave es dimensionarlo. ¿Confirmamos ese supuesto?",
+      "expectContains": ["510", "135", "67,5"],
+      "expectConcept": { "recorte": { "value": 67.5, "tol": 0.5 } },
+      "expectNotContains": ["alcohol", "vicio", "deberías dejar", "malgastas", "dejar de beber"],
+      "expectBlocked": false,
+      "expectFallback": false,
+      "expectScenarioState": { "ingreso_mensual": {{monthlyNet}}, "gastos_mensuales": {{gastosMes}} }
+    }
+  ]
+}

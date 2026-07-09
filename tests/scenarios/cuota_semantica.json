@@ -1,0 +1,23 @@
+{
+  "name": "cuota_semantica",
+  "playbook": "PB3",
+  "language": "es",
+  "description": "Fixture maliciosa: tras conocer la TAE real (9%) el modelo sigue citando la cuota de referencia al 7% (926,31). Ya no está en cifrasCalculadas, así que el guardarraíl la bloquea y elimina la frase.",
+  "turns": [
+    {
+      "user": "Gano 2500 euros al mes y mis gastos son 1500. Quiero financiar un carro de 30000 a 36 meses.",
+      "fixtureResponse": "Con una TAE de referencia del 7%, la cuota sería de 926,31 €/mes. ¿Cuál es la TAE que te ofrece tu banco?",
+      "expectBlocked": false,
+      "expectConcept": { "cuota": { "value": 926.31, "tol": 1 } }
+    },
+    {
+      "user": "El banco me ofrece 9%",
+      "fixtureResponse": "Con tu TAE, la cuota sería de 926,31 €/mes. Tu sobrante mensual es de 1000 €. ¿Confirmamos?",
+      "expectBlocked": true,
+      "expectNotContains": ["926,31"],
+      "expectContains": ["1000"],
+      "expectFallback": false,
+      "expectScenarioState": { "credito": { "tae_pct": 9, "tae_es_referencia": false } }
+    }
+  ]
+}
