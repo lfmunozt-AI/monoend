@@ -1,10 +1,11 @@
 import { createClient } from '@/lib/supabase/server'
 import { adminClient } from '@/lib/supabase/admin'
 import { buildSystemPrompt } from '@/lib/prompts/consigliere'
-import { callLLMWithHistory } from '@/lib/llm'
+import { callLLMWithTools } from '@/lib/llm'
 import { runGuardrail, rewriteDelegativeClosing, ensureSubstance } from '@/lib/guardrail'
 import { buildScenarioContext } from '@/lib/calculator/orchestrator'
-import { extractScenarioDelta, mergeScenario, type ScenarioState } from '@/lib/calculator/scenario'
+import { mergeScenario, summarizeScenario, type ScenarioState } from '@/lib/calculator/scenario'
+import { registrarDatosFinancieros, resolveDelta, buildToolResult } from '@/lib/calculator/tools'
 import { detectLanguage } from '@/lib/language'
 import {
   validateConsigliereOutput,
@@ -181,20 +182,13 @@ export async function POST(request: Request) {
   const currentICA = typeof icaScore === 'number' ? icaScore : (profile.ica_score ?? 0)
 
   // ── SCENARIO STATE · el motor calcula desde el estado completo del diálogo ────
-  // Antes el motor era stateless (solo veía el último mensaje): "el banco me
-  // ofrece un 9%" no recalculaba nada. Ahora se acumula el escenario.
-  const userLangEarly = detectLanguage(cleanMessage)
+  const userLang = detectLanguage(cleanMessage)
   // Semilla: el perfil (transacciones del mes) rellena ingreso/gasto si los hay.
   const seed: Partial<ScenarioState> = { ...prevScenario }
   if (ingresosMes > 0) seed.ingreso_mensual = Math.round(ingresosMes)
   if (gastosMes > 0) seed.gastos_mensuales = Math.round(gastosMes)
-  // `seed` (con el crédito previo) habilita la respuesta corta de TAE (FIX 2).
-  const delta = extractScenarioDelta(cleanMessage, userLangEarly, seed)
-  const scenario = mergeScenario(seed, delta)
 
-  const verified = buildScenarioContext(scenario, cleanMessage)
-
-  // ── System prompt ────────────────────────────────────────────────────────────
+  // ── System prompt (persona + idioma espejo) ──────────────────────────────────
   const basePrompt = buildSystemPrompt({
     nombre: profile.name ?? 'Usuario',
     pais,
@@ -205,21 +199,10 @@ export async function POST(request: Request) {
     fugas,
     metas,
   })
-
-  // FALLO A — idioma espejo del usuario. El perfil (profile.language) puede
-  // diferir del idioma en que el usuario escribe AHORA; manda el último mensaje.
   const LANG_NAME: Record<'es' | 'pt' | 'en', string> = { es: 'ES', pt: 'PT', en: 'EN' }
-  const userLang = userLangEarly
   const idiomaObligatorio =
     `IDIOMA OBLIGATORIO: el usuario escribe en ${LANG_NAME[userLang]}. ` +
     `Responde ÍNTEGRAMENTE en ese idioma.`
-
-  // El bloque del motor ("TU REALIDAD…" / "REFERENCIAS ESTÁNDAR…") va al final:
-  // son las cifras exactas que el modelo debe usar en vez de improvisar. La regla
-  // de idioma va la última, para que sea lo más reciente en el contexto.
-  const systemPrompt = [basePrompt, verified.bloque, idiomaObligatorio]
-    .filter(Boolean)
-    .join('\n\n')
 
   // ── Guardar mensaje del usuario ──────────────────────────────────────────────
   const { error: userMsgErr } = await admin.from('messages').insert({
@@ -233,11 +216,64 @@ export async function POST(request: Request) {
     console.error('[chat] guardar mensaje usuario:', userMsgErr)
   }
 
-  // ── Llamar al LLM ────────────────────────────────────────────────────────────
-  // maxTokens 400: el Consigliere responde en ≤120 palabras. Explícito aquí
-  // aunque sea también el default de llm.ts — es una decisión de latencia del chat.
+  // ── EXTRACCIÓN por function calling (el LLM extrae, el código calcula) ─────────
+  // LLAMADA 1: el modelo emite un tool_call con los datos del mensaje, o no lo
+  // emite si no hay datos nuevos. El bloque "ESTADO ACTUAL CONOCIDO" le da el
+  // contexto previo para responder charla trivial sin una segunda llamada.
   const allMessages = [...contextMessages, { role: 'user' as const, content: cleanMessage }]
-  const llmResult = await callLLMWithHistory(allMessages, systemPrompt, { maxTokens: 400 })
+  const systemPrompt1 = [
+    basePrompt,
+    `ESTADO ACTUAL CONOCIDO (lo que ya sabemos del usuario):\n${summarizeScenario(seed)}`,
+    idiomaObligatorio,
+  ].filter(Boolean).join('\n\n')
+
+  const call1 = await callLLMWithTools(
+    allMessages,
+    systemPrompt1,
+    [registrarDatosFinancieros],
+    { maxTokens: 150 },
+  )
+
+  // Paso 3: delta del tool_call, o FALLBACK a la extracción regex (se conserva).
+  const toolCall = call1.toolCalls.find((t) => t.name === 'registrar_datos_financieros')
+  const { delta, usedTool } = resolveDelta({
+    toolArgs: toolCall?.args,
+    message: cleanMessage,
+    lang: userLang,
+    prev: seed,
+  })
+  console.log(`[chat] ${usedTool ? 'toolCall usado' : 'fallback-regex'}`,
+    JSON.stringify({ conversation_id: convId, keys: Object.keys(delta) }))
+
+  // Paso 4: estado completo → paquete verificado (código calcula y marca).
+  const scenario = mergeScenario(seed, delta)
+  const verified = buildScenarioContext(scenario, cleanMessage)
+
+  // Paso 5-6: si hubo tool_call, LLAMADA 2 con el paquete verificado como
+  // tool_result; si no, se usa el content de la LLAMADA 1 (ahorra latencia).
+  let llmResult: { content: string; tokensUsed: number }
+  if (usedTool && toolCall) {
+    const toolResult = JSON.stringify(buildToolResult(scenario, verified))
+    const systemPrompt2 = [basePrompt, idiomaObligatorio].filter(Boolean).join('\n\n')
+    const call2 = await callLLMWithTools(
+      [
+        ...allMessages,
+        { role: 'assistant' as const, content: call1.content, toolCalls: [toolCall] },
+        { role: 'tool' as const, toolCallId: toolCall.id, content: toolResult },
+      ],
+      systemPrompt2,
+      [registrarDatosFinancieros],
+      { maxTokens: 400, toolChoice: 'none' },
+    )
+    llmResult = { content: call2.content, tokensUsed: call1.tokensUsed + call2.tokensUsed }
+  } else {
+    // Sin datos nuevos: la respuesta de la LLAMADA 1 (con el ESTADO CONOCIDO) vale.
+    // Si el modelo no está disponible, el guardrail/ensureSubstance da el cierre seguro.
+    llmResult = {
+      content: call1.content || 'El Consigliere no está disponible en este momento. Intenta en unos minutos.',
+      tokensUsed: call1.tokensUsed,
+    }
+  }
 
   // ── Guardarraíl de cifras (código externo al modelo) ─────────────────────────
   // Extrae los hechos del usuario, valida el grounding de las cifras de la

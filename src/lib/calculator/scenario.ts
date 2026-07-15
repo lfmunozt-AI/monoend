@@ -225,6 +225,30 @@ export function mergeScenario(
 }
 
 /**
+ * Resumen compacto del estado para inyectar como "ESTADO ACTUAL CONOCIDO" en el
+ * prompt (LLAMADA 1 de function calling). Texto plano, sin cifras derivadas: solo
+ * lo que el usuario ya nos dijo. "" si no sabemos nada aún.
+ */
+export function summarizeScenario(s: Partial<ScenarioState> | undefined): string {
+  if (!s) return "Nada aún — el usuario no ha aportado datos.";
+  const l: string[] = [];
+  if (s.ingreso_mensual !== undefined) l.push(`ingreso mensual: ${s.ingreso_mensual} €`);
+  if (s.gastos_mensuales !== undefined) l.push(`gastos mensuales: ${s.gastos_mensuales} €`);
+  if (s.credito) {
+    const tae = s.credito.tae_pct !== undefined && !s.credito.tae_es_referencia
+      ? `TAE real ${s.credito.tae_pct}%`
+      : "sin TAE real aún";
+    l.push(`crédito: ${s.credito.monto || "?"} € a ${s.credito.plazo_meses || "?"} meses (${tae})`);
+  }
+  if (s.meta) {
+    const partes = [s.meta.titulo, s.meta.monto ? `${s.meta.monto} €` : "", s.meta.plazo_meses ? `${s.meta.plazo_meses} meses` : ""].filter(Boolean);
+    if (partes.length) l.push(`meta: ${partes.join(", ")}`);
+  }
+  if (s.missing && s.missing.length) l.push(`falta por saber: ${s.missing.join(", ")}`);
+  return l.length ? l.map((x) => `- ${x}`).join("\n") : "Nada aún — el usuario no ha aportado datos.";
+}
+
+/**
  * Qué falta para el playbook activo. El playbook activo se infiere del estado:
  * si hay crédito → falta la TAE real y el sobrante; si hay meta → falta plazo o
  * monto; siempre conviene ingreso y gastos para dar capacidad.
