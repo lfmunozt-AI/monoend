@@ -35,7 +35,7 @@ import type { ScenarioState } from "./scenario";
 const HORIZONTE_MESES = 12; // proyección anual del sobrante.
 const MESES_FONDO = 6; // colchón de emergencia por defecto (tope del rango 3-6).
 const AHORRO_SUGERIDO_PCT = 10; // % del INGRESO: referencia estándar de ahorro.
-const TAE_REFERENCIA = 7; // % TAE de referencia para simular cuotas de crédito.
+export const TAE_REFERENCIA = 7; // % TAE de referencia para simular cuotas de crédito.
 
 function normaliza(s: string): string {
   return s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
