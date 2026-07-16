@@ -16,8 +16,10 @@
  *   7. enforceOutputPolicy(texto, validación)
  *   8. disclaimer si el producto sobrevivió al enforcement
  *   9. rewriteDelegativeClosing(texto, idioma)
+ *  10. ensureSubstance(texto, {idioma, missing})
+ *  11. enforceMissingClosing(texto, missing, idioma)
  *
- * Los pasos 5-9 replican `route.ts` en orden. Los pasos 1-3 son la capa con
+ * Los pasos 5-11 replican `route.ts` en orden. Los pasos 1-3 son la capa con
  * estado: `buildVerifiedContext` es sin estado y pierde el contexto entre turnos
  * (ver `scripts/harness/scenario-provisional.ts`).
  *
@@ -55,7 +57,7 @@
 import { readdirSync, readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 
-import { runGuardrail, rewriteDelegativeClosing, ensureSubstance } from '../src/lib/guardrail'
+import { runGuardrail, rewriteDelegativeClosing, ensureSubstance, enforceMissingClosing } from '../src/lib/guardrail'
 import {
   validateConsigliereOutput,
   enforceOutputPolicy,
@@ -388,6 +390,9 @@ async function runTurn(
 
   // 10 · sustancia: si no queda una cifra concreta, pide el dato que falta
   finalText = ensureSubstance(finalText, { lang: userLang, missing: state.missing })
+
+  // 11 · cierre por missing: el código decide QUÉ se pregunta, no el modelo
+  finalText = enforceMissingClosing(finalText, state.missing, userLang)
 
   return {
     finalText,

@@ -148,6 +148,7 @@ export {
   containsDataRequest,
   isDelegativeClosing,
   rewriteDelegativeClosing,
+  enforceMissingClosing,
   ensureSubstance,
   cleanup,
   type PolicyMode,
