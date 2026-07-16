@@ -316,21 +316,31 @@ function normLite(s: string): string {
 }
 
 // Roles posicionales: qué concepto denota una cifra por su vecindad (FIX 4).
+// FIX 1a — el "de <CIFRA>" que precede al monto lo introduce tanto una palabra
+// de crédito como el OBJETO de compra ("carro de 30000", "casa de 30000"): el
+// modelo suele escribir el objeto, no la palabra "crédito".
 const ROLE_MONTO_BEFORE =
-  /\b(credito|prestamo|emprestimo|loan|financiacion|financiamento|financiar)\s+(?:de\s+|of\s+)?$/;
+  /\b(credito|prestamo|emprestimo|loan|financiacion|financiamento|financiar|carro|coche|auto|vehiculo|moto|casa|piso|apartamento|viatura|car|house|apartment|vehicle)\s+(?:de\s+|of\s+)?$/;
 const ROLE_CUOTA_BEFORE = /\b(cuota|prestacao|mensualidad|mensualidade|payment|installment)\b/;
 const ROLE_PLAZO_AFTER = /^\s*(?:€\s*)?(meses|mes|months?|parcelas|prestacoes)\b/;
+// FIX 1b — patrón ESTRUCTURAL cazatodo: la cifra que va "de <CIFRA> €? a <N>
+// meses" es SIEMPRE el monto (esa estructura es precio + plazo), aunque no haya
+// ni palabra de crédito ni objeto de compra delante.
+const ROLE_MONTO_BEFORE_DE = /\bde\s+$/;
+const ROLE_MONTO_STRUCT_AFTER =
+  /^\s*(?:€\s*)?a\s+\d[\d.,]*\s*(?:meses|mes|months?|parcelas|prestacoes)\b/;
 
 /**
  * Concepto que denota la cifra `m` por adyacencia, o null. Orden de precisión:
- * plazo (sufijo "meses") → monto ("crédito de <X>", justo antes) → cuota (la
- * palabra aparece en la ventana previa).
+ * plazo (sufijo "meses") → monto (objeto/crédito "de <X>", justo antes) → monto
+ * estructural ("de <X> a <N> meses") → cuota (la palabra en la ventana previa).
  */
 function roleConcept(text: string, m: NumberMention): string | null {
   const before = normLite(text.slice(Math.max(0, m.start - 40), m.start));
-  const after = normLite(text.slice(m.end, m.end + 14));
+  const after = normLite(text.slice(m.end, m.end + 20));
   if (ROLE_PLAZO_AFTER.test(after)) return "plazo";
   if (ROLE_MONTO_BEFORE.test(before)) return "monto";
+  if (ROLE_MONTO_BEFORE_DE.test(before) && ROLE_MONTO_STRUCT_AFTER.test(after)) return "monto";
   if (ROLE_CUOTA_BEFORE.test(before)) return "cuota";
   return null;
 }
