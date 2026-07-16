@@ -68,6 +68,43 @@ test("FIX 4: 'a 36 meses' → rol plazo, aprobado; 'crédito de 30000' → rol m
   assert.ok(v.includes(30000) && v.includes(953.99));
 });
 
+// ── FIX 1 (esta tanda) — el rol monto cubre OBJETOS de compra + estructural ────
+// conceptos.monto=30000 pero el modelo escribe "carro de 425,81" (la cuota).
+const CIF_OBJETO = {
+  valores: [10000, 9500, 500, 6000, 30000, 91, 425.81],
+  conceptos: { cuota: 425.81, monto: 30000, plazo: 91, sobrante: 500 },
+};
+
+test("FIX 1: la frase real del QA ('carro de 425,81 €') → bloqueada y reescrita a 30000", () => {
+  const bug = "Para un carro de 425,81 € a 91 meses, la cuota mensual sería de 425,81 €.";
+  const r = validateGrounding(bug, [], CIF_OBJETO);
+  const bloq = r.cifras_bloqueadas.find((c) => Math.abs(c.valor - 425.81) < 0.01);
+  assert.ok(bloq, "425,81 en posición de monto (objeto de compra) se bloquea");
+  assert.equal(bloq?.correccion, 30000, "corrección al monto real del crédito");
+
+  const p = applyPolicy(bug, r, "h");
+  assert.ok(p.texto_final.includes("carro de 30000"), `reescrito a monto real: ${p.texto_final}`);
+  assert.ok(p.texto_final.includes("425,81 €."), "la cuota correcta (última) sobrevive");
+});
+
+test("FIX 1a: variantes de objeto (coche/casa/car) → rol monto", () => {
+  for (const obj of ["coche", "casa", "car", "piso", "moto"]) {
+    const r = validateGrounding(`Un ${obj} de 425,81 € a 91 meses.`, [], CIF_OBJETO);
+    assert.ok(r.cifras_bloqueadas.some((c) => Math.abs(c.valor - 425.81) < 0.01), `${obj} de <cifra> → monto`);
+  }
+});
+
+test("FIX 1b: patrón estructural 'de <X> a <N> meses' SIN objeto → rol monto", () => {
+  const r = validateGrounding("Financiado de 425,81 € a 91 meses.", [], CIF_OBJETO);
+  assert.ok(r.cifras_bloqueadas.some((c) => c.correccion === 30000), "estructura de X a N meses = monto");
+});
+
+test("FIX 1: la cuota en su sitio ('cuota es de 425,81 €') sigue APROBADA", () => {
+  const r = validateGrounding("La cuota mensual es de 425,81 €.", [], CIF_OBJETO);
+  assert.equal(r.cifras_bloqueadas.length, 0);
+  assert.ok(r.cifras_aprobadas.some((c) => Math.abs(c.valor - 425.81) < 0.01));
+});
+
 // ── DEFECTO D — sustancia normativa (PB2) sobrevive ───────────────────────────
 // Texto LITERAL del ejemplo canónico de consigliere.ts.
 const PB2_CANONICO =
