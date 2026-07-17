@@ -1,0 +1,28 @@
+{
+  "name": "hueco_ingreso_gastos",
+  "playbook": "PB6",
+  "language": "es",
+  "description": "Caso real QA: ingreso 10000, gastos 9500, sobrante 500. En el turno 3 (pregunta sin números nuevos) el modelo aluciona 'Tus ingresos son de 500 € y tus gastos son de 500 €, lo que te deja un sobrante de 500 €' — las dos primeras cláusulas pasaban el guardarraíl porque ni ingreso ni gastos tenían concepto (caían a la heurística genérica y 500 coincidía como sobrante). Con el concepto de ingreso/gastos (FIX 2) y el grounding posicional multi-concepto por frase (HUECO QA), el guardarraíl corrige cada cifra EN SU SITIO contra el concepto que la precede de verdad.",
+  "turns": [
+    {
+      "user": "Gano 10000 euros al mes y mis gastos son 9500.",
+      "fixtureResponse": "Anotado. Tu sobrante mensual es de 500 €. ¿Cuál es tu meta?",
+      "expectBlocked": false,
+      "expectScenarioState": { "ingreso_mensual": 10000, "gastos_mensuales": 9500 }
+    },
+    {
+      "user": "¿Cuánto es mi capacidad de ahorro anual?",
+      "fixtureResponse": "Tu capacidad de ahorro anual es de 6000 €. ¿Cuál es tu meta?",
+      "expectBlocked": false,
+      "expectConcept": { "capacidad": { "value": 6000, "tol": 0 } },
+      "expectScenarioState": { "ingreso_mensual": 10000, "gastos_mensuales": 9500 }
+    },
+    {
+      "user": "¿Me haces un resumen de mi situación?",
+      "fixtureResponse": "Tus ingresos son de 500 € y tus gastos son de 500 €, lo que te deja un sobrante de 500 €. ¿Confirmamos el plan?",
+      "expectBlocked": true,
+      "expectNotContains": ["ingresos son de 500", "gastos son de 500"],
+      "expectContains": ["10000", "9500", "sobrante de 500"]
+    }
+  ]
+}

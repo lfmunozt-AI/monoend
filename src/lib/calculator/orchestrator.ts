@@ -388,13 +388,11 @@ export function buildScenarioContext(
     const s = sobrante(ingreso, gasto);
     if (s.ok) {
       realidad.push({ etiqueta: "sobrante_mensual", valor: s.valor, formula: `ingreso ${ingreso} − gastos ${gasto}` });
-      conceptos.sobrante = s.valor;
       if (s.valor > 0) {
         capacidadMensual = s.valor;
         const anual = proyeccion(s.valor, HORIZONTE_MESES);
         if (anual.ok) {
           realidad.push({ etiqueta: "capacidad_ahorro_anual", valor: anual.valor, formula: `sobrante ${s.valor} × 12` });
-          conceptos.capacidad_anual = anual.valor;
         }
       }
     }
@@ -409,20 +407,22 @@ export function buildScenarioContext(
     const tae = usarReferencia ? TAE_REFERENCIA : (c.tae_pct as number);
 
     // FIX 1 — monto, plazo y TAE son DATOS DE PRIMERA CLASE: van a TU REALIDAD y
-    // a `conceptos` con su propia etiqueta, antes que la cuota. Así el 30000 tiene
-    // su hueco (y entra a `valores`), y el grounding puede distinguir monto de
-    // cuota en vez de que el modelo cite una como la otra.
+    // de ahí `deriveConceptos` los promueve a `conceptos` (ver más abajo), antes
+    // que la cuota. Así el 30000 tiene su hueco (y entra a `valores`), y el
+    // grounding puede distinguir monto de cuota en vez de que el modelo cite una
+    // como la otra.
     realidad.push({ etiqueta: "monto_credito", valor: c.monto, formula: "dato que aportaste" });
     realidad.push({ etiqueta: "plazo_credito_meses", valor: c.plazo_meses, formula: "dato que aportaste", unidad: "meses" });
-    conceptos.monto = c.monto;
-    conceptos.plazo = c.plazo_meses;
     if (!usarReferencia) {
       realidad.push({ etiqueta: "tae_credito_pct", valor: tae, formula: "TAE real de tu banco", unidad: "%" });
-      conceptos.tae = tae;
     }
 
     const cuota = loanPayment({ principal: c.monto, months: c.plazo_meses, annualRatePct: tae });
     if (cuota.ok) {
+      // Excepción: la cuota simulada (usarReferencia) NUNCA entra a `realidad`
+      // (va a REFERENCIAS ESTÁNDAR), así que `deriveConceptos` no la vería. Se
+      // fija aquí a mano; en el caso TAE real, cuota_credito SÍ vive en
+      // `realidad` y `deriveConceptos` la fijaría igual (mismo valor, idempotente).
       conceptos.cuota = cuota.valor;
       extraValores.push(cuota.valor);
       if (usarReferencia) {
@@ -452,7 +452,6 @@ export function buildScenarioContext(
     if (cls.noVitales.items.length > 0) {
       realidad.push({ etiqueta: "gastos_no_vitales", valor: cls.noVitales.total, formula: listaTxt(cls.noVitales.items) });
       realidad.push({ etiqueta: "recorte_propuesto_50pct", valor: cls.recortePropuesto, formula: "supuesto: reducir no vitales a la mitad" });
-      conceptos.recorte = cls.recortePropuesto;
       if (capacidadMensual !== null) {
         realidad.push({ etiqueta: "nueva_capacidad", valor: round2(capacidadMensual + cls.recortePropuesto), formula: `sobrante ${capacidadMensual} + recorte ${cls.recortePropuesto}` });
       }
@@ -469,6 +468,14 @@ export function buildScenarioContext(
       realidad.push({ etiqueta: "meses_hasta_meta", valor: t.valor, formula: `meta ${scenario.meta.monto} ÷ capacidad ${capacidadMensual}/mes` });
     }
   }
+
+  // FIX 1 — deriva el resto de `conceptos` automáticamente de TODAS las líneas
+  // de realidad ya acumuladas (ingreso, gastos, sobrante, capacidad anual,
+  // monto/plazo/tae de crédito, recorte, nueva_capacidad…). Reemplaza la lista
+  // manual de asignaciones `conceptos.x = y` dispersa por la función: si se
+  // añade una línea nueva a `realidad`, basta con registrarla en
+  // ETIQUETA_A_CONCEPTO para que el grounding la cubra.
+  deriveConceptos(realidad, conceptos);
 
   const secciones: string[] = [];
   if (realidad.length > 0 || sinClasificar.length > 0) {
@@ -492,4 +499,34 @@ export function buildScenarioContext(
 
 function refLineFor(etiqueta: string, pct: number, monto: number): string {
   return `- ${etiqueta}: ${pct}% del ingreso (= ${monto} €/mes en tu caso)`;
+}
+
+// Mapa etiqueta de línea (TU REALIDAD) → concepto de grounding (PIEZA 2). Regla
+// permanente: toda línea nueva de realidad DEBE mapear a un concepto — si añades
+// un campo aquí, añade sus keywords en context.ts (CONCEPT_KEYWORDS / detectLabel).
+const ETIQUETA_A_CONCEPTO: Record<string, string> = {
+  ingreso_mensual: "ingreso",
+  gastos_mensuales: "gastos",
+  sobrante_mensual: "sobrante",
+  capacidad_ahorro_anual: "capacidad_anual",
+  monto_credito: "monto",
+  plazo_credito_meses: "plazo",
+  tae_credito_pct: "tae",
+  cuota_credito: "cuota",
+  recorte_propuesto_50pct: "recorte",
+  nueva_capacidad: "nueva_capacidad",
+};
+
+/**
+ * Deriva `conceptos` automáticamente a partir de las líneas de TU REALIDAD, en
+ * vez de una lista manual mantenida a mano (HUECO QA: ingreso/gastos nunca
+ * tenían concepto → el modelo alucinaba "tus ingresos son de 500 €" y el
+ * guardarraíl no tenía cómo rechazarlo). No pisa conceptos ya fijados por una
+ * excepción explícita (p. ej. la cuota simulada, que no vive en `realidad`).
+ */
+function deriveConceptos(realidad: Linea[], conceptos: Record<string, number>): void {
+  for (const l of realidad) {
+    const concepto = ETIQUETA_A_CONCEPTO[l.etiqueta];
+    if (concepto && !(concepto in conceptos)) conceptos[concepto] = l.valor;
+  }
 }
