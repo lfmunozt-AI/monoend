@@ -104,6 +104,69 @@ test("C: la política corrige la cuota EN SU SITIO (1.000 → 954), conserva la 
   assert.ok(p.texto_final.includes("¿Confirmamos ese plan?"), "la frase se conserva, no se borra");
 });
 
+// ── HUECO QA — ingreso/gastos sin concepto (caso real: 10000/9500/500) ────────
+// "Tus ingresos son de 500 €" (ingreso real 10000) pasaba el guardarraíl: ni
+// "ingreso" ni "gastos" tenían concepto, caían a la heurística genérica y 500
+// (el sobrante) coincidía por c0. Mismo patrón del defecto C, dos conceptos
+// nunca cubiertos.
+const CIF_INGRESO_GASTOS = {
+  valores: [10000, 9500, 500, 6000],
+  conceptos: { ingreso: 10000, gastos: 9500, sobrante: 500 },
+};
+
+test("HUECO QA: 'tus ingresos son de 500 €' (real 10000) → BLOQUEADA, corrección a 10000", () => {
+  const r = validateGrounding("Tus ingresos son de 500 €.", [], CIF_INGRESO_GASTOS);
+  const bloq = r.cifras_bloqueadas.find((c) => c.valor === 500);
+  assert.ok(bloq, "500 en posición de ingreso se bloquea aunque esté en valores como sobrante");
+  assert.equal(bloq?.correccion, 10000, "ofrece la corrección al ingreso real");
+});
+
+test("HUECO QA: 'tus gastos son de 500 €' (real 9500) → BLOQUEADA, corrección a 9500", () => {
+  const r = validateGrounding("Tus gastos son de 500 €.", [], CIF_INGRESO_GASTOS);
+  const bloq = r.cifras_bloqueadas.find((c) => c.valor === 500);
+  assert.ok(bloq, "500 en posición de gastos se bloquea aunque esté en valores como sobrante");
+  assert.equal(bloq?.correccion, 9500, "ofrece la corrección a los gastos reales");
+});
+
+test("HUECO QA: 'lo que te deja un sobrante de 500 €' → APROBADA (el concepto sí es 500)", () => {
+  const r = validateGrounding("Lo que te deja un sobrante de 500 €.", [], CIF_INGRESO_GASTOS);
+  assert.equal(r.cifras_bloqueadas.length, 0);
+  assert.ok(r.cifras_aprobadas.some((c) => c.valor === 500));
+});
+
+test("HUECO QA: 'tus ingresos son de 10.000 €' (correcto) → intacta, sin bloqueo", () => {
+  const r = validateGrounding("Tus ingresos son de 10.000 €.", [], CIF_INGRESO_GASTOS);
+  assert.equal(r.cifras_bloqueadas.length, 0);
+  assert.ok(r.cifras_aprobadas.some((c) => c.valor === 10000));
+});
+
+test("HUECO QA EN: 'your income is 500' (real 10000) → BLOQUEADA", () => {
+  const r = validateGrounding("Your income is 500 this month.", [], CIF_INGRESO_GASTOS);
+  const bloq = r.cifras_bloqueadas.find((c) => c.valor === 500);
+  assert.ok(bloq, "500 en posición de income se bloquea");
+  assert.equal(bloq?.correccion, 10000);
+});
+
+// La frase REAL del QA: los tres conceptos en UNA sola frase (sin punto entre
+// cláusulas). No basta con "algún concepto de la frase coincide" — el sobrante
+// (500, correcto) aprobaría también los otros dos 500 solo por compartir
+// frase. Cada cifra debe cotejarse contra el concepto que la PRECEDE de verdad.
+test("HUECO QA: la frase combinada real (los 3 conceptos en una frase) → solo el sobrante sobrevive", () => {
+  const r = validateGrounding(
+    "Tus ingresos son de 500 € y tus gastos son de 500 €, lo que te deja un sobrante de 500 €.",
+    [],
+    CIF_INGRESO_GASTOS,
+  );
+  assert.equal(r.cifras_aprobadas.length, 1, "solo el sobrante (500, correcto) se aprueba");
+  assert.equal(r.cifras_bloqueadas.length, 2, "ingreso y gastos, ambos citados como 500, se bloquean");
+  assert.ok(r.cifras_bloqueadas.every((c) => c.valor === 500));
+  assert.deepEqual(
+    r.cifras_bloqueadas.map((c) => c.correccion).sort((a, b) => (a ?? 0) - (b ?? 0)),
+    [9500, 10000],
+    "las correcciones apuntan a los valores reales de gastos e ingreso",
+  );
+});
+
 // ── FIX 4 — grounding POSICIONAL por adyacencia ───────────────────────────────
 const CIF_CREDITO = {
   valores: [2500, 1500, 1000, 12000, 30000, 36, 9, 953.99],

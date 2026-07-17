@@ -168,11 +168,21 @@ export function hasReferenceMarker(sentence: string): boolean {
 // Keywords ES/PT/EN → concepto canónico. Si una frase nombra un concepto y el
 // motor conoce su valor exacto, la cifra de esa frase DEBE coincidir con él: la
 // heurística de multiplicadores no aplica cuando hay un concepto conocido.
+// HUECO QA: "tus ingresos son de 500 €" (ingreso real 10000) pasó el guardarraíl
+// porque ni "ingreso" ni "gastos" tenían concepto — caían a la heurística
+// genérica y 500 (el sobrante) coincidía por c0. Mismo patrón del defecto C.
 const CONCEPT_KEYWORDS: [RegExp, string][] = [
   [/\b(cuota|cuotas|mensualidad|mensualidade|prestacao|prestacoes|payment|installment)\b/, "cuota"],
   [/\b(sobrante|excedente|surplus|left ?over)\b/, "sobrante"],
   [/\b(recorte|corte|cut)\b/, "recorte"],
   [/\b(capacidad (?:de ahorro )?anual|capacidad anual|annual capacity|yearly (?:savings|capacity))\b/, "capacidad_anual"],
+  [/\b(ingreso|ingresos|sueldo|salario|rendimento|income|earnings|gano|ganas)\b/, "ingreso"],
+  // "gastos" NO debe casar con "gastos vitales"/"gastos no vitales": son
+  // subtotales con su propio valor (gastos_vitales/gastos_no_vitales), sin
+  // concepto propio todavía — si "gastos" los capturase, el guardarraíl
+  // "corregiría" 510/135 al total mensual (2372), que es la propia alucinación
+  // que este fix busca evitar, solo que sobre un concepto distinto.
+  [/\b(?:gastos|gasto)\b(?!\s+(?:vitales|no\s+vitales))|\b(?:despesas|expenses|spending)\b/, "gastos"],
 ];
 
 /** Conceptos financieros nombrados en la frase (canónicos, sin repetir). */
@@ -183,6 +193,61 @@ export function conceptsInSentence(sentence: string): string[] {
     if (re.test(n) && !out.includes(concepto)) out.push(concepto);
   }
   return out;
+}
+
+/**
+ * El concepto MÁS CERCANO a la cifra `m` (posiciones relativas a `sentence`),
+ * de entre los que están en `known`.
+ *
+ * HUECO QA: "Tus ingresos son de 500 € y tus gastos son de 500 €, lo que te
+ * deja un sobrante de 500 €" es UNA sola frase (sin punto entre cláusulas) que
+ * nombra ingreso, gastos y sobrante a la vez. `conceptsInSentence` por sí solo
+ * no basta: si cualquiera de los tres conceptos de la frase tiene el valor
+ * citado, un chequeo "algún concepto de la frase coincide" aprobaría los TRES
+ * 500 con solo que el sobrante fuera 500 — exactamente el defecto C, pero a
+ * nivel de frase en vez de por confusión con `valores`. La cifra debe cotejarse
+ * contra el concepto textualmente más próximo, no contra cualquiera presente.
+ */
+export function nearestConceptInSentence(
+  sentence: string,
+  m: { start: number; end: number },
+  known: ReadonlySet<string>,
+): string | null {
+  if (known.size === 0) return null;
+  const n = norm(sentence);
+  // Prioridad direccional: en ES/PT/EN el concepto PRECEDE a su cifra ("tu
+  // sobrante es de 1369", "capacidad anual es de 16428" — igual que asume
+  // `conceptValue` del harness de regresión). Un concepto más cercano mirando
+  // ATRÁS gana siempre a uno más cercano mirando ADELANTE, aunque este último
+  // esté a menos caracteres: si no, "sobrante es de 1369 y capacidad anual es
+  // de 16428" asignaría el 1369 a "capacidad anual" (más próximo en bruto)
+  // en vez de a "sobrante" (el que de verdad lo antecede).
+  let bestBefore: string | null = null;
+  let bestBeforeDist = Infinity;
+  let bestAfter: string | null = null;
+  let bestAfterDist = Infinity;
+  for (const [re, concepto] of CONCEPT_KEYWORDS) {
+    if (!known.has(concepto)) continue;
+    const g = new RegExp(re.source, "g");
+    let match: RegExpExecArray | null;
+    while ((match = g.exec(n)) !== null) {
+      const matchEnd = match.index + match[0].length;
+      if (matchEnd <= m.start) {
+        const dist = m.start - matchEnd;
+        if (dist < bestBeforeDist) {
+          bestBeforeDist = dist;
+          bestBefore = concepto;
+        }
+      } else if (match.index >= m.end) {
+        const dist = match.index - m.end;
+        if (dist < bestAfterDist) {
+          bestAfterDist = dist;
+          bestAfter = concepto;
+        }
+      }
+    }
+  }
+  return bestBefore ?? bestAfter;
 }
 
 // ── Porcentaje ───────────────────────────────────────────────────────────────

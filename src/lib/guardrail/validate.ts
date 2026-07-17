@@ -20,6 +20,7 @@ import {
   hasReferenceMarker,
   isPercent,
   isTimeUnit,
+  nearestConceptInSentence,
   sentenceRangeAt,
   type Moneda,
 } from "./context";
@@ -250,24 +251,34 @@ export function validateGrounding(
     // decide PRIMERO — antes que la coincidencia genérica c0. Un "1.000 €" como
     // cuota debe bloquearse aunque 1000 esté en `valores` como sobrante.
     // Un dato crudo del usuario (hecho) sí se respeta como escape.
-    const sentenceConcepts = conceptsInSentence(modelResponse.slice(sentStart, sentEnd))
-      .filter((c) => c in conceptos);
-    if (sentenceConcepts.length > 0) {
+    //
+    // HUECO QA: cuando la frase nombra VARIOS conceptos a la vez ("ingresos…
+    // gastos… sobrante" sin punto entre cláusulas), no basta con que ALGUNO de
+    // ellos case con la cifra — hay que cotejar contra el concepto más CERCANO
+    // a esa cifra (`nearestConceptInSentence`); si no, el sobrante=500 real
+    // aprobaría también un "ingresos son de 500" o "gastos son de 500" falsos
+    // solo por compartir frase.
+    const sentenceText = modelResponse.slice(sentStart, sentEnd);
+    const knownConcepts = new Set(conceptsInSentence(sentenceText).filter((c) => c in conceptos));
+    const conceptoCercano =
+      knownConcepts.size > 0
+        ? nearestConceptInSentence(sentenceText, { start: m.start - sentStart, end: m.end - sentStart }, knownConcepts)
+        : null;
+    if (conceptoCercano) {
       if (factValues.some((f) => approxEqual(m.value, f))) {
         aprobadas.push({ ...base(m, moneda), categoria: "hecho", motivo: "dato del usuario" });
-      } else if (sentenceConcepts.some((c) => Math.abs(m.value - conceptos[c]) <= 1)) {
-        aprobadas.push({ ...base(m, moneda), categoria: "calculo", motivo: `coincide con el concepto verificado (${sentenceConcepts.join("/")})` });
+      } else if (Math.abs(m.value - conceptos[conceptoCercano]) <= 1) {
+        aprobadas.push({ ...base(m, moneda), categoria: "calculo", motivo: `coincide con el concepto verificado (${conceptoCercano})` });
       } else {
         // El motor conoce el valor correcto del concepto → se ofrece como
         // corrección en su sitio (la Pieza 3 decide sustituir vs eliminar).
-        const conceptoRef = sentenceConcepts[0];
         bloqueadas.push({
           ...base(m, moneda),
-          motivo: `no coincide con el concepto verificado por el motor (${sentenceConcepts.join("/")})`,
+          motivo: `no coincide con el concepto verificado por el motor (${conceptoCercano})`,
           etiqueta: labelWithinSentence(modelResponse, m),
           start: m.start,
           end: m.end,
-          correccion: conceptos[conceptoRef],
+          correccion: conceptos[conceptoCercano],
         });
       }
       continue;
