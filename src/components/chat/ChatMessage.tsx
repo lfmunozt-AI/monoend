@@ -1,6 +1,7 @@
 'use client'
 
 import { useMemo } from 'react'
+import TypewriterText from './TypewriterText'
 
 type ConsigliereState = 'idle' | 'thinking' | 'responding' | 'alert' | 'celebrate'
 
@@ -10,14 +11,20 @@ interface ChatMessageProps {
   timestamp: Date
   isStreaming?: boolean
   consigliereState?: ConsigliereState
+  animate?: boolean
+  onTypingDone?: () => void
+  onTypingProgress?: () => void
 }
 
-export default function ChatMessage({ 
-  role, 
-  content, 
-  timestamp, 
+export default function ChatMessage({
+  role,
+  content,
+  timestamp,
   isStreaming = false,
-  consigliereState = 'idle'
+  consigliereState = 'idle',
+  animate = false,
+  onTypingDone,
+  onTypingProgress
 }: ChatMessageProps) {
   const isUser = role === 'user'
   
@@ -135,6 +142,13 @@ export default function ChatMessage({
                 <span className="w-2 h-2 bg-[#D9B648] rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></span>
               </div>
             </div>
+          ) : !isUser && animate ? (
+            <TypewriterText
+              text={content}
+              onDone={onTypingDone}
+              onProgress={onTypingProgress}
+              className="text-sm leading-relaxed whitespace-pre-wrap"
+            />
           ) : (
             <p className="text-sm leading-relaxed whitespace-pre-wrap">{content}</p>
           )}

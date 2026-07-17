@@ -4,6 +4,7 @@ import { useEffect, useState, useCallback, useRef } from 'react'
 import { useRouter } from 'next/navigation'
 import Sidebar from '@/components/layout/Sidebar'
 import { createClient } from '@/lib/supabase/client'
+import TypewriterText from '@/components/chat/TypewriterText'
 
 // ══════════════════════════════════════
 // Types
@@ -174,9 +175,9 @@ export default function DashboardPage() {
       if (!res.ok) throw new Error('Error')
       const json = await res.json() as { response?: string; conversationId?: string }
       if (!json.response) throw new Error('Respuesta vacía')
-      // Respuesta lista: burbuja pinta el texto + personaje state-nodding
+      // Respuesta lista: burbuja pinta el texto (tipeo simulado) + personaje
+      // state-nodding; vuelve a 'breathing' al terminar el tipeo, no antes.
       setBubbleText(json.response); setCState('nodding')
-      setTimeout(() => setCState('breathing'), 1600)
       if (json.conversationId) setConversationId(json.conversationId)
     } catch {
       setBubbleError(true)
@@ -184,6 +185,11 @@ export default function DashboardPage() {
       setCState('breathing')
     } finally { setChatSending(false) }
   }, [chatSending, conversationId, router])
+
+  // Cierra la animación del personaje al terminar el tipeo de la burbuja
+  const handleBubbleTypingDone = useCallback(() => {
+    setCState(prev => (prev === 'nodding' ? 'breathing' : prev))
+  }, [])
 
   // Fuga resolution
   const handleResolveFuga = useCallback(() => {
@@ -402,9 +408,16 @@ export default function DashboardPage() {
                   marginBottom: '12px',
                   boxShadow: isDark ? 'none' : '0 1px 4px rgba(0,0,0,.08)',
                 }}>
-                  <p style={{ fontSize: '14px', fontWeight: 500, color: bubbleError ? '#8B2635' : T.fg, margin: 0, lineHeight: '1.5', whiteSpace: 'pre-wrap' }}>
-                    {chatSending ? '…' : bubbleText}
-                  </p>
+                  {chatSending ? (
+                    <p style={{ fontSize: '14px', fontWeight: 500, color: T.fg, margin: 0, lineHeight: '1.5' }}>…</p>
+                  ) : (
+                    <TypewriterText
+                      text={bubbleText}
+                      onDone={handleBubbleTypingDone}
+                      className=""
+                      style={{ fontSize: '14px', fontWeight: 500, color: bubbleError ? '#8B2635' : T.fg, margin: 0, lineHeight: '1.5', whiteSpace: 'pre-wrap' }}
+                    />
+                  )}
                 </div>
               )}
               <div style={{ display: 'flex', justifyContent: 'center' }}>
