@@ -127,13 +127,96 @@ test("FIX 2: mensaje con otras señales NO se toma como TAE corta", () => {
   assert.equal(extractScenarioDelta("gano 2500", "es", prev).credito?.tae_pct, undefined);
 });
 
-// ── DEFECTO B — una lista de gastos NO machaca el agregado ───────────────────
-test("B: agregado 2372 en T1; lista en T2 → gastos siguen 2372 (jamás 15)", () => {
-  let s = mergeScenario({}, extractScenarioDelta("Gano 2636 euros al mes y mis gastos son 2372."));
+// ── DEFECTO B — una lista de gastos NUNCA la pisa el primer ítem suelto ──────
+test("B: agregado 2372 en T1; lista en T2 → gastos NUNCA el primer ítem (15)", () => {
+  const s = mergeScenario({}, extractScenarioDelta("Gano 2636 euros al mes y mis gastos son 2372."));
   assert.equal(s.gastos_mensuales, 2372);
-  s = mergeScenario(s, extractScenarioDelta("Mis gastos: netflix 15, luz 80, agua 30, cerveza 120, mercado 400"));
-  assert.equal(s.gastos_mensuales, 2372, "la lista NO sustituye el agregado por el primer ítem (15)");
-  assert.equal(s.gastos_es_detalle, true, "pero sí se marca el detalle");
-  assert.equal(s.gastos_detalle?.vitales, 510);
-  assert.equal(s.gastos_detalle?.noVitales, 135);
+  const s2 = mergeScenario(s, extractScenarioDelta("Mis gastos: netflix 15, luz 80, agua 30, cerveza 120, mercado 400"));
+  assert.notEqual(s2.gastos_mensuales, 15, "la lista NO se toma como si el primer ítem fuera el agregado");
+  assert.equal(s2.gastos_es_detalle, true, "se marca el detalle");
+  assert.equal(s2.gastos_detalle?.vitales, 510);
+  assert.equal(s2.gastos_detalle?.noVitales, 135);
+});
+
+// ── BUG 1 — el detalle manda SIEMPRE sobre el agregado ───────────────────────
+// QA real: vitales 2000+1000+2000=5000, no vitales 3000+1000+2000=6000 → total
+// 11.000. El motor reportaba 10.000 (el agregado viejo, obsoleto) y sobrante 0.
+test("BUG 1: caso real QA — el detalle (11000) pisa el agregado viejo (10000), no se queda en 10000", () => {
+  let s = mergeScenario({}, extractScenarioDelta("Gano 10000 euros al mes y mis gastos son 10000."));
+  assert.equal(s.gastos_mensuales, 10000);
+  s = mergeScenario(
+    s,
+    extractScenarioDelta("vitales: alquiler 2000, seguro 1000, comida 2000. no vitales: ocio 3000, ropa 1000, gimnasio 2000"),
+  );
+  assert.equal(s.gastos_detalle?.vitales, 5000);
+  assert.equal(s.gastos_detalle?.noVitales, 6000);
+  assert.equal(s.gastos_mensuales, 11000, "el detalle (5000+6000) pisa el agregado obsoleto (10000)");
+});
+
+test("BUG 1: un solo ítem NO genera detalle (extractScenarioDelta ya lo exige) → no pisa el agregado", () => {
+  let s = mergeScenario({}, extractScenarioDelta("Gano 3000 euros al mes y mis gastos son 2000."));
+  s = mergeScenario(s, extractScenarioDelta("Netflix 15"));
+  assert.equal(s.gastos_mensuales, 2000, "un ítem suelto no es una lista (<2) — el agregado queda intacto");
+  assert.equal(s.gastos_detalle, undefined);
+});
+
+test("BUG 1: agregado sin detalle nunca se toca por defecto", () => {
+  const s = mergeScenario({}, extractScenarioDelta("Gano 3000 euros al mes y mis gastos son 1800."));
+  assert.equal(s.gastos_mensuales, 1800);
+  assert.equal(s.gastos_detalle, undefined);
+});
+
+// ── BUG 3 — la meta se deriva del crédito ─────────────────────────────────────
+test("BUG 3: crédito de carro sin meta → meta derivada (título, monto, plazo), missing SIN meta", () => {
+  const s = mergeScenario(
+    { ingreso_mensual: 10000, gastos_mensuales: 9500 },
+    extractScenarioDelta("Quiero financiar un carro de 30000 a 36 meses."),
+  );
+  assert.equal(s.meta?.titulo, "Carro");
+  assert.equal(s.meta?.monto, 30000);
+  assert.equal(s.meta?.plazo_meses, 36);
+  assert.equal(s.meta_derivada, true);
+  assert.ok(!s.missing.includes("meta_monto"), "la meta derivada ya tiene monto");
+  assert.ok(!s.missing.includes("plazo") || s.credito?.plazo_meses === 36, "el plazo ya lo trae el crédito");
+});
+
+test("BUG 3: sin objeto reconocible en el mensaje → título genérico 'compra financiada'", () => {
+  const s = mergeScenario(undefined, extractScenarioDelta("Quiero financiar 30000 a 36 meses."));
+  assert.equal(s.meta?.titulo, "compra financiada");
+  assert.equal(s.meta?.monto, 30000);
+});
+
+test("BUG 3: meta EXPLÍCITA del usuario nunca se pisa por la derivada del crédito", () => {
+  let s = mergeScenario(undefined, extractScenarioDelta("Mi meta es juntar 50000 en 48 meses."));
+  assert.equal(s.meta?.monto, 50000);
+  assert.equal(s.meta_derivada, false);
+
+  s = mergeScenario(s, extractScenarioDelta("Quiero financiar un carro de 30000 a 36 meses."));
+  assert.equal(s.meta?.monto, 50000, "la meta explícita del usuario sigue mandando, no la del crédito");
+  assert.equal(s.meta?.plazo_meses, 48);
+  assert.ok(!s.meta_derivada, "nunca se marca como derivada tras una meta explícita");
+});
+
+test("BUG 3: meta derivada se actualiza si el crédito cambia de monto (sigue siendo derivada)", () => {
+  let s = mergeScenario(undefined, extractScenarioDelta("Quiero financiar un carro de 30000 a 36 meses."));
+  assert.equal(s.meta?.monto, 30000);
+  s = mergeScenario(s, extractScenarioDelta("Mejor un carro de 20000 a 36 meses."));
+  assert.equal(s.meta?.monto, 20000, "la meta derivada sigue el crédito mientras nadie la fije a mano");
+  assert.equal(s.meta_derivada, true);
+});
+
+// ── Persistencia — un campo nunca se borra por ausencia en un turno posterior ─
+test("persistencia: crédito con monto+plazo; turno posterior sin mencionarlos → se conservan", () => {
+  let s = mergeScenario(undefined, extractScenarioDelta("Quiero financiar un carro de 30000 a 36 meses."));
+  s = mergeScenario(s, extractScenarioDelta("El banco me ofrece 9%"));
+  assert.equal(s.credito?.monto, 30000, "el monto no se borra porque el turno nuevo no lo menciona");
+  assert.equal(s.credito?.plazo_meses, 36);
+  assert.equal(s.credito?.objeto, "carro", "el objeto persiste igual, aunque el turno de la TAE no lo mencione");
+});
+
+test("persistencia: ingreso fijado en T1 sobrevive intacto varios turnos sin mencionarlo", () => {
+  let s = mergeScenario(undefined, extractScenarioDelta("Gano 3000 euros al mes."));
+  s = mergeScenario(s, extractScenarioDelta("Mi meta es juntar 12000 en 24 meses."));
+  s = mergeScenario(s, extractScenarioDelta("¿Cuánto es mi capacidad de ahorro anual?"));
+  assert.equal(s.ingreso_mensual, 3000, "ningún turno posterior lo tocó ni lo borró");
 });

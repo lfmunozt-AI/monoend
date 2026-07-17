@@ -183,6 +183,10 @@ const CONCEPT_KEYWORDS: [RegExp, string][] = [
   // "corregiría" 510/135 al total mensual (2372), que es la propia alucinación
   // que este fix busca evitar, solo que sobre un concepto distinto.
   [/\b(?:gastos|gasto)\b(?!\s+(?:vitales|no\s+vitales))|\b(?:despesas|expenses|spending)\b/, "gastos"],
+  // BUG 2: el déficit (gastas más de lo que ingresas) es un concepto propio, no
+  // un "sobrante negativo" — sin esto, un déficit citado con la cifra errónea
+  // caería a la heurística genérica igual que ingreso/gastos antes del fix.
+  [/\b(deficit|defice|shortfall)\b|gastas de mas|numeros rojos/, "deficit"],
 ];
 
 /** Conceptos financieros nombrados en la frase (canónicos, sin repetir). */

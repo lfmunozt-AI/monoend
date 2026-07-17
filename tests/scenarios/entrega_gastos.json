@@ -2,7 +2,7 @@
   "name": "entrega_gastos",
   "playbook": "PB4",
   "language": "es",
-  "description": "Entrega de gastos. Verifica (a) la clasificación vital/no vital, (b) el recorte del 50% con supuesto explícito, (c) que NO se moraliza sobre la cerveza, y (d) que la lista NO machaca el gasto mensual agregado del T1 (el extractor etiqueta 'gastos:' con el primer ítem, 15).",
+  "description": "Entrega de gastos. Verifica (a) la clasificación vital/no vital, (b) el recorte del 50% con supuesto explícito, (c) que NO se moraliza sobre la cerveza, y (d) que la lista NUNCA se toma como si el primer ítem (15) fuera el agregado — pero SÍ recalcula gastos_mensuales como la suma del detalle (BUG 1: el detalle manda sobre el agregado, aunque este quedara obsoleto).",
   "profile": { "archetype": "gastador", "country": "ES" },
   "turns": [
     {
@@ -19,7 +19,7 @@
       "expectNotContains": ["alcohol", "vicio", "deberías dejar", "malgastas", "dejar de beber"],
       "expectBlocked": false,
       "expectFallback": false,
-      "expectScenarioState": { "ingreso_mensual": {{monthlyNet}}, "gastos_mensuales": {{gastosMes}} }
+      "expectScenarioState": { "ingreso_mensual": {{monthlyNet}}, "gastos_mensuales": 645 }
     }
   ]
 }
