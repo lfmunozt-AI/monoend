@@ -1,7 +1,19 @@
 /**
  * @module llm
- * Cliente LLM — OpenAI gpt-4o-mini con fallback y registro de tokens.
+ * Cliente LLM — Router agnóstico de proveedor, con fallback y registro de tokens.
  * API key solo en servidor. No importar desde componentes cliente.
+ *
+ * Router: `LLM_BASE_URL` (default `https://api.openai.com/v1`) y `LLM_MODEL`
+ * (default `gpt-4o-mini`) seleccionan endpoint y modelo sin tocar código.
+ *
+ * REGLA DE SEGURIDAD (no negociable): `OPENAI_API_KEY` jamás viaja a un
+ * endpoint no-OpenAI. Se usa `LLM_API_KEY` si está definida; si no, se cae a
+ * `OPENAI_API_KEY` únicamente cuando `LLM_BASE_URL` sigue apuntando a
+ * `https://api.openai.com`. Sin key resultante → comportamiento fallback
+ * (nunca lanza).
+ *
+ * Dominio de AG01. Otros agentes que necesiten capacidades nuevas solicitan
+ * una extensión; no editan este archivo.
  */
 
 import OpenAI from 'openai';
@@ -18,7 +30,9 @@ export interface LLMError {
   message: string;
 }
 
-const MODEL_PRIMARY = 'gpt-4o-mini';
+const baseURL = process.env.LLM_BASE_URL || 'https://api.openai.com/v1';
+const model = process.env.LLM_MODEL || 'gpt-4o-mini';
+const isOpenAI = baseURL.startsWith('https://api.openai.com');
 const TIMEOUT_MS = 30_000;
 
 /**
@@ -29,11 +43,11 @@ const TIMEOUT_MS = 30_000;
 const CHAT_MAX_TOKENS = 400;
 
 function getClient(): OpenAI {
-  const apiKey = process.env.OPENAI_API_KEY;
+  const apiKey = process.env.LLM_API_KEY || (isOpenAI ? process.env.OPENAI_API_KEY : undefined);
   if (!apiKey) {
-    throw new Error('OPENAI_API_KEY no configurada en el servidor');
+    throw new Error('LLM_API_KEY (o OPENAI_API_KEY para OpenAI) no configurada en el servidor');
   }
-  return new OpenAI({ apiKey, timeout: TIMEOUT_MS });
+  return new OpenAI({ baseURL, apiKey, timeout: TIMEOUT_MS });
 }
 
 function classifyError(err: unknown): LLMError {
@@ -77,14 +91,14 @@ export async function callLLM(
     return {
       content: FALLBACK_RESPONSE,
       tokensUsed: 0,
-      model: MODEL_PRIMARY,
+      model,
       fromFallback: true,
     };
   }
 
   try {
     const completion = await client.chat.completions.create({
-      model: MODEL_PRIMARY,
+      model,
       temperature: 0.4,
       max_tokens: 600,
       messages: [
@@ -97,12 +111,12 @@ export async function callLLM(
     const content = choice?.message?.content ?? FALLBACK_RESPONSE;
     const tokensUsed = completion.usage?.total_tokens ?? 0;
 
-    logTokens({ model: MODEL_PRIMARY, tokensUsed, prompt: prompt.slice(0, 80) });
+    logTokens({ model, tokensUsed, prompt: prompt.slice(0, 80) });
 
     return {
       content,
       tokensUsed,
-      model: MODEL_PRIMARY,
+      model,
       fromFallback: false,
     };
   } catch (err) {
@@ -112,7 +126,7 @@ export async function callLLM(
     return {
       content: FALLBACK_RESPONSE,
       tokensUsed: 0,
-      model: MODEL_PRIMARY,
+      model,
       fromFallback: true,
     };
   }
@@ -136,7 +150,7 @@ export async function callLLMJson<T = unknown>(
 
   try {
     const completion = await client.chat.completions.create({
-      model: MODEL_PRIMARY,
+      model,
       temperature: 0.2,
       max_tokens: 800,
       response_format: { type: 'json_object' },
@@ -149,7 +163,7 @@ export async function callLLMJson<T = unknown>(
     const content = completion.choices[0]?.message?.content;
     const tokensUsed = completion.usage?.total_tokens ?? 0;
 
-    logTokens({ model: MODEL_PRIMARY, tokensUsed, prompt: prompt.slice(0, 80) });
+    logTokens({ model, tokensUsed, prompt: prompt.slice(0, 80) });
 
     if (!content) return null;
     return JSON.parse(content) as T;
@@ -181,7 +195,7 @@ export async function callLLMWithHistory(
   try {
     client = getClient();
   } catch {
-    return { content: FALLBACK_RESPONSE, tokensUsed: 0, model: MODEL_PRIMARY, fromFallback: true };
+    return { content: FALLBACK_RESPONSE, tokensUsed: 0, model, fromFallback: true };
   }
 
   const lastPrompt = messages.at(-1)?.content ?? '';
@@ -189,7 +203,7 @@ export async function callLLMWithHistory(
 
   try {
     const completion = await client.chat.completions.create({
-      model: MODEL_PRIMARY,
+      model,
       temperature: 0.4,
       max_tokens: maxTokens,
       messages: [
@@ -201,13 +215,13 @@ export async function callLLMWithHistory(
     const content = completion.choices[0]?.message?.content ?? FALLBACK_RESPONSE;
     const tokensUsed = completion.usage?.total_tokens ?? 0;
 
-    logTokens({ model: MODEL_PRIMARY, tokensUsed, prompt: lastPrompt.slice(0, 80) });
+    logTokens({ model, tokensUsed, prompt: lastPrompt.slice(0, 80) });
 
-    return { content, tokensUsed, model: MODEL_PRIMARY, fromFallback: false };
+    return { content, tokensUsed, model, fromFallback: false };
   } catch (err) {
     const llmError = classifyError(err);
     console.error(`[llm:history] ${llmError.code}: ${llmError.message}`);
-    return { content: FALLBACK_RESPONSE, tokensUsed: 0, model: MODEL_PRIMARY, fromFallback: true };
+    return { content: FALLBACK_RESPONSE, tokensUsed: 0, model, fromFallback: true };
   }
 }
 
@@ -302,12 +316,12 @@ export async function callLLMWithTools(
   try {
     client = getClient();
   } catch {
-    return { content: '', toolCalls: [], tokensUsed: 0, model: MODEL_PRIMARY, fromFallback: true };
+    return { content: '', toolCalls: [], tokensUsed: 0, model, fromFallback: true };
   }
 
   try {
     const completion = await client.chat.completions.create({
-      model: MODEL_PRIMARY,
+      model,
       temperature: 0.2,
       max_tokens: options.maxTokens ?? TOOLS_MAX_TOKENS,
       tools: tools as unknown as OpenAI.Chat.Completions.ChatCompletionTool[],
@@ -331,11 +345,11 @@ export async function callLLMWithTools(
         return { id: t.id, name: fn.name, args };
       });
 
-    logTokens({ model: MODEL_PRIMARY, tokensUsed, prompt: 'tools' });
-    return { content: choice?.content ?? '', toolCalls, tokensUsed, model: MODEL_PRIMARY, fromFallback: false };
+    logTokens({ model, tokensUsed, prompt: 'tools' });
+    return { content: choice?.content ?? '', toolCalls, tokensUsed, model, fromFallback: false };
   } catch (err) {
     const llmError = classifyError(err);
     console.error(`[llm:tools] ${llmError.code}: ${llmError.message}`);
-    return { content: '', toolCalls: [], tokensUsed: 0, model: MODEL_PRIMARY, fromFallback: true };
+    return { content: '', toolCalls: [], tokensUsed: 0, model, fromFallback: true };
   }
 }
