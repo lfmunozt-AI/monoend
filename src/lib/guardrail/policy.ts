@@ -308,6 +308,122 @@ export function rewriteDelegativeClosing(
   return kept ? `${kept}\n\n${req}` : req;         // añade UN cierre de insumo
 }
 
+// ── Cierre por missing (bug de prioridad) ────────────────────────────────────
+//
+// QA real: el motor marcó missing=["tae"] pero el modelo cerró con "¿Te
+// gustaría proceder con esta compra?" — una pregunta LÍCITA (no delegativa,
+// `rewriteDelegativeClosing` no la caza) pero de prioridad equivocada: el
+// código ya sabe que falta la TAE y el cierre debe pedir exactamente eso.
+// Filosofía: el código decide QUÉ se pregunta, el modelo lo redacta.
+
+// Keywords por campo (ES/PT/EN), sobre texto normalizado (sin acentos, minúsculas).
+const MISSING_KEYWORDS: Record<string, RegExp> = {
+  tae: /\b(tae|taeg|tasa|taxa|juros|interes|interest|apr)\b|banco\s+te\s+ofrece/,
+  gastos: /\b(gastos?|despesas?|expenses?|spending)\b/,
+  ingreso: /\b(ingresos?|salario|rendimento|income|earn)\b/,
+  meta: /\b(meta|objetivo|goal)\b/,
+  plazo: /\b(plazo|meses|months?|prazo)\b/,
+  monto: /\b(monto|precio|importe|preco|amount|price)\b/,
+};
+
+/** Petición canónica por campo, en el idioma del usuario. */
+const MISSING_REQUEST: Record<string, Record<Language, string>> = {
+  tae: {
+    es: "¿Qué TAE te ofrece tu banco? Con ese dato la cuota es exacta al 100%.",
+    pt: "Qual é a TAEG que o teu banco te oferece? Com esse dado a prestação é exata a 100%.",
+    en: "What APR is your bank offering? With that figure the payment is exact.",
+  },
+  gastos: {
+    es: "¿Me compartes tus gastos principales con sus montos? Yo identifico cuáles recortar.",
+    pt: "Partilhas os teus principais gastos com os valores? Eu identifico quais cortar.",
+    en: "Share your main expenses with their amounts — I'll pinpoint which ones to cut.",
+  },
+  ingreso: {
+    es: "¿Cuál es tu ingreso neto mensual? Con ese dato calculo tu capacidad real.",
+    pt: "Qual é o teu rendimento líquido mensal? Com esse dado calculo a tua capacidade real.",
+    en: "What's your monthly net income? With that I calculate your real capacity.",
+  },
+  meta: {
+    es: "¿Cuál es la meta que quieres conquistar y en qué plazo? Con eso te armo el plan.",
+    pt: "Qual é a meta que queres conquistar e em que prazo? Com isso monto-te o plano.",
+    en: "What's the goal you want to conquer and by when? I'll build the plan.",
+  },
+  plazo: {
+    es: "¿A cuántos meses lo quieres financiar? Con ese dato calculo la cuota.",
+    pt: "A quantos meses queres financiar? Com esse dado calculo a prestação.",
+    en: "Over how many months do you want to finance it? Then I'll calculate the payment.",
+  },
+  monto: {
+    es: "¿Cuál es el precio exacto? Con ese dato calculo la cuota.",
+    pt: "Qual é o preço exato? Com esse dado calculo a prestação.",
+    en: "What's the exact price? Then I'll calculate the payment.",
+  },
+};
+
+/**
+ * ¿Es una frase de CIERRE (pregunta o propuesta), no una frase de análisis?
+ * Reutiliza `PROPOSAL_RE`, ya definida arriba para el mismo propósito en
+ * `endsWithRequestOrProposal` — no se duplica el criterio.
+ */
+function isClosingCandidate(sentence: string): boolean {
+  return sentence.trim().endsWith("?") || PROPOSAL_RE.test(norm(sentence));
+}
+
+/**
+ * Garantiza que el cierre pida EXACTAMENTE `missing[0]` (el dato que el motor
+ * marcó como faltante), no lo que al modelo le pareció natural preguntar.
+ *
+ * - `missing` vacío → texto intacto (nada que enforzar).
+ * - Se identifica el BLOQUE DE CIERRE: las frases finales que son pregunta o
+ *   propuesta, recolectadas desde el final mientras lo sean (0, 1 o 2 frases).
+ *   Una frase de ANÁLISIS que solo MENCIONA el campo (p. ej. "calculando con
+ *   la TAE de referencia…", parte de la regla de simulación B2) no cuenta como
+ *   cierre y no debe confundirse con una petición real de ese dato — por eso
+ *   NO se mira "las últimas N frases" a ciegas, solo el bloque de cierre.
+ * - Si el bloque de cierre YA menciona el campo → texto intacto.
+ * - Si no lo menciona: se sustituye el bloque de cierre (si existe) por la
+ *   petición canónica; si no hay bloque de cierre (solo texto declarativo, sin
+ *   pregunta ni propuesta), se conserva todo y la petición se añade. En ambos
+ *   casos, UNA sola petición final. Reutiliza `segmentSentences` (context.ts)
+ *   y `cleanup`; no duplica splitter ni la lógica de cierre único.
+ */
+export function enforceMissingClosing(
+  text: string,
+  missing: string[],
+  lang: Language = DEFAULT_LANGUAGE,
+): string {
+  if (!missing || missing.length === 0) return text;
+
+  const field = missing[0] === "meta_monto" ? "meta" : missing[0];
+  const keywordsRe = MISSING_KEYWORDS[field];
+  const request = MISSING_REQUEST[field]?.[lang];
+  if (!keywordsRe || !request) return text; // campo desconocido: no tocar
+
+  const segments = segmentSentences(text);
+  const nonEmpty = segments
+    .map((s, i) => ({ i, t: s.text.trim() }))
+    .filter((x) => x.t !== "");
+  if (nonEmpty.length === 0) return request;
+
+  // Bloque de cierre: frases finales que son pregunta/propuesta, recolectadas
+  // desde el final mientras lo sean (se detiene en la primera de análisis).
+  const closing: typeof nonEmpty = [];
+  for (let k = nonEmpty.length - 1; k >= 0; k--) {
+    if (!isClosingCandidate(nonEmpty[k].t)) break;
+    closing.unshift(nonEmpty[k]);
+  }
+
+  if (closing.length > 0 && closing.some((x) => keywordsRe.test(norm(x.t)))) {
+    return text; // el cierre ya apunta al campo correcto
+  }
+
+  const kept = closing.length > 0
+    ? cleanup(segments.slice(0, closing[0].i).map((s) => s.text).join(""))
+    : cleanup(text);
+
+  return kept ? `${kept}\n\n${request}` : request;
+}
+
 // ── PIEZA 3 — fallback de sustancia ──────────────────────────────────────────
 //
 // Cuando el guardarraíl vacía una respuesta (todas sus cifras eran inventadas),

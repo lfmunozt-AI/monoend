@@ -2,7 +2,7 @@ import { createClient } from '@/lib/supabase/server'
 import { adminClient } from '@/lib/supabase/admin'
 import { buildSystemPrompt } from '@/lib/prompts/consigliere'
 import { callLLMWithTools } from '@/lib/llm'
-import { runGuardrail, rewriteDelegativeClosing, ensureSubstance } from '@/lib/guardrail'
+import { runGuardrail, rewriteDelegativeClosing, ensureSubstance, enforceMissingClosing } from '@/lib/guardrail'
 import { buildScenarioContext } from '@/lib/calculator/orchestrator'
 import { mergeScenario, summarizeScenario, type ScenarioState } from '@/lib/calculator/scenario'
 import { registrarDatosFinancieros, resolveDelta, buildToolResult } from '@/lib/calculator/tools'
@@ -351,6 +351,20 @@ export async function POST(request: Request) {
   finalContent = ensureSubstance(finalContent, { lang: userLang, missing: scenario.missing })
   if (finalContent !== beforeSubstance) {
     console.warn('[chat] substance_fallback', JSON.stringify({
+      user_id: user.id,
+      conversation_id: convId,
+      missing: scenario.missing,
+    }))
+  }
+
+  // BUG DE CIERRE (QA real): el motor marca missing=["tae"] pero el modelo
+  // cierra con una pregunta lícita de prioridad equivocada ("¿Te gustaría
+  // proceder?"). El código decide QUÉ se pregunta; el modelo ya lo redactó.
+  // Último paso: nunca se reintroduce un cierre fuera de tema.
+  const beforeMissingClosing = finalContent
+  finalContent = enforceMissingClosing(finalContent, scenario.missing, userLang)
+  if (finalContent !== beforeMissingClosing) {
+    console.warn('[chat] missing_closing_enforced', JSON.stringify({
       user_id: user.id,
       conversation_id: convId,
       missing: scenario.missing,

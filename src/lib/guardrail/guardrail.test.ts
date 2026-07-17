@@ -14,7 +14,69 @@ import { parseModelOutput } from "./schema";
 import { parseDigitAmount, findNumberMentions } from "./numbers";
 import { runGuardrail } from "./index";
 import { splitSentences, segmentSentences, sentenceRangeAt } from "./context";
-import { rewriteDelegativeClosing, isDelegativeClosing, ensureSubstance } from "./policy";
+import { rewriteDelegativeClosing, isDelegativeClosing, ensureSubstance, enforceMissingClosing } from "./policy";
+
+// ── enforceMissingClosing — cierre por missing (bug de prioridad) ─────────────
+test("caso real QA: missing=['tae'] + cierre de prioridad equivocada → reemplazado", () => {
+  const respuesta =
+    "Calculando con una TAE de referencia del 7% —tu banco te dará la real—, " +
+    "la cuota sería de 452,78 €/mes, sobre un sobrante de 500 €. " +
+    "¿Te gustaría proceder con esta compra?";
+  const out = enforceMissingClosing(respuesta, ["tae"], "es");
+  assert.ok(!out.includes("proceder con esta compra"), "la pregunta de prioridad equivocada desaparece");
+  assert.ok(out.includes("¿Qué TAE te ofrece tu banco?"), "pide exactamente el dato que falta");
+  assert.ok(out.includes("452,78"), "conserva el análisis (cuota + simulación)");
+  assert.equal((out.match(/\?/g) ?? []).length, 1, "una sola pregunta final");
+});
+
+test("cierre que YA pide la TAE → intacto", () => {
+  const texto = "La cuota es 452,78 €. ¿Qué TAE te ofrece tu banco?";
+  assert.equal(enforceMissingClosing(texto, ["tae"], "es"), texto);
+});
+
+test("missing vacío → intacto", () => {
+  const texto = "La cuota es 452,78 €. ¿Confirmamos el plan?";
+  assert.equal(enforceMissingClosing(texto, [], "es"), texto);
+});
+
+test("missing=['gastos'] con cierre genérico → reemplazado", () => {
+  const out = enforceMissingClosing("Tu sobrante es 500. ¿Confirmamos el plan?", ["gastos"], "es");
+  assert.ok(!out.includes("Confirmamos el plan"));
+  assert.ok(out.includes("¿Me compartes tus gastos principales"));
+  assert.ok(out.includes("Tu sobrante es 500"), "conserva el análisis previo");
+});
+
+test("PT: missing=['tae'] → petición canónica en portugués", () => {
+  const out = enforceMissingClosing("A prestação é 452,78 €. Confirmamos?", ["tae"], "pt");
+  assert.ok(out.includes("Qual é a TAEG que o teu banco te oferece?"));
+});
+
+test("EN: missing=['tae'] → petición canónica en inglés", () => {
+  const out = enforceMissingClosing("The payment is 452.78. Shall we proceed?", ["tae"], "en");
+  assert.ok(out.includes("What APR is your bank offering?"));
+});
+
+test("garantía: máximo UNA pregunta final tras el reemplazo", () => {
+  const respuesta =
+    "Con una TAE de referencia del 7%, la cuota sería de 452,78 €. ¿Te gustaría proceder con esta compra?";
+  const out = enforceMissingClosing(respuesta, ["tae"], "es");
+  assert.equal((out.match(/\?/g) ?? []).length, 1);
+});
+
+test("respuesta SIN pregunta → se añade la petición sin borrar nada", () => {
+  const texto = "La cuota es de 452,78 €.";
+  const out = enforceMissingClosing(texto, ["tae"], "es");
+  assert.ok(out.startsWith(texto), "el contenido previo se conserva íntegro");
+  assert.ok(out.includes("¿Qué TAE te ofrece tu banco?"));
+});
+
+test("missing=['ingreso'] y missing=['meta_monto'→meta] también reemplazan", () => {
+  const ing = enforceMissingClosing("Tu gasto es 1500. ¿Seguimos?", ["ingreso"], "es");
+  assert.ok(ing.includes("¿Cuál es tu ingreso neto mensual?"));
+
+  const meta = enforceMissingClosing("Vas bien. ¿Seguimos?", ["meta_monto"], "es");
+  assert.ok(meta.includes("¿Cuál es la meta que quieres conquistar"), "meta_monto se mapea a meta");
+});
 
 // ── DEFECTO C — el grounding semántico decide ANTES que c0 ────────────────────
 test("C: 'cuota 1.000 €' con conceptos.cuota=954 → BLOQUEADA aunque 1000 esté en valores", () => {
