@@ -13,11 +13,50 @@
 // Código PURO (regex + aritmética), edge-safe, SIN llamadas a ningún LLM.
 
 import { findNumberMentions, dedupeOverlaps, type NumberMention } from "./numbers";
-import { detectCurrency, isPercent, isTimeUnit, type Moneda } from "./context";
+import {
+  conceptsInSentence,
+  detectCurrency,
+  detectLabel,
+  hasReferenceMarker,
+  isPercent,
+  isTimeUnit,
+  nearestConceptInSentence,
+  sentenceRangeAt,
+  type Moneda,
+} from "./context";
 import type { VerifiedFact } from "./extract";
 
-/** Por qué se aprobó una cifra. */
-export type Categoria = "hecho" | "concepto" | "calculo";
+/**
+ * Cifras del motor para el grounding. Forma evolucionada (PIEZA 2):
+ * - `valores`: todas las cifras aprobables por coincidencia exacta (c0).
+ * - `conceptos`: mapa semántico concepto→valor exacto ("cuota"→926.31). Cuando
+ *   una frase nombra un concepto conocido, la cifra DEBE coincidir con su valor;
+ *   la heurística de multiplicadores no aplica.
+ * Se acepta también el `number[]` histórico (equivale a `{valores, conceptos:{}}`).
+ */
+export interface GroundingCifras {
+  valores: number[];
+  conceptos?: Record<string, number>;
+}
+
+function normalizeCifras(
+  c: number[] | GroundingCifras,
+): { valores: number[]; conceptos: Record<string, number> } {
+  if (Array.isArray(c)) return { valores: c, conceptos: {} };
+  return { valores: c.valores ?? [], conceptos: c.conceptos ?? {} };
+}
+
+/**
+ * Por qué se aprobó una cifra.
+ * - hecho:      la aportó el usuario.
+ * - calculo:    se deriva de un dato del usuario o del motor financiero.
+ * - concepto:   regla general (rango temporal) o porcentaje que explica una
+ *               cifra ya fundamentada en la misma frase.
+ * - referencia: estándar de la industria explícitamente etiquetado como tal
+ *               ("como referencia, el estándar ronda el 20%"). Es un puente de
+ *               conocimiento, no un diagnóstico: obliga a pedir el dato personal.
+ */
+export type Categoria = "hecho" | "concepto" | "calculo" | "referencia";
 
 export interface ApprovedFigure {
   valor: number;
@@ -32,9 +71,22 @@ export interface BlockedFigure {
   texto: string;
   moneda: Moneda;
   motivo: string;
-  /** Posición en la respuesta — la Pieza 3 la usa para reescribir la frase. */
+  /**
+   * A qué se refería la cifra inventada ("gasto", "ingreso", "meta"…) según las
+   * palabras cercanas. La Pieza 3 la usa para pedir el dato que falta de forma
+   * específica en vez de genérica. "" si no hay contexto claro.
+   */
+  etiqueta: string;
+  /** Posición en la respuesta — la Pieza 3 la usa para eliminar la frase. */
   start: number;
   end: number;
+  /**
+   * Valor correcto cuando el bloqueo es por MISMATCH de un concepto conocido
+   * (la cuota debía ser 953,99 y el modelo escribió 1.000). Si está presente, la
+   * Pieza 3 corrige la cifra EN SU SITIO en vez de eliminar la frase: el motor
+   * sabe la respuesta buena, así que la sustituye. Ausente → se elimina la frase.
+   */
+  correccion?: number;
 }
 
 export interface GroundingResult {
@@ -110,7 +162,7 @@ function exactMatch(a: number, b: number): boolean {
 export function validateGrounding(
   modelResponse: string,
   facts: VerifiedFact[],
-  cifrasCalculadas: number[] = [],
+  cifrasCalculadas: number[] | GroundingCifras = [],
 ): GroundingResult {
   const aprobadas: ApprovedFigure[] = [];
   const bloqueadas: BlockedFigure[] = [];
@@ -118,6 +170,8 @@ export function validateGrounding(
   if (!modelResponse || !modelResponse.trim()) {
     return { cifras_aprobadas: aprobadas, cifras_bloqueadas: bloqueadas };
   }
+
+  const { valores, conceptos } = normalizeCifras(cifrasCalculadas);
 
   const figs = dedupeOverlaps(findNumberMentions(modelResponse));
 
@@ -128,12 +182,63 @@ export function validateGrounding(
 
   const factValues = facts.map((f) => f.valor);
 
+  // ¿Es una cifra MONETARIA fundamentada (hecho del usuario o cálculo sobre él)?
+  // Se necesita como predicado suelto: la suerte de un porcentaje depende de si
+  // su frase contiene una cifra fundamentada a la que esté explicando.
+  const isGroundedAmount = (m: NumberMention): boolean => {
+    if (isPercent(modelResponse, m) || isTimeUnit(modelResponse, m)) return false;
+    if (factValues.some((f) => approxEqual(m.value, f))) return true;
+    if (valores.some((c) => exactMatch(m.value, c))) return true;
+    return isDerived(m.value, facts, explicitPercents);
+  };
+
   for (const m of figs) {
     const moneda = detectCurrency(modelResponse, m);
+    const [sentStart, sentEnd] = sentenceRangeAt(modelResponse, m.start, m.end);
+    const esReferencia = hasReferenceMarker(modelResponse.slice(sentStart, sentEnd));
 
-    // (b) Porcentaje → concepto, se mantiene.
+    // (POSICIONAL · FIX 4) — PRIORIDAD sobre el chequeo por frase. Si la cifra
+    // está ADYACENTE a un patrón de rol ("crédito de <X>", "cuota … <X>",
+    // "a <X> meses") y el motor conoce ese concepto, la cifra DEBE ser ese
+    // concepto (±1). Impide que la cuota se cite como el monto del crédito.
+    const rol = roleConcept(modelResponse, m);
+    if (rol && rol in conceptos && !isPercent(modelResponse, m)) {
+      if (Math.abs(m.value - conceptos[rol]) <= 1) {
+        aprobadas.push({ ...base(m, moneda), categoria: "calculo", motivo: `coincide con el concepto verificado (${rol}, por posición)` });
+      } else {
+        bloqueadas.push({
+          ...base(m, moneda),
+          motivo: `posición de ${rol} pero no coincide con su valor verificado`,
+          etiqueta: labelWithinSentence(modelResponse, m),
+          start: m.start,
+          end: m.end,
+          correccion: conceptos[rol],
+        });
+      }
+      continue;
+    }
+
+    // (b) Porcentaje. Ya NO se aprueba en bloque. Un porcentaje suelto y sin
+    // datos del usuario ("la cifra clave es el 20% de tus ingresos") es una
+    // cifra de manual disfrazada de diagnóstico: destruye la confianza.
     if (isPercent(modelResponse, m)) {
-      aprobadas.push({ ...base(m, moneda), categoria: "concepto", motivo: "porcentaje" });
+      if (factValues.some((f) => approxEqual(m.value, f))) {
+        aprobadas.push({ ...base(m, moneda), categoria: "hecho", motivo: "dato del usuario" });
+      } else if (esReferencia) {
+        // Tercera vía: estándar etiquetado como referencia → puente de conocimiento.
+        aprobadas.push({ ...base(m, moneda), categoria: "referencia", motivo: "estándar etiquetado como referencia" });
+      } else if (figs.some((o) => o !== m && o.start >= sentStart && o.start < sentEnd && isGroundedAmount(o))) {
+        // "ahorra 2000 (el 20%)": el porcentaje explica de dónde sale el 2000.
+        aprobadas.push({ ...base(m, moneda), categoria: "concepto", motivo: "porcentaje que explica una cifra fundamentada" });
+      } else {
+        bloqueadas.push({
+          ...base(m, moneda),
+          motivo: "estándar genérico presentado como diagnóstico, sin dato del usuario ni marca de referencia",
+          etiqueta: labelWithinSentence(modelResponse, m),
+          start: m.start,
+          end: m.end,
+        });
+      }
       continue;
     }
     // (b) Regla general temporal ("3 a 6 meses") → concepto, se mantiene.
@@ -141,15 +246,51 @@ export function validateGrounding(
       aprobadas.push({ ...base(m, moneda), categoria: "concepto", motivo: "regla temporal" });
       continue;
     }
+    // (c1) GROUNDING SEMÁNTICO (PIEZA 2 · defecto C): si la frase nombra un
+    // concepto que el motor conoce (cuota, sobrante, recorte…), el SEMÁNTICO
+    // decide PRIMERO — antes que la coincidencia genérica c0. Un "1.000 €" como
+    // cuota debe bloquearse aunque 1000 esté en `valores` como sobrante.
+    // Un dato crudo del usuario (hecho) sí se respeta como escape.
+    //
+    // HUECO QA: cuando la frase nombra VARIOS conceptos a la vez ("ingresos…
+    // gastos… sobrante" sin punto entre cláusulas), no basta con que ALGUNO de
+    // ellos case con la cifra — hay que cotejar contra el concepto más CERCANO
+    // a esa cifra (`nearestConceptInSentence`); si no, el sobrante=500 real
+    // aprobaría también un "ingresos son de 500" o "gastos son de 500" falsos
+    // solo por compartir frase.
+    const sentenceText = modelResponse.slice(sentStart, sentEnd);
+    const knownConcepts = new Set(conceptsInSentence(sentenceText).filter((c) => c in conceptos));
+    const conceptoCercano =
+      knownConcepts.size > 0
+        ? nearestConceptInSentence(sentenceText, { start: m.start - sentStart, end: m.end - sentStart }, knownConcepts)
+        : null;
+    if (conceptoCercano) {
+      if (factValues.some((f) => approxEqual(m.value, f))) {
+        aprobadas.push({ ...base(m, moneda), categoria: "hecho", motivo: "dato del usuario" });
+      } else if (Math.abs(m.value - conceptos[conceptoCercano]) <= 1) {
+        aprobadas.push({ ...base(m, moneda), categoria: "calculo", motivo: `coincide con el concepto verificado (${conceptoCercano})` });
+      } else {
+        // El motor conoce el valor correcto del concepto → se ofrece como
+        // corrección en su sitio (la Pieza 3 decide sustituir vs eliminar).
+        bloqueadas.push({
+          ...base(m, moneda),
+          motivo: `no coincide con el concepto verificado por el motor (${conceptoCercano})`,
+          etiqueta: labelWithinSentence(modelResponse, m),
+          start: m.start,
+          end: m.end,
+          correccion: conceptos[conceptoCercano],
+        });
+      }
+      continue;
+    }
     // (a) Coincide con un hecho verificado.
     if (factValues.some((f) => approxEqual(m.value, f))) {
       aprobadas.push({ ...base(m, moneda), categoria: "hecho", motivo: "dato del usuario" });
       continue;
     }
-    // (c0) Coincide EXACTAMENTE con una cifra del motor financiero. Se prueba
-    // ANTES de las heurísticas: si el código ya calculó esta cifra, es cálculo
-    // verificado, no una coincidencia aproximada.
-    if (cifrasCalculadas.some((c) => exactMatch(m.value, c))) {
+    // (c0) Coincide EXACTAMENTE con una cifra del motor financiero (sin concepto
+    // conocido en la frase). Es cálculo verificado, no coincidencia aproximada.
+    if (valores.some((c) => exactMatch(m.value, c))) {
       aprobadas.push({ ...base(m, moneda), categoria: "calculo", motivo: "cálculo verificado por el motor financiero" });
       continue;
     }
@@ -158,10 +299,17 @@ export function validateGrounding(
       aprobadas.push({ ...base(m, moneda), categoria: "calculo", motivo: "cálculo sobre un dato del usuario" });
       continue;
     }
+    // (c2) Tercera vía para montos: sin grounding, pero la frase lo declara
+    // estándar/orientativo. Se permite como referencia, nunca como diagnóstico.
+    if (esReferencia) {
+      aprobadas.push({ ...base(m, moneda), categoria: "referencia", motivo: "estándar etiquetado como referencia" });
+      continue;
+    }
     // (d) Monto absoluto sin respaldo → se bloquea.
     bloqueadas.push({
       ...base(m, moneda),
       motivo: "monto sin respaldo en los datos del usuario",
+      etiqueta: labelWithinSentence(modelResponse, m),
       start: m.start,
       end: m.end,
     });
@@ -172,4 +320,54 @@ export function validateGrounding(
 
 function base(m: NumberMention, moneda: Moneda) {
   return { valor: m.value, texto: m.text, moneda };
+}
+
+function normLite(s: string): string {
+  return s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+}
+
+// Roles posicionales: qué concepto denota una cifra por su vecindad (FIX 4).
+// FIX 1a — el "de <CIFRA>" que precede al monto lo introduce tanto una palabra
+// de crédito como el OBJETO de compra ("carro de 30000", "casa de 30000"): el
+// modelo suele escribir el objeto, no la palabra "crédito".
+const ROLE_MONTO_BEFORE =
+  /\b(credito|prestamo|emprestimo|loan|financiacion|financiamento|financiar|carro|coche|auto|vehiculo|moto|casa|piso|apartamento|viatura|car|house|apartment|vehicle)\s+(?:de\s+|of\s+)?$/;
+const ROLE_CUOTA_BEFORE = /\b(cuota|prestacao|mensualidad|mensualidade|payment|installment)\b/;
+const ROLE_PLAZO_AFTER = /^\s*(?:€\s*)?(meses|mes|months?|parcelas|prestacoes)\b/;
+// FIX 1b — patrón ESTRUCTURAL cazatodo: la cifra que va "de <CIFRA> €? a <N>
+// meses" es SIEMPRE el monto (esa estructura es precio + plazo), aunque no haya
+// ni palabra de crédito ni objeto de compra delante.
+const ROLE_MONTO_BEFORE_DE = /\bde\s+$/;
+const ROLE_MONTO_STRUCT_AFTER =
+  /^\s*(?:€\s*)?a\s+\d[\d.,]*\s*(?:meses|mes|months?|parcelas|prestacoes)\b/;
+
+/**
+ * Concepto que denota la cifra `m` por adyacencia, o null. Orden de precisión:
+ * plazo (sufijo "meses") → monto (objeto/crédito "de <X>", justo antes) → monto
+ * estructural ("de <X> a <N> meses") → cuota (la palabra en la ventana previa).
+ */
+function roleConcept(text: string, m: NumberMention): string | null {
+  const before = normLite(text.slice(Math.max(0, m.start - 40), m.start));
+  const after = normLite(text.slice(m.end, m.end + 20));
+  if (ROLE_PLAZO_AFTER.test(after)) return "plazo";
+  if (ROLE_MONTO_BEFORE.test(before)) return "monto";
+  if (ROLE_MONTO_BEFORE_DE.test(before) && ROLE_MONTO_STRUCT_AFTER.test(after)) return "monto";
+  if (ROLE_CUOTA_BEFORE.test(before)) return "cuota";
+  return null;
+}
+
+/**
+ * Etiqueta de una cifra bloqueada, acotada a SU frase.
+ *
+ * `detectLabel` mira una ventana de ±40 caracteres, que puede saltar el punto y
+ * capturar una palabra de la frase siguiente ("…ser de 12700. La regla es
+ * ahorrar el 20%" etiquetaría 12700 como "ahorro"). La Pieza 3 elimina la frase
+ * entera y pide el dato que faltaba EN ESA frase, así que la etiqueta debe salir
+ * de ahí y de ningún otro sitio. Mejor "" (cierre genérico) que una etiqueta
+ * prestada de la frase de al lado.
+ */
+function labelWithinSentence(text: string, m: NumberMention): string {
+  const [start, end] = sentenceRangeAt(text, m.start, m.end);
+  const slice = text.slice(start, end);
+  return detectLabel(slice, { ...m, start: m.start - start, end: m.end - start });
 }

@@ -1,0 +1,27 @@
+{
+  "name": "agradecimiento",
+  "playbook": "PB7",
+  "language": "es",
+  "description": "Tras un cálculo financiero (T1, FINANCIERO, deja missing pendiente), 'gracias' (T2) se clasifica META pese al escenario activo — la señal del turno manda. resolveClosing en META devuelve el texto intacto: NO debe reaparecer la re-pregunta canónica del dato que aún falta.",
+  "turns": [
+    {
+      "user": "Gano 10000 euros al mes y mis gastos son 9500.",
+      "fixtureResponse": "Anotado. Tu sobrante mensual es de 500 €. ¿Cuál es tu meta?",
+      "expectCarril": "FINANCIERO",
+      "expectBlocked": false,
+      "expectScenarioState": { "ingreso_mensual": 10000, "gastos_mensuales": 9500 }
+    },
+    {
+      "user": "gracias",
+      "fixtureResponse": "¡De nada! Aquí estoy si necesitas algo más.",
+      "expectCarril": "META",
+      "expectFallback": false,
+      "expectContains": ["¡De nada!"],
+      "expectNotContains": [
+        "¿Cuál es tu meta?",
+        "Me compartes tus gastos principales",
+        "necesito tus gastos mensuales y tu meta"
+      ]
+    }
+  ]
+}

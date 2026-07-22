@@ -1,0 +1,18 @@
+{
+  "name": "cierre_por_missing_tae",
+  "playbook": "PB3",
+  "language": "es",
+  "description": "Bug de cierre validado en QA real (estado de Supabase confirmado: crédito 30000 a 84 meses, tae_es_referencia=true, missing=['tae'], ingreso 10000, gastos 9500). La cuota (452,78 €) es correcta y la simulación está bien verbalizada, PERO el modelo cerraba con '¿Te gustaría proceder con esta compra?' en vez de pedir la TAE que el motor marcó como faltante. rewriteDelegativeClosing no lo caza porque no es una frase delegativa — es un cierre lícito de prioridad equivocada. enforceMissingClosing lo sustituye por la petición canónica del campo missing[0].",
+  "turns": [
+    {
+      "user": "Gano 10000 euros al mes y mis gastos son 9500. Quiero financiar un carro de 30000 a 84 meses.",
+      "fixtureResponse": "Calculando con una TAE de referencia del 7% —tu banco te dará la real—, la cuota sería de 452,78 €/mes, sobre un sobrante de 500 €. ¿Te gustaría proceder con esta compra?",
+      "expectBlocked": false,
+      "expectNotContains": ["proceder con esta compra"],
+      "expectContains": ["452,78", "¿Qué TAE te ofrece tu banco?"],
+      "expectScenarioState": {
+        "credito": { "monto": 30000, "plazo_meses": 84, "tae_es_referencia": true }
+      }
+    }
+  ]
+}

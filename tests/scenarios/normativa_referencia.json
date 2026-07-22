@@ -1,0 +1,23 @@
+{
+  "name": "normativa_referencia",
+  "playbook": "PB2",
+  "language": "es",
+  "description": "PB2: el usuario pregunta por la NORMA. El 20% sólo se aprueba porque la frase lo marca como referencia ('Como referencia'); sin ese marcador el guardarraíl lo bloquearía como estándar disfrazado de diagnóstico. El cierre pide el dato personal.",
+  "profile": { "archetype": "impulsivo", "country": "ES" },
+  "turns": [
+    {
+      "user": "Gano {{monthlyNet}} euros al mes.",
+      "fixtureResponse": "Anotado, {{monthlyNet}} € al mes. ¿Cuáles son tus gastos mensuales?",
+      "expectBlocked": false,
+      "expectScenarioState": { "ingreso_mensual": {{monthlyNet}} }
+    },
+    {
+      "user": "¿Cuánto debería ahorrar?",
+      "fixtureResponse": "Como referencia, el estándar ronda el 20% del ingreso — pero tu número real depende de tus gastos y tu meta. Dame ambos y te digo el tuyo exacto.",
+      "expectContains": ["referencia", "20%"],
+      "expectBlocked": false,
+      "expectFallback": false,
+      "expectScenarioState": { "ingreso_mensual": {{monthlyNet}} }
+    }
+  ]
+}

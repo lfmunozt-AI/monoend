@@ -1,0 +1,27 @@
+{
+  "name": "credito_objeto_de_compra",
+  "playbook": "PB3",
+  "language": "es",
+  "description": "Hueco de cobertura del grounding posicional (QA real): el modelo cita la cuota (425,81) como el importe del OBJETO de compra ('carro de 425,81 €'), no como 'crédito de'. El patrón posicional de monto ahora cubre objetos de compra (carro/coche/casa…) y la estructura 'de <X> a <N> meses'. La cifra en posición de monto se reescribe al monto real (30000); la cuota en su sitio (última) sobrevive.",
+  "turns": [
+    {
+      "user": "Gano 10000 euros al mes y mis gastos son 9500. Quiero financiar un carro de 30000 a 91 meses.",
+      "fixtureResponse": "Para un carro de 30000 € a 91 meses, con una TAE de referencia del 7% aprox., la cuota sería de 425,81 €/mes. Tu sobrante mensual es de 500 €, así que no cabe. ¿Cuál es la TAE que te ofrece tu banco?",
+      "expectBlocked": false,
+      "expectContains": ["30000", "425,81"],
+      "expectScenarioState": {
+        "credito": { "monto": 30000, "plazo_meses": 91, "tae_es_referencia": true }
+      }
+    },
+    {
+      "user": "El banco me ofrece 7%",
+      "fixtureResponse": "Para un carro de 425,81 € a 91 meses, la cuota mensual sería de 425,81 €/mes.",
+      "expectBlocked": true,
+      "expectNotContains": ["carro de 425", "carro de 425,81"],
+      "expectContains": ["30000"],
+      "expectScenarioState": {
+        "credito": { "monto": 30000, "plazo_meses": 91, "tae_pct": 7, "tae_es_referencia": false }
+      }
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "name": "saludo_simple",
+  "playbook": "PB7",
+  "language": "es",
+  "description": "Charla trivial sin escenario activo ('hola'). classifyTurn clasifica META (sin señal financiera, sin continuidad de escenario) y resolveClosing deja el texto INTACTO: ni cierre canónico de insumo ni pregunta de missing, la respuesta libre del modelo sobrevive tal cual.",
+  "turns": [
+    {
+      "user": "hola",
+      "fixtureResponse": "¡Hola! Soy tu Consigliere financiero. ¿En qué te ayudo hoy?",
+      "expectCarril": "META",
+      "expectFallback": false,
+      "expectContains": ["¿En qué te ayudo hoy?"],
+      "expectNotContains": [
+        "Me compartes tus gastos principales",
+        "¿Qué TAE te ofrece tu banco?",
+        "necesito tus gastos mensuales y tu meta"
+      ]
+    }
+  ]
+}

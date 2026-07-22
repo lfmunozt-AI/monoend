@@ -31,6 +31,7 @@ export default function ChatPage() {
   const [isLoading, setIsLoading] = useState(false)
   const [isStreaming, setIsStreaming] = useState(false)
   const [consigliereState, setConsigliereState] = useState<ConsigliereState>('idle')
+  const [animatingMessageId, setAnimatingMessageId] = useState<string | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -85,10 +86,11 @@ export default function ChatPage() {
     const savedMessages = localStorage.getItem(`messages_${conversationId}`)
     if (savedMessages) {
       const parsed = JSON.parse(savedMessages)
-      setMessages(parsed.map((msg: any) => ({
-        ...msg,
-        timestamp: new Date(msg.timestamp)
-      })))
+      setMessages(parsed.map((msg: any) => {
+        // Sanitiza timestamps corruptos de pruebas previas → evita "Invalid Date"
+        const d = new Date(msg.timestamp)
+        return { ...msg, timestamp: isNaN(d.getTime()) ? new Date() : d }
+      }))
     }
   }
 
@@ -99,14 +101,33 @@ export default function ChatPage() {
   const startNewConversation = () => {
     setActiveConversationId(null)
     setMessages([])
+    setAnimatingMessageId(null)
     localStorage.removeItem('activeConversationId')
   }
 
   const handleSelectConversation = (conversationId: string) => {
     setActiveConversationId(conversationId)
+    setAnimatingMessageId(null)
     localStorage.setItem('activeConversationId', conversationId)
     loadMessages(conversationId)
   }
+
+  // Se dispara al terminar el tipeo (no antes) — la respuesta ya estaba
+  // validada por el guardrail, esto solo cierra la animación del personaje.
+  const handleTypingDone = useCallback((messageId: string, content: string) => {
+    setAnimatingMessageId(prev => (prev === messageId ? null : prev))
+
+    const lower = content.toLowerCase()
+    if (lower.includes('fuga')) {
+      setConsigliereState('alert')
+      setTimeout(() => setConsigliereState('idle'), 900)
+    } else if (lower.includes('excelente') || lower.includes('¡')) {
+      setConsigliereState('celebrate')
+      setTimeout(() => setConsigliereState('idle'), 1800)
+    } else {
+      setConsigliereState('idle')
+    }
+  }, [])
 
   const handleSendMessage = async (content: string) => {
     const userMessage: Message = {
@@ -147,31 +168,33 @@ export default function ChatPage() {
 
       const data = await response.json()
 
-      setTimeout(() => {
-        setIsStreaming(false)
-        setConsigliereState('responding')
-        
-        const assistantMessage: Message = {
-          id: `msg_${Date.now()}_assistant`,
-          role: 'assistant',
-          content: data.message,
-          timestamp: new Date(data.timestamp)
-        }
+      // Adopta la conversación creada/confirmada por el servidor
+      if (data.conversationId && data.conversationId !== activeConversationId) {
+        setActiveConversationId(data.conversationId)
+        localStorage.setItem('activeConversationId', data.conversationId)
+      }
 
-        const finalMessages = [...updatedMessages, assistantMessage]
-        setMessages(finalMessages)
-        saveMessages(activeConversationId, finalMessages)
+      // Se pinta al llegar la respuesta — sin delay artificial de latencia.
+      setIsStreaming(false)
+      setConsigliereState('responding')
 
-        if (data.message.toLowerCase().includes('fuga')) {
-          setTimeout(() => setConsigliereState('alert'), 1600)
-          setTimeout(() => setConsigliereState('idle'), 2100)
-        } else if (data.message.toLowerCase().includes('excelente') || data.message.toLowerCase().includes('¡')) {
-          setTimeout(() => setConsigliereState('celebrate'), 1600)
-          setTimeout(() => setConsigliereState('idle'), 3400)
-        } else {
-          setTimeout(() => setConsigliereState('idle'), 1600)
-        }
-      }, 1000)
+      // El route devuelve { response }, no { message }; el servidor no envía
+      // timestamp → hora local del cliente
+      const responseText: string = data.response ?? 'Sin respuesta'
+      const assistantMessage: Message = {
+        id: `msg_${Date.now()}_assistant`,
+        role: 'assistant',
+        content: responseText,
+        timestamp: new Date()
+      }
+
+      const finalMessages = [...updatedMessages, assistantMessage]
+      setMessages(finalMessages)
+      saveMessages(data.conversationId ?? activeConversationId, finalMessages)
+
+      // El tipeo simulado empieza ahora; la clasificación fuga/celebrate se
+      // decide en handleTypingDone, al terminar la animación (no antes).
+      setAnimatingMessageId(assistantMessage.id)
 
     } catch (error) {
       console.error('Error sending message:', error)
@@ -276,15 +299,21 @@ export default function ChatPage() {
               </div>
             ) : (
               <>
-                {messages.map((message, index) => (
-                  <ChatMessage
-                    key={message.id}
-                    role={message.role}
-                    content={message.content}
-                    timestamp={message.timestamp}
-                    consigliereState={message.role === 'assistant' && index === messages.length - 1 ? consigliereState : 'idle'}
-                  />
-                ))}
+                {messages.map((message, index) => {
+                  const isAnimating = message.role === 'assistant' && message.id === animatingMessageId
+                  return (
+                    <ChatMessage
+                      key={message.id}
+                      role={message.role}
+                      content={message.content}
+                      timestamp={message.timestamp}
+                      consigliereState={message.role === 'assistant' && index === messages.length - 1 ? consigliereState : 'idle'}
+                      animate={isAnimating}
+                      onTypingDone={isAnimating ? () => handleTypingDone(message.id, message.content) : undefined}
+                      onTypingProgress={isAnimating ? scrollToBottom : undefined}
+                    />
+                  )
+                })}
                 
                 {isStreaming && (
                   <ChatMessage

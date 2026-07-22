@@ -1,0 +1,24 @@
+{
+  "name": "idioma_espejo_en",
+  "playbook": "PB2",
+  "language": "en",
+  "description": "Idioma espejo: el usuario escribe en inglés y el cierre debe salir en inglés, nunca en el idioma del perfil. Ambos turnos inventan un monto sin respaldo → bloqueo, y ensureSubstance pide en EN el dato que falta (missing[0] = ingreso).",
+  "turns": [
+    {
+      "user": "How much should I save each month?",
+      "fixtureResponse": "You should save 2000 € a month.",
+      "expectBlocked": true,
+      "expectNotContains": ["2000", "¿", "compartes"],
+      "expectContains": ["With your net monthly income"],
+      "expectFallback": true
+    },
+    {
+      "user": "And how much should I put aside every year?",
+      "fixtureResponse": "Put aside 24000 € every year.",
+      "expectBlocked": true,
+      "expectNotContains": ["24000", "¿", "compartes"],
+      "expectContains": ["With your net monthly income"],
+      "expectFallback": true
+    }
+  ]
+}

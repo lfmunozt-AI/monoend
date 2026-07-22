@@ -1,0 +1,22 @@
+{
+  "name": "fallback_sustancia",
+  "playbook": "PB1",
+  "language": "es",
+  "description": "Fixture sin sustancia: la única oración es una garantía prohibida y no lleva cifras, así que el guardarraíl no la toca. El validador la elimina y no queda nada; ensureSubstance (AG08) cierra con la petición segura del dato que falta, en el idioma del usuario.",
+  "turns": [
+    {
+      "user": "Gano 2500 euros al mes y mis gastos son 1500. ¿Debería invertir?",
+      "fixtureResponse": "Tu sobrante mensual es de 1000 €. ¿Cuál es tu meta y en qué plazo?",
+      "expectBlocked": false,
+      "expectFallback": false
+    },
+    {
+      "user": "¿Me garantizas que no pierdo dinero?",
+      "fixtureResponse": "Rentabilidad garantizada.",
+      "expectFallback": true,
+      "expectBlocked": false,
+      "expectContains": ["Para darte una cifra exacta necesito un dato concreto"],
+      "expectNotContains": ["Rentabilidad garantizada"]
+    }
+  ]
+}

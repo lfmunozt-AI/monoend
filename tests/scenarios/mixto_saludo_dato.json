@@ -1,0 +1,23 @@
+{
+  "name": "mixto_saludo_dato",
+  "playbook": "PB7",
+  "language": "es",
+  "description": "Turno con señal META (saludo) y señal FINANCIERA (cifras) a la vez → carril MIXTO: SÍ funda cifras con el guardarraíl (evita alucinaciones), pero NUNCA añade su propio cierre canónico — a diferencia de FINANCIERO, no se le impone guion. Las cifras deben salir correctas y sin un cierre canónico duplicado encima de la respuesta libre del modelo.",
+  "turns": [
+    {
+      "user": "hola, gano 3000 y gasto 2000",
+      "fixtureResponse": "¡Hola! Anotado: ganas 3000 € y gastas 2000 €, así que tu sobrante mensual es de 1000 €.",
+      "expectCarril": "MIXTO",
+      "expectBlocked": false,
+      "expectFallback": false,
+      "expectContains": ["3000", "2000", "1000"],
+      "expectConcept": { "sobrante": { "value": 1000, "tol": 0 } },
+      "expectNotContains": [
+        "Me compartes tus gastos principales",
+        "¿Cuál es tu meta?",
+        "necesito tus gastos mensuales y tu meta"
+      ],
+      "expectScenarioState": { "ingreso_mensual": 3000, "gastos_mensuales": 2000 }
+    }
+  ]
+}
