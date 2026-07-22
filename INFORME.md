@@ -518,3 +518,108 @@ npm run test:regression -- --filter=credito  # subconjunto
 npm run test:regression -- --verbose         # imprime texto final y cifras por turno
 LLM_API_KEY=sk-... npm run test:regression -- --live   # contra el LLM real
 ```
+
+---
+
+# INFORME — AG07 · Fase 4 · Escenarios conversacionales + carril (AG08)
+
+**Misión:** cerrar el hueco de cobertura que motivó la tanda: el harness solo
+tenía escenarios financieros, así que nunca detectó que un turno conversacional
+("¿qué modelo eres?") era sustituido por el enlatado de missing. AG08 mergeó
+`271b5a4` (`agent/08` → `develop`) con el clasificador de carril
+(`FINANCIERO|META|MIXTO`), el resolutor único de cierre y la honestidad de
+simulación. **Branch:** `agent/07` · **Fecha:** 2026-07-22
+
+## Reset de rama
+
+`git reset --hard origin/develop` (protocolo estándar) trajo el merge de AG08
+(`ffb5295`, PR #24) — el clasificador de carril, `resolveClosing`,
+`enforceSimulationHonesty` y la red anti-fuga de identidad (Pieza 5c), todos
+ya en `develop`.
+
+## Harness — deja de ser fiel al route (y se corrige)
+
+El `runTurn` de la tanda anterior todavía aplicaba el pipeline plano pre-AG08:
+`runGuardrail` siempre, `rewriteDelegativeClosing` + `enforceMissingClosing`
+siempre, sin clasificar carril. El route real (`src/app/api/chat/route.ts`)
+ya no hace eso — desde `271b5a4` bifurca por carril. Se reescribió `runTurn`
+para reproducir el orden real:
+
+1. `classifyTurn(mensaje, estadoPrevio, idioma)` — con el estado **previo**,
+   igual que el route (`seed`, antes del delta del turno actual).
+2. `extractScenarioDelta` — se salta si el carril es META (igual que el route:
+   `carril === 'META' ? {delta:{}, usedTool:false} : resolveDelta(...)`).
+3. `runGuardrail` + `enforceSimulationHonesty` — **solo** FINANCIERO/MIXTO.
+4. `validateConsigliereOutput` + `enforceOutputPolicy` + disclaimer — **todos**
+   los carriles (la red anti-fuga de identidad protege incluso en META).
+5. `ensureSubstance` — **solo** FINANCIERO.
+6. `resolveClosing` — todos los carriles, coordina cierre único por carril.
+
+Se añadió `expectCarril` (opcional, por turno) y `Carril` al `TurnOutcome`,
+expuesto también en el log de fallos (`carril: FINANCIERO · estado: {...}`).
+
+## Escenarios nuevos (10 ficheros · 12 turnos) — `tests/scenarios/`
+
+| Escenario | Idiomas | Qué prueba |
+|---|---|---|
+| `identidad_meta` | es | Crédito en curso (missing=['tae']) + "¿qué modelo eres?" → META, sin el enlatado de missing, sin fuga de proveedor (Pieza 5c) aunque el fixture la mencione |
+| `identidad_meta_pt` / `_en` | pt / en | Mismo sondeo de identidad, sin escenario activo |
+| `saludo_simple` | es | "hola" sin escenario → META, sin cierre canónico forzado, respuesta libre intacta |
+| `saludo_simple_pt` / `_en` | pt / en | Mismo saludo |
+| `agradecimiento` | es | Cálculo (FINANCIERO) → "gracias" (META) → sin re-pregunta del dato que aún falta |
+| `mixto_saludo_dato` | es | "hola, gano 3000 y gasto 2000" → MIXTO: funda cifras (guardarraíl activo) pero NUNCA añade cierre propio |
+| `cierre_unico` | es | Regresión del doble cierre real de QA: cierre delegativo + missing=['tae'] → UNA sola pregunta (antes `rewriteDelegativeClosing` podía inyectar su propio cierre y `enforceMissingClosing` añadía el suyo encima) |
+| `simulacion_honesta` | es | "(sin incluir intereses)" sobre una cuota simulada al 7% → cláusula falsa eliminada, sin duplicar el marcador de simulación (la frase ya trae "TAE de referencia") |
+
+Los 12 turnos nuevos pasan: `npm run test:regression -- --filter=identidad`,
+`--filter=saludo`, `--filter=agradecimiento`, `--filter=mixto`,
+`--filter=cierre_unico`, `--filter=simulacion_honesta`.
+
+## RESULTADO SUITE COMPLETA: 49/50 turnos verdes · 29 escenarios
+
+Los 4 defectos documentados en la tanda anterior (A · monto del ingreso
+robado por el crédito, B · lista de gastos machaca el agregado, C · orden de
+ramas del guardarraíl anula el grounding semántico, D · `ensureSubstance`
+destruye el ejemplo canónico de PB2) **ya no reproducen** — el merge de AG08
+los corrigió junto con el carril. El único turno rojo es nuevo:
+
+**E · `guardrail/turn-classifier.ts` — la continuidad de carril exige DATOS
+guardados, no basta con estar "en conversación financiera".**
+`isScenarioActive()` solo mira si el escenario tiene `ingreso_mensual`,
+`gastos_mensuales`, `gastos_detalle`, `credito` o `meta` ya capturados. Un
+turno de seguimiento sin cifra ni keyword financiera match, mientras el motor
+TODAVÍA no tiene ningún dato (missing=['ingreso','gastos']), cae a META y se
+salta la jaula de cifras entera — el escenario exacto para el que la jaula
+existe.
+
+Reproducido en `idioma_espejo_en` T2 (preexistente, no tocado):
+
+    T1 "How much should I save each month?"     → FINANCIERO ("save" es keyword) → bloqueado ✓
+    T2 "And how much should I put aside every year?"
+       → clasifica META (ni dígito, ni keyword — "put aside" no está en
+         FINANCIAL_KEYWORDS EN — ni el escenario tiene datos aún)
+       → runGuardrail NUNCA corre → "24000 €" (inventado) sale sin fundamentar
+
+```
+expectContains: falta "With your net monthly income"
+expectNotContains: aparece "24000"
+expectFallback: esperaba true, encontré false
+expectBlocked: esperaba true, encontré false
+carril: META · estado: {"missing":["ingreso","gastos"]}
+```
+
+No se tocó `idioma_espejo_en.json`: el rojo ES el entregable (mismo criterio
+que la tanda anterior) — es un defecto real de `turn-classifier.ts`, no del
+escenario. Candidatos de fix para AG08 (fuera de scope de AG07): ampliar
+`FINANCIAL_KEYWORDS` EN con sinónimos de ahorro ("put aside", "set aside",
+"stash away"), o cambiar la continuidad para que mire "¿el turno anterior fue
+FINANCIERO/MIXTO?" en vez de "¿hay datos ya capturados?".
+
+## Cómo se ejecuta
+
+```bash
+npm run test:regression                          # 29 escenarios, 50 turnos
+npm run test:regression -- --filter=identidad     # sondeo de identidad
+npm run test:regression -- --filter=saludo        # charla trivial
+npm run test:regression -- --filter=cierre_unico  # regresión doble cierre
+```

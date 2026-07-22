@@ -1,0 +1,24 @@
+{
+  "name": "cierre_unico",
+  "playbook": "PB7",
+  "language": "es",
+  "description": "Regresión del doble cierre real detectado en QA: antes de Pieza 3, rewriteDelegativeClosing corría primero y podía inyectar SU PROPIO cierre de insumo al eliminar una pregunta delegativa; enforceMissingClosing corría después sin saber que ese cierre ya existía y añadía encima la petición de missing[0]='tae' → dos preguntas seguidas. resolveClosing es ahora la ÚNICA función que decide el cierre: limpia la delegación (stripDelegativeClosing, que NUNCA añade nada) y solo entonces aplica la petición del campo missing. Garantía: UNA sola pregunta final.",
+  "turns": [
+    {
+      "user": "Gano 10000 euros al mes y mis gastos son 9500. Quiero financiar un carro de 30000 a 84 meses.",
+      "fixtureResponse": "Calculando con una TAE de referencia del 7% —tu banco te dará la real—, la cuota sería de 452,78 €/mes. ¿Qué gastos crees que podrías recortar para tener más margen?",
+      "expectCarril": "FINANCIERO",
+      "expectBlocked": false,
+      "expectContains": ["452,78", "¿Qué TAE te ofrece tu banco?"],
+      "expectNotContains": [
+        "podrías recortar",
+        "crees que",
+        "Me compartes tus gastos principales"
+      ],
+      "expectScenarioState": {
+        "credito": { "monto": 30000, "plazo_meses": 84, "tae_es_referencia": true },
+        "missing": ["tae"]
+      }
+    }
+  ]
+}
