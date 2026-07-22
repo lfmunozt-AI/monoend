@@ -9,6 +9,7 @@ import {
   enforceSimulationHonesty,
   classifyTurn,
   detectInjection,
+  assertOutputInvariants,
 } from '@/lib/guardrail'
 import { buildScenarioContext } from '@/lib/calculator/orchestrator'
 import { mergeScenario, summarizeScenario, type ScenarioState } from '@/lib/calculator/scenario'
@@ -308,6 +309,9 @@ export async function POST(request: Request) {
   let finalContent: string
   let injectionDetected: boolean
   let injectionPatterns: string[]
+  // Hoisted: assertOutputInvariants (cableado tras resolveClosing) lo necesita
+  // fuera de este bloque. false en META — ahí ni se calcula ni aplica (b).
+  let esSimulacion = false
 
   if (carril === 'META') {
     finalContent = llmResult.content
@@ -333,7 +337,7 @@ export async function POST(request: Request) {
     // PIEZA 4 — simulación: la cuota simulada (TAE de referencia) nunca puede
     // afirmar que "no incluye intereses" (sí los incluye) y siempre debe dejar
     // claro que es una simulación, no la cifra real del banco.
-    const esSimulacion = scenario.credito?.tae_es_referencia === true
+    esSimulacion = scenario.credito?.tae_es_referencia === true
     const beforeSimulation = finalContent
     finalContent = enforceSimulationHonesty(finalContent, { esSimulacion, lang: userLang })
     if (finalContent !== beforeSimulation) {
@@ -420,6 +424,31 @@ export async function POST(request: Request) {
       conversation_id: convId,
       carril,
       missing: scenario.missing,
+    }))
+  }
+
+  // AUDITORÍA AG01 (H2 + H5) — assertOutputInvariants: ÚLTIMO paso del pipeline,
+  // en TODOS los carriles (PIPELINE_CONTRACT.md §4). Post-condición única: máx.
+  // 1 pregunta, sin contradicción tasa/simulación, sin concepto sin cálculo
+  // (defensa en profundidad de H1), sin fuga de proveedor, sin cierre delegativo.
+  // En META solo aplican (d) y (e) — el resto no tiene sentido sin contenido
+  // financiero (assertOutputInvariants lo gestiona internamente por carril).
+  const beforeInvariants = finalContent
+  const invariants = assertOutputInvariants(finalContent, {
+    carril,
+    lang: userLang,
+    missing: scenario.missing,
+    conceptos: verified.conceptos,
+    esSimulacion,
+  })
+  finalContent = invariants.texto
+  if (invariants.violaciones.length > 0) {
+    console.warn('[chat] invariants', JSON.stringify({
+      user_id: user.id,
+      conversation_id: convId,
+      carril,
+      violaciones: invariants.violaciones,
+      changed: finalContent !== beforeInvariants,
     }))
   }
 

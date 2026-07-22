@@ -162,6 +162,13 @@ export {
 } from "./policy";
 export { classifyTurn, type Carril } from "./turn-classifier";
 export {
+  assertOutputInvariants,
+  type OutputInvariantContext,
+  type InvariantReport,
+  type InvariantViolation,
+  type InvariantId,
+} from "./invariants";
+export {
   parseModelOutput,
   ModelOutputSchema,
   CifraUsadaSchema,

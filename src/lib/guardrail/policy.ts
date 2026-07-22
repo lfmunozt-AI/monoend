@@ -78,78 +78,13 @@ const GENERIC_REQUEST: Record<Language, string> = {
   en: "To give you exact numbers I need your monthly expenses and your goal. Can you share both?",
 };
 
-/** Plantilla del cierre con pista explícita del llamante (`dataHint`). */
-const HINT_REQUEST: Record<Language, (hint: string) => string> = {
-  es: (h) => `Para darte esa cifra necesito conocer tu ${h}. ¿Me lo compartes?`,
-  pt: (h) => `Para te dar esse número preciso de saber o teu ${h}. Partilhas comigo?`,
-  en: (h) => `To give you that number I need to know your ${h}. Can you share it?`,
-};
-
 /**
- * Petición específica por etiqueta de la cifra bloqueada. Si el modelo inventó
- * "gastarás 2000 al mes", la etiqueta es "gasto" y el dato que falta son sus
- * gastos reales. Solo se usa cuando TODAS las cifras bloqueadas comparten una
- * misma etiqueta conocida; con etiquetas mezcladas, el cierre genérico.
- *
- * Las claves (gasto, ingreso…) las produce `detectLabel`, que trabaja en ES: son
- * identificadores internos, no texto de cara al usuario.
- */
-const REQUEST_BY_LABEL: Record<Language, Record<string, string>> = {
-  es: {
-    gasto: "Para darte esa cifra necesito tus gastos mensuales. ¿Me los compartes?",
-    ingreso: "Para darte esa cifra necesito tus ingresos mensuales. ¿Me los compartes?",
-    meta: "Para darte esa cifra necesito tu meta y el plazo en que la quieres. ¿Me lo cuentas?",
-    ahorro: "Para darte esa cifra necesito saber cuánto ahorras cada mes. ¿Me lo compartes?",
-    deuda: "Para darte esa cifra necesito el importe pendiente de tus deudas. ¿Me lo compartes?",
-    interes: "Para darte esa cifra necesito la tasa de interés que pagas. ¿Me la compartes?",
-    renta: "Para darte esa cifra necesito cuánto pagas de alquiler al mes. ¿Me lo compartes?",
-  },
-  pt: {
-    gasto: "Para te dar esse número preciso das tuas despesas mensais. Partilhas comigo?",
-    ingreso: "Para te dar esse número preciso dos teus rendimentos mensais. Partilhas comigo?",
-    meta: "Para te dar esse número preciso da tua meta e do prazo. Contas-me?",
-    ahorro: "Para te dar esse número preciso de saber quanto poupas por mês. Partilhas comigo?",
-    deuda: "Para te dar esse número preciso do valor em dívida. Partilhas comigo?",
-    interes: "Para te dar esse número preciso da taxa de juro que pagas. Partilhas comigo?",
-    renta: "Para te dar esse número preciso de saber quanto pagas de renda por mês. Partilhas comigo?",
-  },
-  en: {
-    gasto: "To give you that number I need your monthly expenses. Can you share them?",
-    ingreso: "To give you that number I need your monthly income. Can you share it?",
-    meta: "To give you that number I need your goal and its deadline. Can you tell me?",
-    ahorro: "To give you that number I need to know how much you save each month. Can you share it?",
-    deuda: "To give you that number I need your outstanding debt. Can you share it?",
-    interes: "To give you that number I need the interest rate you pay. Can you share it?",
-    renta: "To give you that number I need how much rent you pay monthly. Can you share it?",
-  },
-};
-
-/**
- * Cierre estándar (genérico) del guardarraíl v2, por idioma. Exportado para que
- * el enforcement del validador (C1) reutilice EXACTAMENTE la misma frase en vez
- * de mantener una réplica que se desincronice.
+ * Cierre estándar (genérico) del guardarraíl v2, por idioma. AUDITORÍA AG01
+ * (H3): ya no la usa `applyPolicy` ni `enforceOutputPolicy` para insertar un
+ * cierre (esa autoridad es única de `resolveClosing`) — queda exportada como
+ * utilidad de referencia por si algún consumidor externo la necesita.
  */
 export function standardClosingRequest(lang: Language = DEFAULT_LANGUAGE): string {
-  return GENERIC_REQUEST[lang];
-}
-
-/**
- * Construye la ÚNICA línea de cierre. Precedencia:
- *   1. `dataHint` explícito del llamante.
- *   2. Etiqueta única entre las cifras bloqueadas (gasto, ingreso, meta…).
- *   3. Genérico.
- */
-function buildClosingRequest(
-  entries: GuardrailLogEntry[],
-  hint: string | undefined,
-  lang: Language,
-): string {
-  if (hint) return HINT_REQUEST[lang](hint);
-
-  const byLabel = REQUEST_BY_LABEL[lang];
-  const labels = new Set(entries.map((e) => e.etiqueta).filter((l) => l in byLabel));
-  if (labels.size === 1) return byLabel[[...labels][0]];
-
   return GENERIC_REQUEST[lang];
 }
 
@@ -356,7 +291,9 @@ export function stripDelegativeClosing(text: string): string {
 // Filosofía: el código decide QUÉ se pregunta, el modelo lo redacta.
 
 // Keywords por campo (ES/PT/EN), sobre texto normalizado (sin acentos, minúsculas).
-const MISSING_KEYWORDS: Record<string, RegExp> = {
+// Exportado: `assertOutputInvariants` (invariants.ts) lo reutiliza para decidir
+// qué pregunta de cierre conservar cuando sobreviven dos (invariante a).
+export const MISSING_KEYWORDS: Record<string, RegExp> = {
   tae: /\b(tae|taeg|tasa|taxa|juros|interes|interest|apr)\b|banco\s+te\s+ofrece/,
   gastos: /\b(gastos?|despesas?|expenses?|spending)\b/,
   ingreso: /\b(ingresos?|salario|rendimento|income|earn)\b/,
@@ -525,8 +462,12 @@ export function resolveClosing(text: string, opts: ResolveClosingOptions): strin
 //      trae un marcador de referencia, se inserta la cláusula canónica.
 
 // Afirmación falsa: la cuota simulada SÍ incluye la TAE de referencia.
+// AUDITORÍA AG01 (H4): amplía a los negadores de TAE/tasa, no solo de
+// "intereses" — QA real: "(sin considerar la TAE)" sobrevivía junto a la
+// cláusula canónica "(simulación con TAE de referencia…)" porque este regex
+// solo cazaba variantes de *intereses*, nunca de *TAE/tasa* directamente.
 const FALSE_NO_INTEREST_RE =
-  /,?\s*\(?\s*(sin incluir intereses|sin intereses|no incluye intereses|sem juros|sem incluir juros|without interest|excluding interest)\s*\)?/gi;
+  /,?\s*\(?\s*(sin incluir intereses|sin intereses|no incluye intereses|sem juros|sem incluir juros|without interest|excluding interest|sin considerar (?:la )?(?:tae|taeg|tasa)|sin tener en cuenta (?:la )?(?:tae|taeg|tasa)|sin (?:la )?(?:tae|taeg|tasa)|excluyendo (?:la )?(?:tae|taeg|tasa)|sem considerar a (?:taeg|taxa)|sem ter em conta a (?:taeg|taxa)|sem a (?:taeg|taxa)|excluindo a (?:taeg|taxa)|without considering (?:the )?(?:apr|interest rate)|without the (?:apr|interest rate)|excluding (?:the )?(?:apr|interest rate))\s*\)?/gi;
 
 // Marcador de que la cuota es una simulación, no la cifra real del banco.
 const SIMULATION_MARKER_RE = /(simulac|de referencia|tae del 7|orientativo)/;
@@ -560,12 +501,23 @@ export function enforceSimulationHonesty(
   const out = cleanup(text.replace(FALSE_NO_INTEREST_RE, ""));
 
   // b) inserta el marcador de simulación en la frase de la cuota, si falta.
+  // AUDITORÍA AG01 (H2, bug descubierto al validar la coordinación de cierre):
+  //   1. El marcador se comprueba en TODO el texto, no frase a frase — si una
+  //      frase anterior ya lo trae, ninguna otra necesita uno propio. Antes,
+  //      una frase de cierre como "Con ese dato la cuota es exacta al 100%"
+  //      (literal de MISSING_REQUEST.tae) volvía a calificar como "mención de
+  //      cuota sin marcador" y se llevaba una SEGUNDA cláusula.
+  //   2. La cifra candidata debe ser un MONTO real, no un porcentaje: "100%" en
+  //      esa misma frase de cierre pasaba el chequeo de `/\d/` sin más.
+  if (SIMULATION_MARKER_RE.test(norm(out))) return out;
+
   let inserted = false;
   const rebuilt = segmentSentences(out)
     .map((seg) => {
       if (inserted) return seg.text;
       const n = norm(seg.text);
-      if (!CUOTA_MENTION_RE.test(n) || !/\d/.test(n) || SIMULATION_MARKER_RE.test(n)) {
+      const tieneMontoReal = findNumberMentions(seg.text).some((m) => !isPercent(seg.text, m));
+      if (!CUOTA_MENTION_RE.test(n) || !tieneMontoReal) {
         return seg.text;
       }
       inserted = true;
@@ -756,10 +708,8 @@ export function applyPolicy(
   preguntaHash: string,
   options: PolicyOptions = {},
 ): PolicyResult {
-  const { mode = "mvp", dataHint } = options;
-  const lang = options.idioma ?? detectLanguage(modelResponse) ?? DEFAULT_LANGUAGE;
+  const { mode = "mvp" } = options;
   const blocked = validation.cifras_bloqueadas;
-  const referencias = validation.cifras_aprobadas.filter((c) => c.categoria === "referencia");
 
   const logEntries: GuardrailLogEntry[] = blocked.map((b) => ({
     cifra_bloqueada: b.valor,
@@ -774,44 +724,27 @@ export function applyPolicy(
     return { texto_final: modelResponse, bloqueado: blocked.length > 0, logEntries };
   }
 
+  // AUDITORÍA AG01 (H3) — esta capa SOLO sanea cifras (elimina/corrige); ya NO
+  // inserta cierre. Antes, la "tercera vía" y el camino de eliminación llamaban
+  // `appendClosing(..., buildClosingRequest(...))` — un segundo (y tercer) punto
+  // de inserción de pregunta que `resolveClosing` (la única autoridad de cierre,
+  // PIPELINE_CONTRACT.md §2) no siempre revertía → doble cierre real de QA.
   if (blocked.length === 0) {
-    // TERCERA VÍA: la respuesta cita un estándar etiquetado como referencia. Se
-    // permite, pero un estándar sin petición del dato personal se lee como
-    // diagnóstico. Si la respuesta no reclama el dato, el cierre lo reclama.
-    if (referencias.length > 0 && !containsDataRequest(modelResponse)) {
-      const texto_final = appendClosing(cleanup(modelResponse), buildClosingRequest([], dataHint, lang));
-      return { texto_final, bloqueado: false, logEntries };
-    }
+    // TERCERA VÍA: la respuesta cita un estándar etiquetado como referencia sin
+    // reclamar el dato personal. Se deja pasar igual — que el cierre lo decida
+    // `resolveClosing`/`assertOutputInvariants`, no esta capa.
     return { texto_final: modelResponse, bloqueado: false, logEntries };
   }
 
-  // MODO MVP (v2): corrige las cifras de concepto conocido en su sitio, elimina
-  // las frases con montos inventados y, si hubo eliminaciones, cierra UNA vez.
+  // MODO MVP (v2): corrige las cifras de concepto conocido en su sitio y elimina
+  // las frases con montos inventados. El cierre (si falta tras eliminar) lo
+  // decide la capa 8, nunca esta.
   const { texto, eliminadas, corregidas } = removeBlockedSentences(modelResponse, blocked);
 
-  // Solo hubo correcciones (ninguna frase borrada): el texto corregido es la
-  // respuesta final, sin añadir cierre — la información útil se conserva.
-  if (eliminadas === 0) {
-    return {
-      texto_final: corregidas > 0 ? texto : modelResponse,
-      bloqueado: true,
-      logEntries,
-    };
-  }
-
-  const texto_final = appendClosing(texto, buildClosingRequest(logEntries, dataHint, lang));
+  const texto_final = eliminadas === 0
+    ? (corregidas > 0 ? texto : modelResponse)
+    : texto;
   return { texto_final, bloqueado: true, logEntries };
-}
-
-/**
- * Añade la línea de cierre una sola vez. Si lo que sobrevivió ya termina en una
- * petición de dato o en una propuesta, no se duplica (regla 3). Si no sobrevivió
- * nada, la petición ES la respuesta.
- */
-function appendClosing(texto: string, cierre: string): string {
-  if (!texto) return cierre;
-  if (endsWithRequestOrProposal(texto)) return texto;
-  return `${texto}\n\n${cierre}`;
 }
 
 // ── Helpers de integración (async) ────────────────────────────────────────────

@@ -167,6 +167,52 @@ test("HUECO QA: la frase combinada real (los 3 conceptos en una frase) → solo 
   );
 });
 
+// ── AUDITORÍA AG01 (H1) — concepto DERIVADO afirmado sin cálculo ("déficit
+// fantasma"). QA real: sobrante +500 (superávit) pero el modelo dijo "déficit
+// mensual de 9500 €" — 9500 coincidía con el hecho "gastos" (rama a) y la
+// etiqueta "déficit" nunca se cotejaba contra lo que el motor sabe.
+const CIF_SUPERAVIT = {
+  valores: [10000, 9500, 500],
+  conceptos: { ingreso: 10000, gastos: 9500, sobrante: 500 }, // sin "deficit": el motor no lo calculó
+};
+
+test("H1: 'Tienes un déficit mensual de 9500 €' con sobrante real +500 → BLOQUEADA", () => {
+  const r = validateGrounding("Tienes un déficit mensual de 9500 €.", [], CIF_SUPERAVIT);
+  const bloq = r.cifras_bloqueadas.find((c) => c.valor === 9500);
+  assert.ok(bloq, "9500 no puede aprobarse como 'hecho' de gastos cuando la frase afirma un déficit inexistente");
+  assert.match(bloq?.motivo ?? "", /sobrante positivo|sin cálculo/);
+});
+
+test("H1: 'tu sobrante es 500' (con sobrante calculado) → APROBADA", () => {
+  const r = validateGrounding("Tu sobrante es 500 €.", [], CIF_SUPERAVIT);
+  assert.equal(r.cifras_bloqueadas.length, 0);
+  assert.ok(r.cifras_aprobadas.some((c) => c.valor === 500));
+});
+
+test("H1: 'déficit de 1000' con conceptos.deficit=1000 calculado → APROBADA", () => {
+  const cifDeficit = { valores: [10000, 11000, 1000], conceptos: { ingreso: 10000, gastos: 11000, deficit: 1000 } };
+  const r = validateGrounding("Tu déficit de 1000 € es preocupante.", [], cifDeficit);
+  assert.equal(r.cifras_bloqueadas.length, 0);
+  assert.ok(r.cifras_aprobadas.some((c) => c.valor === 1000));
+});
+
+test("H1: concepto derivado ('cuota'/'recorte'/'capacidad anual') sin cálculo → BLOQUEADA", () => {
+  const cif = { valores: [3000, 2000, 1000], conceptos: { ingreso: 3000, gastos: 2000, sobrante: 1000 } };
+  const cuota = validateGrounding("Tu cuota sería de 1000 €.", [], cif);
+  assert.ok(cuota.cifras_bloqueadas.some((c) => c.valor === 1000), "cuota nunca calculada este turno");
+
+  const recorte = validateGrounding("El recorte propuesto es de 1000 €.", [], cif);
+  assert.ok(recorte.cifras_bloqueadas.some((c) => c.valor === 1000), "recorte nunca calculado este turno");
+});
+
+test("H1: sin mapa de conceptos (modo histórico number[]) → NO aplica esta regla (compat)", () => {
+  // Modo legacy: cifrasCalculadas es un array plano, sin semántica de conceptos.
+  // Bloquear aquí sería una regresión sobre cifras legítimamente calculadas (c0).
+  const facts = extractInputFacts("gano 3000, gasto 2000");
+  const r = validateGrounding("Tu sobrante de 1.000 € es sólido.", facts, [1000]);
+  assert.equal(r.cifras_bloqueadas.length, 0);
+});
+
 // ── FIX 4 — grounding POSICIONAL por adyacencia ───────────────────────────────
 const CIF_CREDITO = {
   valores: [2500, 1500, 1000, 12000, 30000, 36, 9, 953.99],
@@ -477,6 +523,54 @@ test("PIEZA 4 EN: 'without interest' con es_simulacion=true → eliminada + marc
   assert.ok(/simulation/i.test(out));
 });
 
+// ── AUDITORÍA AG01 (H4) — negadores de TAE/tasa (no solo "intereses") ─────────
+// QA real: "(sin considerar la TAE)" sobrevivía junto a "(simulación con TAE de
+// referencia…)" — contradicción publicada — porque FALSE_NO_INTEREST_RE solo
+// cazaba variantes de *intereses*, nunca de *TAE/tasa* directamente.
+test("H4: 'la cuota sería de 718,39 € (sin considerar la TAE)' → negador eliminado + marcador insertado", () => {
+  const out = enforceSimulationHonesty(
+    "La cuota sería de 718,39 € (sin considerar la TAE).",
+    { esSimulacion: true },
+  );
+  assert.ok(!/sin considerar/i.test(out), "el negador de TAE desaparece");
+  assert.ok(/simulaci[oó]n/i.test(out), "queda claro que es una simulación");
+  assert.ok(out.includes("718,39"));
+});
+
+test("H4: variantes ES 'sin tener en cuenta la TAE' / 'sin TAE' / 'excluyendo la TAE' → eliminadas", () => {
+  for (const frase of [
+    "La cuota sería de 718,39 € (sin tener en cuenta la TAE).",
+    "La cuota sería de 718,39 € (sin TAE).",
+    "La cuota sería de 718,39 € (excluyendo la TAE).",
+  ]) {
+    const out = enforceSimulationHonesty(frase, { esSimulacion: true });
+    assert.ok(!/tae/i.test(out.replace(/simulaci[oó]n con tae de referencia/i, "")), `debía eliminar el negador en: ${frase} → ${out}`);
+  }
+});
+
+test("H4 PT: 'sem considerar a TAEG' → eliminada + marcador insertado", () => {
+  const out = enforceSimulationHonesty(
+    "A prestação seria de 718,39 € (sem considerar a TAEG).",
+    { esSimulacion: true, lang: "pt" },
+  );
+  assert.ok(!/sem considerar/i.test(out));
+  assert.ok(/simula[çc][ãa]o/i.test(out));
+});
+
+test("H4 EN: 'without considering the APR' → eliminada + marcador insertado", () => {
+  const out = enforceSimulationHonesty(
+    "The payment would be $718.39 (without considering the APR).",
+    { esSimulacion: true, lang: "en" },
+  );
+  assert.ok(!/without considering/i.test(out));
+  assert.ok(/simulation/i.test(out));
+});
+
+test("H4: es_simulacion=false → negadores de TAE NUNCA se tocan", () => {
+  const texto = "La cuota es de 718,39 € (sin considerar la TAE).";
+  assert.equal(enforceSimulationHonesty(texto, { esSimulacion: false }), texto);
+});
+
 // ── BUG 1 — segmentador de oraciones NUMERIC-SAFE ─────────────────────────────
 test("splitSentences: 'sobrante de 1.000 € es sólido' = 1 oración", () => {
   assert.deepEqual(splitSentences("tu sobrante de 1.000 € es sólido"), [
@@ -670,6 +764,8 @@ test("Pieza 3: sin bloqueos → respuesta intacta, sin log", () => {
 });
 
 test("Pieza 3 (MVP v2): elimina la frase con el monto inventado y loguea metadatos", () => {
+  // AUDITORÍA AG01 (H3): applyPolicy SOLO sanea cifras; ya no inserta cierre
+  // (ni siquiera con `dataHint`) — esa autoridad es única de `resolveClosing`.
   const facts = extractInputFacts("Tengo 40000 en deudas");
   const respuesta =
     "Con tus 40000 de deuda vas bien. Pagarás 1500 de intereses al mes.";
@@ -680,7 +776,7 @@ test("Pieza 3 (MVP v2): elimina la frase con el monto inventado y loguea metadat
   assert.ok(policy.texto_final.includes("40000"), "conserva la frase válida");
   assert.ok(!policy.texto_final.includes("1500"), "elimina el monto inventado");
   assert.ok(!policy.texto_final.includes("intereses al mes"), "elimina la frase ENTERA");
-  assert.ok(policy.texto_final.includes("tasa de interés"), "pide el dato faltante");
+  assert.ok(!policy.texto_final.includes("tasa de interés"), "ya NO inserta cierre — eso lo decide resolveClosing");
   assert.equal(policy.logEntries.length, 1);
   assert.equal(policy.logEntries[0].cifra_bloqueada, 1500);
   assert.equal(policy.logEntries[0].pregunta_hash, "hash123");
@@ -692,7 +788,9 @@ function countRequests(text: string): number {
   return (text.match(/Para darte/g) ?? []).length;
 }
 
-test("Pieza 3 (MVP v2): 3 cifras sin grounding → UNA sola línea de cierre", () => {
+test("Pieza 3 (MVP v2): 3 cifras sin grounding → SE ELIMINAN, sin cierre propio", () => {
+  // AUDITORÍA AG01 (H3): applyPolicy ya no añade "UNA línea de cierre" — la
+  // reduce a CERO. `resolveClosing` es la única autoridad de cierre.
   const facts = extractInputFacts("Gano 3000 al mes");
   // Cifras elegidas para NO ser múltiplos limpios de 3000 (si no, el validador
   // las aprobaría como derivadas y no habría nada que eliminar).
@@ -706,7 +804,7 @@ test("Pieza 3 (MVP v2): 3 cifras sin grounding → UNA sola línea de cierre", (
 
   const policy = applyPolicy(respuesta, validation, "h");
 
-  assert.equal(countRequests(policy.texto_final), 1, "una sola petición de cierre");
+  assert.equal(countRequests(policy.texto_final), 0, "ya no inserta petición de cierre");
   assert.ok(!policy.texto_final.includes("437"));
   assert.ok(!policy.texto_final.includes("12700"));
   assert.ok(!policy.texto_final.includes("27000"));
@@ -716,23 +814,19 @@ test("Pieza 3 (MVP v2): 3 cifras sin grounding → UNA sola línea de cierre", (
   assert.ok(!/\n{3,}/.test(policy.texto_final), "sin saltos huérfanos");
 });
 
-test("Pieza 3 (MVP v2): cierre específico según la etiqueta de la cifra bloqueada", () => {
+test("Pieza 3 (MVP v2): frase única bloqueada → se elimina entera, sin sustituir por cierre", () => {
   const facts = extractInputFacts("Gano 3000 al mes");
   const respuesta = "Tus gastos rondan los 2750.";
   const validation = validateGrounding(respuesta, facts);
   const policy = applyPolicy(respuesta, validation, "h");
 
   assert.equal(validation.cifras_bloqueadas[0].etiqueta, "gasto");
-  assert.equal(
-    policy.texto_final,
-    "Para darte esa cifra necesito tus gastos mensuales. ¿Me los compartes?",
-  );
+  assert.equal(policy.texto_final, "", "nada que decir tras eliminar la única frase — resolveClosing decide qué sigue");
 });
 
-test("Pieza 3 (MVP v2): etiquetas mezcladas → cierre genérico", () => {
+test("Pieza 3 (MVP v2): etiquetas mezcladas → ambas frases eliminadas, sin cierre propio", () => {
   const facts = extractInputFacts("Gano 3000 al mes");
-  // Las dos cifras bloqueadas apuntan a datos distintos (gasto y meta): no se
-  // puede pedir "el" dato que falta, así que el cierre es el genérico.
+  // Las dos cifras bloqueadas apuntan a datos distintos (gasto y meta).
   const respuesta =
     "Tus gastos mensuales rondan los 2750, por encima de lo razonable. " +
     "Con eso, la meta que te conviene fijar serían 90000.";
@@ -743,8 +837,8 @@ test("Pieza 3 (MVP v2): etiquetas mezcladas → cierre genérico", () => {
     validation.cifras_bloqueadas.map((c) => c.etiqueta).sort(),
     ["gasto", "meta"],
   );
-  assert.equal(countRequests(policy.texto_final), 1);
-  assert.ok(policy.texto_final.includes("tus gastos mensuales y tu meta"));
+  assert.equal(countRequests(policy.texto_final), 0, "el cierre genérico ya no lo pone esta capa");
+  assert.equal(policy.texto_final, "");
 });
 
 test("Pieza 2: la etiqueta de una cifra bloqueada no cruza el punto", () => {
@@ -756,9 +850,10 @@ test("Pieza 2: la etiqueta de una cifra bloqueada no cruza el punto", () => {
   const doceMilSetecientos = r.cifras_bloqueadas.find((c) => c.valor === 12700);
   assert.equal(doceMilSetecientos?.etiqueta, "", "sin etiqueta prestada de la frase de al lado");
 
-  // Y por tanto el cierre es el genérico, no "cuánto ahorras cada mes".
+  // applyPolicy ya no añade cierre (H3): solo elimina la frase infractora.
   const policy = applyPolicy(respuesta, r, "h");
-  assert.ok(policy.texto_final.includes("tus gastos mensuales y tu meta"));
+  assert.ok(!policy.texto_final.includes("12700"));
+  assert.ok(policy.texto_final.includes("ahorrar siempre"), "la frase sin cifra sobrevive");
 });
 
 test("Pieza 3 (MVP v2): si ya cierra con petición, no duplica el cierre", () => {
@@ -798,20 +893,23 @@ test("Tercera vía: estándar etiquetado + petición del dato → intacto", () =
   assert.equal(countRequests(p.texto_final), 0, "no añade cierre: ya pide el dato");
 });
 
-// (2) Con marcador pero SIN petición → se permite, y el cierre v2 la cubre.
-test("Tercera vía: estándar etiquetado SIN petición → se añade el cierre", () => {
+// (2) Con marcador pero SIN petición → AUDITORÍA AG01 (H3): applyPolicy ya NO
+// añade cierre por su cuenta (esa decisión, si hiciera falta, es de la capa 8
+// `resolveClosing`/`assertOutputInvariants`, no de esta). El texto se permite
+// intacto: la tercera vía solo protege de que se ELIMINE, no obliga a cerrar.
+test("Tercera vía: estándar etiquetado SIN petición → pasa intacto, sin cierre propio", () => {
   const respuesta = "Como referencia, el estándar ronda el 20% del ingreso.";
   const v = validateGrounding(respuesta, []);
   const p = applyPolicy(respuesta, v, "h");
 
   assert.equal(v.cifras_bloqueadas.length, 0);
   assert.equal(p.bloqueado, false);
-  assert.ok(p.texto_final.startsWith("Como referencia"), "la referencia sobrevive");
-  assert.ok(p.texto_final.includes("20%"), "el estándar sigue ahí");
-  assert.equal(countRequests(p.texto_final), 1, "exactamente un cierre");
+  assert.equal(p.texto_final, respuesta, "ya no se toca — ni se elimina ni se le añade cierre");
+  assert.equal(countRequests(p.texto_final), 0, "applyPolicy ya no inserta petición");
 });
 
-// (3) Sin marcador → cifra de manual disfrazada de diagnóstico: frase eliminada.
+// (3) Sin marcador → cifra de manual disfrazada de diagnóstico: frase eliminada,
+// SIN cierre propio (H3): queda "" — resolveClosing decide qué sigue.
 test("Tercera vía: cifra de manual sin marcador → frase eliminada (caso QA)", () => {
   const respuesta = "La cifra clave es el 20% de tus ingresos netos.";
   const v = validateGrounding(respuesta, []);
@@ -821,7 +919,8 @@ test("Tercera vía: cifra de manual sin marcador → frase eliminada (caso QA)",
   assert.equal(p.bloqueado, true);
   assert.ok(!p.texto_final.includes("20%"), "el estándar disfrazado desaparece");
   assert.ok(!p.texto_final.includes("cifra clave"));
-  assert.equal(countRequests(p.texto_final), 1);
+  assert.equal(countRequests(p.texto_final), 0, "ya no inserta cierre esta capa");
+  assert.equal(p.texto_final, "");
 });
 
 // (4) Cifra fundamentada en datos del usuario → intacta, la tercera vía no aplica.
