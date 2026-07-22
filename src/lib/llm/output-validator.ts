@@ -26,11 +26,7 @@ import {
   PROVIDER_LEAK_REGEXES,
 } from './validator-rules';
 import { sentenceRangeAt, segmentSentences } from '../guardrail/context';
-import {
-  cleanup,
-  endsWithRequestOrProposal,
-  standardClosingRequest,
-} from '../guardrail/policy';
+import { cleanup } from '../guardrail/policy';
 import { detectLanguage, type Language } from '../language';
 
 export type Severity = 'ok' | 'flag' | 'block';
@@ -338,12 +334,19 @@ function hasSubstance(text: string): boolean {
 /**
  * Hace cumplir el veredicto del validador. Función PURA.
  *
+ * AUDITORÍA AG01 (H3) — esta capa SOLO elimina/reescribe; ya NO inserta cierre.
+ * Antes añadía `standardClosingRequest` cuando lo que sobrevivía no terminaba
+ * en pregunta/propuesta — un segundo punto de inserción de cierre que
+ * `resolveClosing` (la única autoridad, PIPELINE_CONTRACT.md §2) no siempre
+ * revertía, produciendo cierres duplicados.
+ *
  * - `severity !== 'block'` → devuelve `text` intacto. El disclaimer de producto
  *   lo sigue adjuntando el route; aquí no se duplica.
  * - `block` → elimina las oraciones infractoras completas y limpia el residuo.
- * - Si no queda sustancia → respuesta segura en el idioma del texto.
- * - Si lo que queda no cierra pidiendo un dato ni proponiendo → añade el cierre
- *   estándar del guardarraíl v2 (misma frase, no una réplica).
+ * - Si no queda sustancia → respuesta segura en el idioma del texto (el único
+ *   reemplazo total que esta capa se permite; no es un "cierre", es un rescate).
+ * - En cualquier otro caso, el texto limpio se devuelve TAL CUAL: el cierre
+ *   (si falta) lo decide `resolveClosing`/`assertOutputInvariants` más abajo.
  *
  * `text` debe ser `validation.text` (branding ya aplicado): las oraciones
  * infractoras se calcularon sobre ese texto.
@@ -362,6 +365,5 @@ export function enforceOutputPolicy(text: string, validation: ValidationResult):
   const limpio = cleanup(kept);
   if (!hasSubstance(limpio)) return SAFE_RESPONSE[lang];
 
-  if (endsWithRequestOrProposal(limpio)) return limpio;
-  return `${limpio}\n\n${standardClosingRequest(lang)}`;
+  return limpio;
 }

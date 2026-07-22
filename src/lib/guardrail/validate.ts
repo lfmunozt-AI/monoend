@@ -26,6 +26,15 @@ import {
 } from "./context";
 import type { VerifiedFact } from "./extract";
 
+// AUDITORÍA AG01 (H1) — conceptos DERIVADOS por el motor: el usuario nunca los
+// aporta como dato crudo, el motor los CALCULA. Citarlos sin que el motor los
+// haya calculado (o con signo contrario) es alucinación, nunca un hecho crudo.
+// "ingreso"/"gastos" quedan FUERA a propósito: son datos de entrada del
+// usuario — su respaldo ya lo cubre la rama (a) de "hecho" más abajo.
+// Exportado: `assertOutputInvariants` (invariants.ts) lo reutiliza como defensa
+// en profundidad (invariante c) — el mismo criterio, un solo lugar de verdad.
+export const DERIVED_CONCEPTS = new Set(["deficit", "sobrante", "cuota", "recorte", "capacidad_anual"]);
+
 /**
  * Cifras del motor para el grounding. Forma evolucionada (PIEZA 2):
  * - `valores`: todas las cifras aprobables por coincidencia exacta (c0).
@@ -283,6 +292,45 @@ export function validateGrounding(
       }
       continue;
     }
+
+    // AUDITORÍA AG01 (H1) — concepto DERIVADO afirmado sin cálculo que lo
+    // respalde ("déficit fantasma"). QA real: "Tienes un déficit mensual de
+    // 9500 €" con sobrante real de +500 pasaba el guardarraíl porque
+    // `conceptsInSentence(...).filter((c) => c in conceptos)` (arriba, para el
+    // bloque `conceptoCercano`) DESCARTA "deficit" en cuanto el motor no lo
+    // calculó (sobrante > 0 → nunca puebla `conceptos.deficit`) — la cifra caía
+    // a la heurística genérica y 9500 coincidía como el hecho "gastos". Aquí se
+    // mira TODA la frase (sin el `.filter`) para no perder esa señal.
+    //
+    // Solo aplica cuando el llamante SÍ trae mapa de conceptos (buildScenarioContext
+    // en producción): el modo histórico `number[]` (equivale a `conceptos:{}`,
+    // p. ej. tests/consumidores que solo pasan `valores`) nunca tuvo semántica de
+    // conceptos — bloquear ahí regresionaría c0 sobre cifras legítimamente
+    // calculadas que ese modo nunca etiquetó.
+    if (Object.keys(conceptos).length > 0) {
+      const conceptosNombrados = conceptsInSentence(sentenceText);
+      // Caso especial de signo: "déficit" afirmado mientras el motor calculó
+      // sobrante POSITIVO es una contradicción directa — bloquea siempre, incluso
+      // si la cifra citada coincide por casualidad con un hecho crudo (gastos).
+      const deficitConSobrantePositivo =
+        conceptosNombrados.includes("deficit") && (conceptos.sobrante ?? 0) > 0;
+      const conceptoSinCalculo = conceptosNombrados.find(
+        (c) => DERIVED_CONCEPTS.has(c) && !(c in conceptos),
+      );
+      if (deficitConSobrantePositivo || conceptoSinCalculo) {
+        bloqueadas.push({
+          ...base(m, moneda),
+          motivo: deficitConSobrantePositivo
+            ? "déficit afirmado pero el motor calculó sobrante positivo (contradicción de signo)"
+            : `concepto afirmado sin cálculo que lo respalde (${conceptoSinCalculo})`,
+          etiqueta: labelWithinSentence(modelResponse, m),
+          start: m.start,
+          end: m.end,
+        });
+        continue;
+      }
+    }
+
     // (a) Coincide con un hecho verificado.
     if (factValues.some((f) => approxEqual(m.value, f))) {
       aprobadas.push({ ...base(m, moneda), categoria: "hecho", motivo: "dato del usuario" });
