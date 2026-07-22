@@ -251,7 +251,7 @@ export async function POST(request: Request) {
 
   // Paso 5-6: si hubo tool_call, LLAMADA 2 con el paquete verificado como
   // tool_result; si no, se usa el content de la LLAMADA 1 (ahorra latencia).
-  let llmResult: { content: string; tokensUsed: number }
+  let llmResult: { content: string; tokensUsed: number; model: string }
   if (usedTool && toolCall) {
     const toolResult = JSON.stringify(buildToolResult(scenario, verified))
     const systemPrompt2 = [basePrompt, idiomaObligatorio].filter(Boolean).join('\n\n')
@@ -265,13 +265,14 @@ export async function POST(request: Request) {
       [registrarDatosFinancieros],
       { maxTokens: 400, toolChoice: 'none' },
     )
-    llmResult = { content: call2.content, tokensUsed: call1.tokensUsed + call2.tokensUsed }
+    llmResult = { content: call2.content, tokensUsed: call1.tokensUsed + call2.tokensUsed, model: call2.model }
   } else {
     // Sin datos nuevos: la respuesta de la LLAMADA 1 (con el ESTADO CONOCIDO) vale.
     // Si el modelo no está disponible, el guardrail/ensureSubstance da el cierre seguro.
     llmResult = {
       content: call1.content || 'El Consigliere no está disponible en este momento. Intenta en unos minutos.',
       tokensUsed: call1.tokensUsed,
+      model: call1.model,
     }
   }
 
@@ -413,5 +414,6 @@ export async function POST(request: Request) {
     response: finalContent,
     conversationId: convId,
     tokensUsed: llmResult.tokensUsed,
+    model: llmResult.model,
   })
 }
