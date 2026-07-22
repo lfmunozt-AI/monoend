@@ -8,7 +8,7 @@
     "start": "next start",
     "lint": "eslint",
     "test": "npx tsx src/lib/__tests__/ica.test.ts && npx tsx src/lib/__tests__/portugal.test.ts && npx tsx src/lib/__tests__/transactions.test.ts && npx tsx src/lib/__tests__/language.test.ts && npx tsx src/lib/prompts/__tests__/validator.test.ts",
-    "test:guardrail": "npx tsx src/lib/guardrail/guardrail.test.ts && npx tsx src/lib/guardrail/numbers.test.ts && npx tsx src/lib/guardrail/injection.test.ts",
+    "test:guardrail": "npx tsx src/lib/guardrail/guardrail.test.ts && npx tsx src/lib/guardrail/numbers.test.ts && npx tsx src/lib/guardrail/injection.test.ts && npx tsx src/lib/guardrail/turn-classifier.test.ts",
     "test:calculator": "npx tsx src/lib/calculator/operations.test.ts && npx tsx src/lib/calculator/orchestrator.test.ts && npx tsx src/lib/calculator/expenses.test.ts && npx tsx src/lib/calculator/scenario.test.ts && npx tsx src/lib/calculator/tools.test.ts",
     "test:regression": "npx tsx scripts/regression-harness.ts",
     "smoke:db": "npx tsx scripts/smoke-db.ts"

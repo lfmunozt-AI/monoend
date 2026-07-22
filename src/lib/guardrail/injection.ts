@@ -55,6 +55,15 @@ const PATTERNS: readonly [RegExp, string][] = [
   [/desactiva\s+(?:el\s+)?(?:guardarrail|guardrail|filtro|las\s+reglas)/, "desactivar_guardrail"],
   [/desativa\s+(?:o\s+)?(?:guardrail|guardarrail|filtro|as\s+regras)/, "desactivar_guardrail"],
   [/disable\s+(?:the\s+)?(?:guardrail|guardrails|filter|rules|safety)/, "desactivar_guardrail"],
+
+  // ── Sondeo de identidad (Pieza 5b) ──────────────────────────────────────────
+  // NO es un ataque: es una pregunta legítima del usuario. Se detecta y expone
+  // (event_type 'identity_probe') para vigilancia, pero NUNCA bloquea — la
+  // respuesta la decide el prompt (Pieza 5a), no el guardarraíl. Mismas
+  // keywords que el clasificador de turno (turn-classifier.ts) usa para META.
+  [/\b(quien\s+eres|que\s+eres|que\s+modelo|que\s+version|fabricante|quien\s+te\s+hizo|quien\s+te\s+creo|como\s+funcionas|que\s+puedes\s+hacer)\b/, "identity_probe"],
+  [/\b(quem\s+te\s+criou|quem\s+te\s+fez|que\s+modelo\s+es|qual\s+modelo|que\s+versao)\b/, "identity_probe"],
+  [/\b(who\s+made\s+you|what\s+model|which\s+llm|what\s+version\s+are\s+you|how\s+do\s+you\s+work|what\s+can\s+you\s+do)\b/, "identity_probe"],
 ];
 
 function norm(s: string): string {

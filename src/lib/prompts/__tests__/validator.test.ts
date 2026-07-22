@@ -388,6 +388,49 @@ test('12. violatingSentences se expone y solo para severity block', () => {
   if (limpio.violatingSentences.length !== 0) throw new Error('no debía haber infractoras');
 });
 
+// ─── Pieza 5c — RED ANTI-FUGA de identidad de proveedor/modelo ───────────────
+
+console.log('\nCasos PIEZA 5c (fuga de identidad de proveedor/modelo)');
+
+test('fuga directa (ES): "Soy un modelo de OpenAI basado en GPT-4" → block, oración eliminada', () => {
+  const v = validateConsigliereOutput(
+    'Soy un modelo de OpenAI basado en GPT-4. Tu sobrante mensual verificado es de 500 €.',
+  );
+  if (v.severity !== 'block') throw new Error('la fuga de proveedor debe bloquear');
+  const out = enforceOutputPolicy(v.text, v);
+  if (/openai|gpt-?4/i.test(out)) throw new Error(`la fuga debía desaparecer, quedó: ${out}`);
+  if (!out.includes('500')) throw new Error(`el análisis financiero debía sobrevivir, quedó: ${out}`);
+});
+
+test('fuga en inglés: "I am powered by Anthropic\'s Claude" → block, redactada', () => {
+  const v = validateConsigliereOutput(
+    "I am powered by Anthropic's Claude model. Your verified monthly surplus is 500 €.",
+  );
+  if (v.severity !== 'block') throw new Error('la fuga en inglés debe bloquear');
+  const out = enforceOutputPolicy(v.text, v);
+  if (/anthropic|claude/i.test(out)) throw new Error(`la fuga debía desaparecer, quedó: ${out}`);
+  if (!out.includes('500')) throw new Error(`el análisis financiero debía sobrevivir, quedó: ${out}`);
+});
+
+test('otros proveedores (Gemini, Mistral, Llama, DeepSeek, Qwen) también bloquean', () => {
+  for (const term of ['Gemini', 'Mistral', 'Llama', 'DeepSeek', 'Qwen', 'chatgpt']) {
+    const v = validateConsigliereOutput(`Uso ${term} para responderte.`);
+    if (v.severity !== 'block') throw new Error(`"${term}" debía bloquear`);
+  }
+});
+
+test('respuesta legítima sin términos de proveedor → intacta, sin bloqueo', () => {
+  assertPass('Soy el motor de IA de monoend; mis cifras las ejecuta código verificado.');
+});
+
+test('el campo `model` del JSON de respuesta no es texto de chat: esta red solo mira el texto que se envía al usuario', () => {
+  // La red anti-fuga opera sobre STRINGS de respuesta al usuario; el campo
+  // `model` vive en un canal aparte (NextResponse.json) que esta función ni
+  // siquiera recibe como argumento — no hay forma de que lo toque.
+  const v = validateConsigliereOutput('Tu sobrante es de 500 €. ¿Cuál es tu meta?');
+  if (v.severity === 'block') throw new Error('texto legítimo sin fuga no debía bloquear');
+});
+
 // ─── Resumen ─────────────────────────────────────────────────────────────────
 
 console.log(`\n${passed} passed · ${failed} failed\n`);

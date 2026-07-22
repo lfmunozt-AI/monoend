@@ -259,3 +259,23 @@ export const BRANDING_REWRITES: ReadonlyArray<BrandingRule> = [
   { pattern: /\bsoberan(?:[íi]as?|[oa]s?)\b/gi, replacement: 'dominio', preserveCase: true },
   { pattern: /\bsovereign(?:ty)?\b/gi, replacement: 'dominio', preserveCase: true },
 ];
+
+/**
+ * Pieza 5c — RED ANTI-FUGA: términos de proveedor/modelo que NUNCA deben llegar
+ * al usuario (identidad en 3 capas: prompt + injection.ts detecta el sondeo +
+ * esta red elimina la fuga si, aun así, se coló en la respuesta). Aplica en
+ * TODOS los carriles, incluido META — el campo `model` del JSON de respuesta
+ * (instrumento de debugging) es un canal aparte y esta red nunca lo toca.
+ */
+export const PROVIDER_LEAK_REGEXES: ReadonlyArray<RegExp> = [
+  /\bopen\s*ai\b/i,
+  /\bgpt-?[34]\b/i,
+  /\bchatgpt\b/i,
+  /\banthropic\b/i,
+  /\bclaude\b/i,
+  /\bmistral\b/i,
+  /\bllama\b/i,
+  /\bgemini\b/i,
+  /\bdeepseek\b/i,
+  /\bqwen\b/i,
+];

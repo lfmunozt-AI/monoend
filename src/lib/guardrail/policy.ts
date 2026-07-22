@@ -25,6 +25,7 @@ import type { BlockedFigure, GroundingResult } from "./validate";
 import { detectLanguage, DEFAULT_LANGUAGE, type Language } from "../language";
 import { segmentSentences, splitSentences, isPercent, isTimeUnit, hasReferenceMarker } from "./context";
 import { findNumberMentions } from "./numbers";
+import type { Carril } from "./turn-classifier";
 
 export type PolicyMode = "mvp" | "passthrough";
 
@@ -308,6 +309,44 @@ export function rewriteDelegativeClosing(
   return kept ? `${kept}\n\n${req}` : req;         // añade UN cierre de insumo
 }
 
+/**
+ * Elimina un cierre delegativo final (y colapsa duplicados) SIN añadir nada —
+ * a diferencia de `rewriteDelegativeClosing`, que sí añade el cierre de insumo
+ * cuando hace falta. Es el paso compartido que usa `resolveClosing` (Pieza 3):
+ * el carril MIXTO nunca debe añadir un cierre, solo limpiar la delegación; y el
+ * carril FINANCIERO con `missing` no vacío necesita el texto YA limpio de
+ * delegación antes de decidir el cierre por missing — si se le pasara el
+ * cierre de insumo ya inyectado por `rewriteDelegativeClosing`, la frase de
+ * seguimiento ("Yo identifico cuáles recortar") no es pregunta ni propuesta y
+ * rompía la detección del bloque de cierre de `enforceMissingClosing`, dejando
+ * DOS cierres seguidos (el bug real de doble cierre que Pieza 3 corrige).
+ */
+export function stripDelegativeClosing(text: string): string {
+  const segments = segmentSentences(text);
+  const nonEmpty = segments
+    .map((s, i) => ({ i, t: s.text.trim() }))
+    .filter((x) => x.t !== "");
+  if (nonEmpty.length === 0) return text;
+
+  let keep = nonEmpty.length;
+  let changed = false;
+
+  if (DELEGATIVE_RE.test(norm(nonEmpty[keep - 1].t))) {
+    keep--;
+    changed = true;
+  }
+  while (keep >= 2 && norm(nonEmpty[keep - 1].t) === norm(nonEmpty[keep - 2].t)) {
+    keep--;
+    changed = true;
+  }
+
+  if (!changed) return text;
+
+  return keep > 0
+    ? cleanup(segments.slice(0, nonEmpty[keep - 1].i + 1).map((s) => s.text).join(""))
+    : "";
+}
+
 // ── Cierre por missing (bug de prioridad) ────────────────────────────────────
 //
 // QA real: el motor marcó missing=["tae"] pero el modelo cerró con "¿Te
@@ -422,6 +461,123 @@ export function enforceMissingClosing(
     : cleanup(text);
 
   return kept ? `${kept}\n\n${request}` : request;
+}
+
+// ── PIEZA 3 (carriles) — resolutor ÚNICO de cierre ───────────────────────────
+//
+// QA real: DOS cierres canónicos propios seguidos ("¿Me compartes tus gastos
+// principales…?" de rewriteDelegativeClosing + "¿Qué TAE te ofrece tu banco?"
+// de enforceMissingClosing). Cada función garantiza UNA pregunta puertas
+// adentro, pero nada coordinaba entre las dos: `rewriteDelegativeClosing`
+// corría primero y podía inyectar su propio cierre de insumo; `enforceMissingClosing`
+// corría después sin saber que ese cierre ya existía, y su frase de
+// seguimiento ("Yo identifico cuáles recortar") rompía la detección de bloque
+// de cierre, así que el segundo cierre se AÑADÍA en vez de sustituir.
+//
+// `resolveClosing` es la ÚNICA función que el route llama para decidir el
+// cierre: una sola decisión, por carril, con el missing como máxima prioridad.
+export interface ResolveClosingOptions {
+  carril: Carril;
+  missing: string[];
+  lang?: Language;
+}
+
+/**
+ * Decide el cierre de la respuesta según el carril del turno (Pieza 1).
+ *
+ * 1. META → texto intacto: no hay grounding de cifras ni cierre forzado en
+ *    charla trivial, identidad o agradecimientos.
+ * 2. MIXTO → solo elimina un cierre delegativo (o colapsa un duplicado);
+ *    NUNCA añade nada — el turno mezcla charla y datos, no se le impone guion.
+ * 3. FINANCIERO:
+ *    a) `missing` no vacío → el cierre DEBE pedir `missing[0]`. Se limpia la
+ *       delegación primero (sin añadir su propio cierre) y se enforza el
+ *       campo exacto — así nunca compiten dos cierres canónicos.
+ *    b) `missing` vacío y el cierre es delegativo → petición canónica de insumo.
+ *    c) resto → intacto.
+ *
+ * GARANTÍA: exactamente UNA pregunta al cierre. Si hubiera dos candidatas, la
+ * de mayor prioridad (missing) es la que sobrevive, porque es la única que
+ * llega a ejecutarse en la rama (a).
+ */
+export function resolveClosing(text: string, opts: ResolveClosingOptions): string {
+  const { carril, missing } = opts;
+  const lang = opts.lang ?? detectLanguage(text) ?? DEFAULT_LANGUAGE;
+
+  if (carril === "META") return text;
+
+  if (carril === "MIXTO") return stripDelegativeClosing(text);
+
+  // FINANCIERO
+  if (missing && missing.length > 0) {
+    return enforceMissingClosing(stripDelegativeClosing(text), missing, lang);
+  }
+  return rewriteDelegativeClosing(text, lang);
+}
+
+// ── PIEZA 4 — simulación: prohibir la afirmación falsa ───────────────────────
+//
+// QA real: "la cuota sería de 718,39 € (sin incluir intereses)" — FALSO: 718,39
+// ya incluye el 7% de TAE de referencia (sin intereses serían 625 €). Cuando la
+// cuota es una simulación (es_simulacion=true), dos garantías:
+//   a) nunca puede afirmar que NO incluye intereses — se elimina esa cláusula.
+//   b) siempre debe quedar claro que es una simulación — si su propia frase no
+//      trae un marcador de referencia, se inserta la cláusula canónica.
+
+// Afirmación falsa: la cuota simulada SÍ incluye la TAE de referencia.
+const FALSE_NO_INTEREST_RE =
+  /,?\s*\(?\s*(sin incluir intereses|sin intereses|no incluye intereses|sem juros|sem incluir juros|without interest|excluding interest)\s*\)?/gi;
+
+// Marcador de que la cuota es una simulación, no la cifra real del banco.
+const SIMULATION_MARKER_RE = /(simulac|de referencia|tae del 7|orientativo)/;
+
+// Cifra de cuota mencionada en la frase (para saber dónde adjuntar la cláusula).
+const CUOTA_MENTION_RE = /\b(cuota|cuotas|mensualidad|mensualidade|prestacao|prestacoes|payment|installment)\b/;
+
+const SIMULATION_CLAUSE: Record<Language, string> = {
+  es: " (simulación con TAE de referencia — tu banco te dará la tasa real)",
+  pt: " (simulação com TAEG de referência — o teu banco vai dar-te a taxa real)",
+  en: " (a simulation with a reference APR — your bank will give you the real rate)",
+};
+
+/**
+ * Aplica la honestidad de simulación (Pieza 4). Función PURA.
+ *
+ * - `esSimulacion` false → texto intacto: nada que corregir, la cuota es real.
+ * - `esSimulacion` true:
+ *   a) elimina cualquier cláusula que niegue que incluye intereses.
+ *   b) si la frase que menciona la cuota no trae YA un marcador de referencia,
+ *      le adjunta la cláusula canónica de simulación.
+ */
+export function enforceSimulationHonesty(
+  text: string,
+  opts: { esSimulacion: boolean; lang?: Language },
+): string {
+  if (!opts.esSimulacion || !text) return text;
+  const lang = opts.lang ?? detectLanguage(text) ?? DEFAULT_LANGUAGE;
+
+  // a) elimina la afirmación falsa.
+  const out = cleanup(text.replace(FALSE_NO_INTEREST_RE, ""));
+
+  // b) inserta el marcador de simulación en la frase de la cuota, si falta.
+  let inserted = false;
+  const rebuilt = segmentSentences(out)
+    .map((seg) => {
+      if (inserted) return seg.text;
+      const n = norm(seg.text);
+      if (!CUOTA_MENTION_RE.test(n) || !/\d/.test(n) || SIMULATION_MARKER_RE.test(n)) {
+        return seg.text;
+      }
+      inserted = true;
+      const trailing = /([.!?]+\s*)$/.exec(seg.text);
+      const clause = SIMULATION_CLAUSE[lang];
+      return trailing
+        ? seg.text.slice(0, -trailing[0].length) + clause + trailing[0]
+        : seg.text + clause;
+    })
+    .join("");
+
+  return cleanup(rebuilt);
 }
 
 // ── PIEZA 3 — fallback de sustancia ──────────────────────────────────────────
