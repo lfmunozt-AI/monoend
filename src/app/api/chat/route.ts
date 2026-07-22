@@ -26,6 +26,14 @@ import { NextResponse } from 'next/server'
 
 const RATE_LIMIT_FREE = 20
 
+// user_ids exentos del rate limit incluso en Production (admins/QA). Se leen de
+// la env var ADMIN_USER_IDS (coma-separada) para eximir a alguien en PRD sin
+// tocar código — basta añadir su user_id en Vercel.
+const ADMIN_USER_IDS = (process.env.ADMIN_USER_IDS ?? '')
+  .split(',')
+  .map((id) => id.trim())
+  .filter(Boolean)
+
 export async function POST(request: Request) {
   // ── Auth ────────────────────────────────────────────────────────────────────
   const supabase = await createClient()
@@ -103,7 +111,25 @@ export async function POST(request: Request) {
   const plan: string = (isActiveSub && sub?.plan) ? sub.plan : (profile.plan ?? 'free')
 
   // ── Rate limit (solo plan free) ──────────────────────────────────────────────
-  if (plan === 'free') {
+  // Excepción por entorno/rol: fuera de Production (Preview/dev), con el
+  // interruptor manual RATE_LIMIT_DISABLED, o si el user_id es admin/QA. La
+  // protección de coste real (20/día) sigue intacta para usuarios reales en PRD.
+  const skipLimit =
+    process.env.VERCEL_ENV !== 'production' ||
+    process.env.RATE_LIMIT_DISABLED === 'true' ||
+    ADMIN_USER_IDS.includes(user.id)
+
+  if (skipLimit) {
+    console.warn('[chat] rate_limit_skipped', JSON.stringify({
+      user_id: user.id,
+      reason:
+        process.env.VERCEL_ENV !== 'production' ? 'non_production'
+        : process.env.RATE_LIMIT_DISABLED === 'true' ? 'disabled_switch'
+        : 'admin_user',
+    }))
+  }
+
+  if (!skipLimit && plan === 'free') {
     const todayUTC = new Date()
     todayUTC.setUTCHours(0, 0, 0, 0)
     const { count, error: countErr } = await admin
