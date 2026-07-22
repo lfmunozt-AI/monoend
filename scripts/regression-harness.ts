@@ -7,21 +7,24 @@
  * una secuencia de turnos; cada turno atraviesa la MISMA cadena determinista que
  * `src/app/api/chat/route.ts` ejecuta en producción:
  *
- *   1. extractScenarioDelta(mensaje)          ─┐ estado conversacional
- *   2. mergeScenario(estado, delta)            │ (lo que route.ts todavía NO hace)
- *   3. buildScenarioContext(estado)           ─┘ → { bloque, cifrasCalculadas }
- *   4. [modelo] fixtureResponse  ·  o LLM real con --live
- *   5. runGuardrail(mensaje, respuesta, { cifrasCalculadas, idioma })
- *   6. validateConsigliereOutput(texto)  → branding + severidad
- *   7. enforceOutputPolicy(texto, validación)
- *   8. disclaimer si el producto sobrevivió al enforcement
- *   9. rewriteDelegativeClosing(texto, idioma)
- *  10. ensureSubstance(texto, {idioma, missing})
- *  11. enforceMissingClosing(texto, missing, idioma)
+ *   1. classifyTurn(mensaje, estadoPrevio, idioma) ─ carril: FINANCIERO|META|MIXTO
+ *   2. extractScenarioDelta(mensaje)          ─┐ estado conversacional (META: delta {})
+ *   3. mergeScenario(estado, delta)            │ (lo que route.ts todavía NO hace)
+ *   4. buildScenarioContext(estado)           ─┘ → { bloque, cifrasCalculadas }
+ *   5. [modelo] fixtureResponse  ·  o LLM real con --live
+ *   6. runGuardrail(mensaje, respuesta, { cifrasCalculadas, idioma })  ── solo FINANCIERO/MIXTO
+ *   7. enforceSimulationHonesty(texto, { esSimulacion, idioma })       ── solo FINANCIERO/MIXTO
+ *   8. validateConsigliereOutput(texto)  → branding + severidad        ── TODOS los carriles
+ *   9. enforceOutputPolicy(texto, validación)                          ── TODOS los carriles
+ *  10. disclaimer si el producto sobrevivió al enforcement
+ *  11. ensureSubstance(texto, {idioma, missing})                       ── solo FINANCIERO
+ *  12. resolveClosing(texto, { carril, missing, idioma })              ── TODOS los carriles
  *
- * Los pasos 5-11 replican `route.ts` en orden. Los pasos 1-3 son la capa con
- * estado: `buildVerifiedContext` es sin estado y pierde el contexto entre turnos
- * (ver `scripts/harness/scenario-provisional.ts`).
+ * Los pasos 6-12 replican `route.ts` en orden, incluido el carrilado por turno
+ * (Pieza 1-2 de AG08): META se salta la jaula de cifras y el cierre forzado
+ * entero; MIXTO fundamenta cifras pero nunca añade cierre; FINANCIERO corre el
+ * pipeline completo. Los pasos 2-4 son la capa con estado: `buildVerifiedContext`
+ * es sin estado y pierde el contexto entre turnos (ver `scripts/harness/scenario-provisional.ts`).
  *
  * MODO FIXTURE (por defecto, sin red, sin LLM, determinista)
  *   Cada turno trae `fixtureResponse`: la respuesta que el modelo "habría dado",
@@ -57,7 +60,14 @@
 import { readdirSync, readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 
-import { runGuardrail, rewriteDelegativeClosing, ensureSubstance, enforceMissingClosing } from '../src/lib/guardrail'
+import {
+  runGuardrail,
+  ensureSubstance,
+  resolveClosing,
+  enforceSimulationHonesty,
+  classifyTurn,
+  type Carril,
+} from '../src/lib/guardrail'
 import {
   validateConsigliereOutput,
   enforceOutputPolicy,
@@ -102,6 +112,8 @@ interface Turn {
   expectFallback?: boolean
   expectBlocked?: boolean
   expectScenarioState?: Record<string, unknown>
+  /** Carril esperado (Pieza 1 de AG08: FINANCIERO|META|MIXTO). Opcional. */
+  expectCarril?: Carril
 }
 
 interface ProfileSelector {
@@ -306,6 +318,7 @@ interface TurnOutcome {
   conceptos: Record<string, number>
   missing: string[]
   lang: Language
+  carril: Carril
 }
 
 async function modelResponse(
@@ -356,29 +369,43 @@ async function runTurn(
 ): Promise<TurnOutcome> {
   const userLang = detectLanguage(turn.user)
 
-  // 1-3 · estado conversacional → contexto verificado (cadena de AG08)
+  // 1 · carril (Pieza 1 de AG08): se clasifica con el estado PREVIO, igual que
+  // el route — el mensaje del turno actual ya trae su propia señal.
+  const carril = classifyTurn(turn.user, prevState, userLang)
+
+  // 2-4 · estado conversacional → contexto verificado (cadena de AG08)
   // `prevState` habilita la respuesta corta de TAE (FIX 2), igual que el route.
-  const delta = extractScenarioDelta(turn.user, userLang, prevState)
+  // META nunca extrae (mismo motivo que el route: charla trivial no tiene nada
+  // financiero que registrar).
+  const delta = carril === 'META' ? {} : extractScenarioDelta(turn.user, userLang, prevState)
   const state = mergeScenario(prevState, delta)
   const verified = buildScenarioContext(state, turn.user)
 
-  // 4 · el modelo (fixture o real)
+  // 5 · el modelo (fixture o real)
   const response = await modelResponse(turn, live, scenario, verified.bloque, history, profile)
 
-  // 5 · guardarraíl de cifras: valores exactos + conceptos semánticos
-  const guardrail = await runGuardrail(turn.user, response, {
-    mode: 'mvp',
-    cifrasCalculadas: { valores: verified.valores, conceptos: verified.conceptos },
-    idioma: userLang,
-  })
-  let finalText = guardrail.texto_final
+  // 6-7 · jaula de cifras + honestidad de simulación: SOLO fuera de META (Pieza 2).
+  let finalText = response
+  let blocked = false
+  if (carril !== 'META') {
+    const guardrail = await runGuardrail(turn.user, response, {
+      mode: 'mvp',
+      cifrasCalculadas: { valores: verified.valores, conceptos: verified.conceptos },
+      idioma: userLang,
+    })
+    finalText = guardrail.texto_final
+    blocked = guardrail.bloqueado
 
-  // 6-7 · validador de política + enforcement
+    const esSimulacion = state.credito?.tae_es_referencia === true
+    finalText = enforceSimulationHonesty(finalText, { esSimulacion, lang: userLang })
+  }
+
+  // 8-9 · validador de política + enforcement (TODOS los carriles, META incluido)
   const validation = validateConsigliereOutput(finalText)
   finalText = validation.text
   finalText = enforceOutputPolicy(finalText, validation)
 
-  // 8 · disclaimer solo si el producto sobrevivió al enforcement
+  // 10 · disclaimer solo si el producto sobrevivió al enforcement
   if (
     validation.suggestedDisclaimer &&
     mentionsSpecificProduct(finalText) &&
@@ -387,24 +414,24 @@ async function runTurn(
     finalText = `${finalText}\n\n${validation.suggestedDisclaimer}`
   }
 
-  // 9 · cierre delegativo
-  finalText = rewriteDelegativeClosing(finalText, userLang)
+  // 11 · sustancia: SOLO FINANCIERO. En META/MIXTO una respuesta sin cifras es válida.
+  if (carril === 'FINANCIERO') {
+    finalText = ensureSubstance(finalText, { lang: userLang, missing: state.missing })
+  }
 
-  // 10 · sustancia: si no queda una cifra concreta, pide el dato que falta
-  finalText = ensureSubstance(finalText, { lang: userLang, missing: state.missing })
-
-  // 11 · cierre por missing: el código decide QUÉ se pregunta, no el modelo
-  finalText = enforceMissingClosing(finalText, state.missing, userLang)
+  // 12 · resolutor ÚNICO de cierre, por carril (Pieza 3: fix del doble cierre)
+  finalText = resolveClosing(finalText, { carril, missing: state.missing, lang: userLang })
 
   return {
     finalText,
-    blocked: guardrail.bloqueado,
+    blocked,
     state,
     bloque: verified.bloque,
     valores: verified.valores,
     conceptos: verified.conceptos,
     missing: state.missing,
     lang: userLang,
+    carril,
   }
 }
 
@@ -448,6 +475,10 @@ function checkTurn(turn: Turn, out: TurnOutcome, live: boolean): string[] {
 
   if (turn.expectScenarioState) {
     subsetMatch(turn.expectScenarioState, out.state as unknown, '', errs)
+  }
+
+  if (turn.expectCarril !== undefined && turn.expectCarril !== out.carril) {
+    errs.push(`expectCarril: esperaba ${turn.expectCarril}, encontré ${out.carril}`)
   }
 
   return errs
@@ -527,7 +558,7 @@ async function main() {
         console.log(`  ${RED}✗${RESET} ${n} ${DIM}${turn.user.slice(0, 62)}${turn.user.length > 62 ? '…' : ''}${RESET}`)
         for (const e of errs) console.log(`      ${RED}${e}${RESET}`)
         console.log(`      ${DIM}final: ${JSON.stringify(out.finalText)}${RESET}`)
-        console.log(`      ${DIM}estado: ${JSON.stringify(out.state)}${RESET}`)
+        console.log(`      ${DIM}carril: ${out.carril} · estado: ${JSON.stringify(out.state)}${RESET}`)
         console.log(`      ${DIM}valores: [${out.valores.join(', ')}] · conceptos: ${JSON.stringify(out.conceptos)}${RESET}`)
       }
 

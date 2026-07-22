@@ -1,0 +1,19 @@
+{
+  "name": "saludo_simple_pt",
+  "playbook": "PB7",
+  "language": "pt",
+  "description": "Mismo caso que saludo_simple en PT ('olá'): META, sin cierre canónico forzado.",
+  "turns": [
+    {
+      "user": "olá",
+      "fixtureResponse": "Olá! Sou o teu Consigliere financeiro. Em que te posso ajudar hoje?",
+      "expectCarril": "META",
+      "expectFallback": false,
+      "expectContains": ["Em que te posso ajudar hoje?"],
+      "expectNotContains": [
+        "Partilhas comigo os teus principais gastos",
+        "Qual é a TAEG que o teu banco te oferece?"
+      ]
+    }
+  ]
+}

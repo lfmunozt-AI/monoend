@@ -1,0 +1,24 @@
+{
+  "name": "identidad_meta_pt",
+  "playbook": "PB7",
+  "language": "pt",
+  "description": "Mismo hueco QA que identidad_meta pero en PT: sondeo de identidad ('que modelo és?') sin ningún escenario activo. Debe clasificar META, saltar la jaula de cifras y nunca sustituir por el enlatado de missing.",
+  "turns": [
+    {
+      "user": "Que modelo és?",
+      "fixtureResponse": "Sou o Consigliere da andgcore e ajudo-te a decidir com os teus números, não a falar de tecnologia interna.",
+      "expectCarril": "META",
+      "expectFallback": false,
+      "expectNotContains": [
+        "dou-te a prestação exata",
+        "openai",
+        "gpt",
+        "chatgpt",
+        "anthropic",
+        "claude",
+        "mistral"
+      ],
+      "expectContains": ["decidir com os teus números"]
+    }
+  ]
+}

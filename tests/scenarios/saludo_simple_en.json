@@ -1,0 +1,19 @@
+{
+  "name": "saludo_simple_en",
+  "playbook": "PB7",
+  "language": "en",
+  "description": "Mismo caso que saludo_simple en EN ('hi'): META, sin cierre canónico forzado.",
+  "turns": [
+    {
+      "user": "hi",
+      "fixtureResponse": "Hi! I'm your Consigliere. What can I help you with today?",
+      "expectCarril": "META",
+      "expectFallback": false,
+      "expectContains": ["What can I help you with today?"],
+      "expectNotContains": [
+        "Share your main expenses with their amounts",
+        "What APR is your bank offering?"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "name": "simulacion_honesta",
+  "playbook": "PB7",
+  "language": "es",
+  "description": "Pieza 4 (QA real): '452,78 €/mes (sin incluir intereses)' es FALSO cuando la cuota es una simulación con TAE de referencia del 7% — esa cuota YA incluye el 7% asumido. enforceSimulationHonesty debe eliminar la cláusula falsa; como la frase ya trae su propio marcador de referencia ('TAE de referencia'), no hace falta insertar la cláusula canónica de simulación encima.",
+  "turns": [
+    {
+      "user": "Gano 10000 euros al mes y mis gastos son 9500. Quiero financiar un carro de 30000 a 84 meses.",
+      "fixtureResponse": "Calculando con una TAE de referencia del 7% —tu banco te dará la real—, la cuota sería de 452,78 €/mes (sin incluir intereses).",
+      "expectCarril": "FINANCIERO",
+      "expectBlocked": false,
+      "expectConcept": { "cuota": { "value": 452.78, "tol": 1 } },
+      "expectContains": ["452,78", "¿Qué TAE te ofrece tu banco?"],
+      "expectNotContains": ["sin incluir intereses"],
+      "expectFallback": false,
+      "expectScenarioState": {
+        "credito": { "monto": 30000, "plazo_meses": 84, "tae_es_referencia": true },
+        "missing": ["tae"]
+      }
+    }
+  ]
+}
