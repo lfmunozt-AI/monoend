@@ -23,6 +23,7 @@ import {
   DISCLAIMER_REGEXES,
   CANONICAL_DISCLAIMER,
   BRANDING_REWRITES,
+  PROVIDER_LEAK_REGEXES,
 } from './validator-rules';
 import { sentenceRangeAt, segmentSentences } from '../guardrail/context';
 import {
@@ -263,6 +264,18 @@ export function validateConsigliereOutput(input: string): ValidationResult {
   if (motivational) {
     if (severity !== 'block') severity = 'flag';
     reasons.push(`Lenguaje motivacional cliché: "${motivational.trim()}"`);
+  }
+
+  // 5. Pieza 5c — fuga de identidad de proveedor/modelo. Aplica en TODOS los
+  // carriles (incluido META): un sondeo de identidad legítimo (Pieza 5b) no es
+  // el problema; el problema es que la respuesta revele el proveedor real.
+  // Sin guardián de negación: no existe una forma legítima de nombrar estos
+  // términos en una respuesta del Consigliere.
+  const leak = findAllMatches(text, PROVIDER_LEAK_REGEXES);
+  if (leak.length > 0) {
+    severity = 'block';
+    addViolating(sentencesWithMatches(text, PROVIDER_LEAK_REGEXES, false));
+    reasons.push(`Fuga de identidad de proveedor/modelo detectada (${leak.join(', ')})`);
   }
 
   const passed = severity !== 'block';

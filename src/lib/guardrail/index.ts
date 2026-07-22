@@ -148,14 +148,19 @@ export {
   containsDataRequest,
   isDelegativeClosing,
   rewriteDelegativeClosing,
+  stripDelegativeClosing,
   enforceMissingClosing,
+  resolveClosing,
+  enforceSimulationHonesty,
   ensureSubstance,
   cleanup,
   type PolicyMode,
   type PolicyOptions,
   type PolicyResult,
   type GuardrailLogEntry,
+  type ResolveClosingOptions,
 } from "./policy";
+export { classifyTurn, type Carril } from "./turn-classifier";
 export {
   parseModelOutput,
   ModelOutputSchema,

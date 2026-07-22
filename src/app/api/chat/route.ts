@@ -2,7 +2,14 @@ import { createClient } from '@/lib/supabase/server'
 import { adminClient } from '@/lib/supabase/admin'
 import { buildSystemPrompt } from '@/lib/prompts/consigliere'
 import { callLLMWithTools } from '@/lib/llm'
-import { runGuardrail, rewriteDelegativeClosing, ensureSubstance, enforceMissingClosing } from '@/lib/guardrail'
+import {
+  runGuardrail,
+  ensureSubstance,
+  resolveClosing,
+  enforceSimulationHonesty,
+  classifyTurn,
+  detectInjection,
+} from '@/lib/guardrail'
 import { buildScenarioContext } from '@/lib/calculator/orchestrator'
 import { mergeScenario, summarizeScenario, type ScenarioState } from '@/lib/calculator/scenario'
 import { registrarDatosFinancieros, resolveDelta, buildToolResult } from '@/lib/calculator/tools'
@@ -188,6 +195,17 @@ export async function POST(request: Request) {
   if (ingresosMes > 0) seed.ingreso_mensual = Math.round(ingresosMes)
   if (gastosMes > 0) seed.gastos_mensuales = Math.round(gastosMes)
 
+  // ── CARRIL (Pieza 1-2) ───────────────────────────────────────────────────────
+  // Causa raíz QA: el pipeline solo conocía UN modo (turno de cálculo). A "¿qué
+  // modelo eres?" el guardarraíl de cifras juzgó la respuesta como esqueleto y la
+  // sustituyó por el enlatado de missing[0]. La jaula de cifras solo debe
+  // aplicarse a la PARTE financiera de la conversación. Se clasifica con el
+  // estado PREVIO (seed): el mensaje del turno actual ya trae su propia señal
+  // financiera/META en el texto; el escenario solo desempata cuando no hay
+  // ninguna ("ninguno", "ok").
+  const carril = classifyTurn(cleanMessage, seed, userLang)
+  console.warn('[chat] carril', JSON.stringify({ user_id: user.id, conversation_id: convId, carril }))
+
   // ── System prompt (persona + idioma espejo) ──────────────────────────────────
   const basePrompt = buildSystemPrompt({
     nombre: profile.name ?? 'Usuario',
@@ -227,23 +245,29 @@ export async function POST(request: Request) {
     idiomaObligatorio,
   ].filter(Boolean).join('\n\n')
 
+  // BONUS de latencia/coste (Pieza 2): en META no hay nada financiero que
+  // extraer — una sola llamada, sin tool, con presupuesto de tokens de
+  // respuesta completa (no de mero tool_call).
   const call1 = await callLLMWithTools(
     allMessages,
     systemPrompt1,
     [registrarDatosFinancieros],
-    { maxTokens: 150 },
+    carril === 'META'
+      ? { maxTokens: 400, toolChoice: 'none' }
+      : { maxTokens: 150 },
   )
 
   // Paso 3: delta del tool_call, o FALLBACK a la extracción regex (se conserva).
-  const toolCall = call1.toolCalls.find((t) => t.name === 'registrar_datos_financieros')
-  const { delta, usedTool } = resolveDelta({
-    toolArgs: toolCall?.args,
-    message: cleanMessage,
-    lang: userLang,
-    prev: seed,
-  })
+  // META nunca extrae: no hay tool_call (toolChoice 'none') y no tiene sentido
+  // correr el fallback regex sobre una charla trivial.
+  const toolCall = carril === 'META'
+    ? undefined
+    : call1.toolCalls.find((t) => t.name === 'registrar_datos_financieros')
+  const { delta, usedTool } = carril === 'META'
+    ? { delta: {}, usedTool: false }
+    : resolveDelta({ toolArgs: toolCall?.args, message: cleanMessage, lang: userLang, prev: seed })
   console.log(`[chat] ${usedTool ? 'toolCall usado' : 'fallback-regex'}`,
-    JSON.stringify({ conversation_id: convId, keys: Object.keys(delta) }))
+    JSON.stringify({ conversation_id: convId, keys: Object.keys(delta), carril }))
 
   // Paso 4: estado completo → paquete verificado (código calcula y marca).
   const scenario = mergeScenario(seed, delta)
@@ -277,33 +301,66 @@ export async function POST(request: Request) {
   }
 
   // ── Guardarraíl de cifras (código externo al modelo) ─────────────────────────
-  // Extrae los hechos del usuario, valida el grounding de las cifras de la
-  // respuesta y, en modo mvp, reescribe los montos inventados. best-effort:
-  // nunca lanza. `texto_final` es la respuesta saneada a persistir/mostrar.
-  const guardrail = await runGuardrail(cleanMessage, llmResult.content, {
-    mode: 'mvp',
-    supabase: admin,
-    userId: user.id,
-    // Grounding: valores exactos (c0) + conceptos semánticos (PIEZA 2).
-    cifrasCalculadas: { valores: verified.valores, conceptos: verified.conceptos },
-    // Fallo A: el cierre del guardarraíl en el idioma del usuario, no el del modelo.
-    idioma: userLang,
-  })
-  let finalContent = guardrail.texto_final
+  // Pieza 2: la jaula de cifras SOLO aplica a la parte financiera del turno.
+  // META no tiene nada que fundamentar (charla trivial, identidad, gracias):
+  // se salta el grounding entero, pero la señal anti-inyección (M3 / Pieza 5b
+  // identity_probe) se sigue detectando y logueando igual.
+  let finalContent: string
+  let injectionDetected: boolean
+  let injectionPatterns: string[]
 
-  // M3: la señal anti-inyección no bloquea; se registra para vigilancia.
-  if (guardrail.injection.detected) {
+  if (carril === 'META') {
+    finalContent = llmResult.content
+    const inj = detectInjection(cleanMessage)
+    injectionDetected = inj.sospechoso
+    injectionPatterns = inj.patrones
+  } else {
+    // FINANCIERO y MIXTO: grounding de cifras. `texto_final` es la respuesta
+    // saneada (montos inventados corregidos/eliminados). best-effort: nunca lanza.
+    const guardrail = await runGuardrail(cleanMessage, llmResult.content, {
+      mode: 'mvp',
+      supabase: admin,
+      userId: user.id,
+      // Grounding: valores exactos (c0) + conceptos semánticos (PIEZA 2).
+      cifrasCalculadas: { valores: verified.valores, conceptos: verified.conceptos },
+      // Fallo A: el cierre del guardarraíl en el idioma del usuario, no el del modelo.
+      idioma: userLang,
+    })
+    finalContent = guardrail.texto_final
+    injectionDetected = guardrail.injection.detected
+    injectionPatterns = guardrail.injection.patterns
+
+    // PIEZA 4 — simulación: la cuota simulada (TAE de referencia) nunca puede
+    // afirmar que "no incluye intereses" (sí los incluye) y siempre debe dejar
+    // claro que es una simulación, no la cifra real del banco.
+    const esSimulacion = scenario.credito?.tae_es_referencia === true
+    const beforeSimulation = finalContent
+    finalContent = enforceSimulationHonesty(finalContent, { esSimulacion, lang: userLang })
+    if (finalContent !== beforeSimulation) {
+      console.warn('[chat] simulation_honesty_enforced', JSON.stringify({
+        user_id: user.id,
+        conversation_id: convId,
+        carril,
+      }))
+    }
+  }
+
+  // M3 / Pieza 5b: la señal anti-inyección (incluido identity_probe) no
+  // bloquea; se registra para vigilancia.
+  if (injectionDetected) {
     console.warn('[chat] injection_detected', JSON.stringify({
       user_id: user.id,
       conversation_id: convId,
-      patterns: guardrail.injection.patterns,
+      patterns: injectionPatterns,
+      carril,
     }))
   }
 
   // ── Validador de política, sobre el texto ya saneado ─────────────────────────
-  // El guardrail de cifras corre primero; el validador de política, después.
-  // `validation.text` trae el branding corregido; `enforceOutputPolicy` hace
-  // cumplir los bloqueos (C1) eliminando la oración infractora.
+  // Capas de seguridad (garantías, absolutos, branding, fuga de identidad de
+  // proveedor/modelo — Pieza 5c): se aplican en TODOS los carriles, META
+  // incluido. `validation.text` trae el branding corregido; `enforceOutputPolicy`
+  // hace cumplir los bloqueos (C1) eliminando la oración infractora.
   const validation = validateConsigliereOutput(finalContent)
   finalContent = validation.text
 
@@ -312,6 +369,7 @@ export async function POST(request: Request) {
     console.warn('[chat] output_enforced', JSON.stringify({
       user_id: user.id,
       conversation_id: convId,
+      carril,
       severity: validation.severity,
       reasons: validation.reasons,
       removed_sentences: validation.violatingSentences.length,
@@ -332,42 +390,35 @@ export async function POST(request: Request) {
     finalContent = `${finalContent}\n\n${validation.suggestedDisclaimer}`
   }
 
-  // TAREA 1 — cierre delegativo: si la respuesta cierra pidiendo al usuario que
-  // analice ("¿qué gastos podrías reducir?"), se sustituye por una petición de
-  // insumo + promesa de análisis, en el idioma del usuario. monoend pide el
-  // dato, él analiza. Determinista; último paso para no reintroducir delegación.
-  const beforeDelegative = finalContent
-  finalContent = rewriteDelegativeClosing(finalContent, userLang)
-  if (finalContent !== beforeDelegative) {
-    console.warn('[chat] delegative_closing_rewritten', JSON.stringify({
-      user_id: user.id,
-      conversation_id: convId,
-    }))
+  // PIEZA 3 — fallback de sustancia: SOLO en FINANCIERO. Si el guardrail vació
+  // la respuesta a un esqueleto sin cifras, se sustituye por una petición segura
+  // del dato que falta (scenario.missing[0]) con promesa de cálculo. En META/MIXTO
+  // una respuesta sin cifras (charla trivial, o la parte no financiera de un
+  // turno mixto) es perfectamente válida — no hay esqueleto que rellenar.
+  if (carril === 'FINANCIERO') {
+    const beforeSubstance = finalContent
+    finalContent = ensureSubstance(finalContent, { lang: userLang, missing: scenario.missing })
+    if (finalContent !== beforeSubstance) {
+      console.warn('[chat] substance_fallback', JSON.stringify({
+        user_id: user.id,
+        conversation_id: convId,
+        missing: scenario.missing,
+      }))
+    }
   }
 
-  // PIEZA 3 — fallback de sustancia: si el guardrail vació la respuesta a un
-  // esqueleto sin cifras, se sustituye por una petición segura del dato que falta
-  // (scenario.missing[0]) con promesa de cálculo. Nunca más respuestas-esqueleto.
-  const beforeSubstance = finalContent
-  finalContent = ensureSubstance(finalContent, { lang: userLang, missing: scenario.missing })
-  if (finalContent !== beforeSubstance) {
-    console.warn('[chat] substance_fallback', JSON.stringify({
+  // PIEZA 3 — resolutor ÚNICO de cierre (arregla el doble cierre real: dos
+  // cierres canónicos propios seguidos porque rewriteDelegativeClosing y
+  // enforceMissingClosing no se coordinaban entre sí). Por carril:
+  // META → intacto; MIXTO → solo elimina delegación, nunca añade; FINANCIERO →
+  // el missing manda, garantizando UNA sola pregunta final.
+  const beforeClosing = finalContent
+  finalContent = resolveClosing(finalContent, { carril, missing: scenario.missing, lang: userLang })
+  if (finalContent !== beforeClosing) {
+    console.warn('[chat] closing_resolved', JSON.stringify({
       user_id: user.id,
       conversation_id: convId,
-      missing: scenario.missing,
-    }))
-  }
-
-  // BUG DE CIERRE (QA real): el motor marca missing=["tae"] pero el modelo
-  // cierra con una pregunta lícita de prioridad equivocada ("¿Te gustaría
-  // proceder?"). El código decide QUÉ se pregunta; el modelo ya lo redactó.
-  // Último paso: nunca se reintroduce un cierre fuera de tema.
-  const beforeMissingClosing = finalContent
-  finalContent = enforceMissingClosing(finalContent, scenario.missing, userLang)
-  if (finalContent !== beforeMissingClosing) {
-    console.warn('[chat] missing_closing_enforced', JSON.stringify({
-      user_id: user.id,
-      conversation_id: convId,
+      carril,
       missing: scenario.missing,
     }))
   }

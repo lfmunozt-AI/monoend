@@ -14,7 +14,7 @@ import { parseModelOutput } from "./schema";
 import { parseDigitAmount, findNumberMentions } from "./numbers";
 import { runGuardrail } from "./index";
 import { splitSentences, segmentSentences, sentenceRangeAt } from "./context";
-import { rewriteDelegativeClosing, isDelegativeClosing, ensureSubstance, enforceMissingClosing } from "./policy";
+import { rewriteDelegativeClosing, isDelegativeClosing, ensureSubstance, enforceMissingClosing, resolveClosing, enforceSimulationHonesty } from "./policy";
 
 // ── enforceMissingClosing — cierre por missing (bug de prioridad) ─────────────
 test("caso real QA: missing=['tae'] + cierre de prioridad equivocada → reemplazado", () => {
@@ -379,6 +379,102 @@ test("PIEZA 3: dos cierres válidos duplicados → dedup a uno", () => {
   );
   assert.equal(out, "Tu sobrante es 500 €. ¿Cuál es tu ingreso neto mensual?");
   assert.equal(countQuestions(out), 1, "el duplicado se colapsa");
+});
+
+// ── PIEZA 3 (carriles) — resolveClosing: resolutor único ──────────────────────
+test("resolveClosing: carril META → texto intacto SIEMPRE (aunque sea delegativo)", () => {
+  const texto = "Con gusto. ¿Qué gastos podrías reducir?";
+  const out = resolveClosing(texto, { carril: "META", missing: ["tae"] });
+  assert.equal(out, texto, "META nunca se toca, ni con missing no vacío");
+});
+
+test("resolveClosing: carril MIXTO → solo elimina delegativo, NUNCA añade", () => {
+  const out = resolveClosing("Tu sobrante es 500 €. ¿Qué gastos podrías reducir?", {
+    carril: "MIXTO",
+    missing: ["tae"],
+  });
+  assert.ok(!/podrías reducir/.test(out), "elimina la delegación");
+  assert.ok(!out.includes("¿"), "no añade ningún cierre propio, ni el de insumo ni el de missing");
+  assert.equal(out, "Tu sobrante es 500 €.");
+});
+
+test("resolveClosing: carril MIXTO sin cierre delegativo → intacto (nunca fuerza missing)", () => {
+  const texto = "Hola, tu sobrante es 500 €.";
+  const out = resolveClosing(texto, { carril: "MIXTO", missing: ["tae"] });
+  assert.equal(out, texto);
+});
+
+test("resolveClosing: FINANCIERO + missing=['tae'] → EL CASO REAL DEL DOBLE CIERRE, ahora una sola pregunta", () => {
+  // Antes: rewriteDelegativeClosing corría primero e inyectaba su propio cierre
+  // de insumo ("¿Me compartes...? Yo identifico...") — la frase de seguimiento
+  // rompía la detección de enforceMissingClosing y el cierre de TAE se AÑADÍA
+  // en vez de sustituir. Dos preguntas seguidas.
+  const out = resolveClosing("Tu sobrante es 500 €. ¿Qué gastos podrías reducir?", {
+    carril: "FINANCIERO",
+    missing: ["tae"],
+  });
+  assert.equal(countQuestions(out), 1, "UNA sola pregunta final, nunca dos");
+  assert.ok(out.includes("¿Qué TAE te ofrece tu banco?"), "el cierre pide exactamente el missing[0]");
+  assert.ok(!out.includes("Me compartes"), "el cierre de insumo NUNCA llega a inyectarse");
+  assert.ok(out.includes("Tu sobrante es 500 €"), "conserva el análisis previo");
+});
+
+test("resolveClosing: FINANCIERO + missing vacío + cierre delegativo → petición canónica de insumo", () => {
+  const out = resolveClosing("Tu sobrante es 500 €. ¿Qué gastos podrías reducir?", {
+    carril: "FINANCIERO",
+    missing: [],
+  });
+  assert.equal(countQuestions(out), 1);
+  assert.ok(out.includes("¿Me compartes tus gastos principales"));
+});
+
+test("resolveClosing: FINANCIERO + missing vacío + cierre YA válido → intacto", () => {
+  const texto = "Tu sobrante es 500 €. ¿Cuál es tu meta?";
+  const out = resolveClosing(texto, { carril: "FINANCIERO", missing: [] });
+  assert.equal(out, texto);
+});
+
+test("resolveClosing: FINANCIERO + missing=['tae'] y el cierre YA lo pide → intacto", () => {
+  const texto = "La cuota es 452,78 €. ¿Qué TAE te ofrece tu banco?";
+  const out = resolveClosing(texto, { carril: "FINANCIERO", missing: ["tae"] });
+  assert.equal(out, texto);
+  assert.equal(countQuestions(out), 1);
+});
+
+// ── PIEZA 4 — simulación: prohibir la afirmación falsa ────────────────────────
+test("PIEZA 4: caso real QA — '(sin incluir intereses)' es FALSO y se elimina", () => {
+  const out = enforceSimulationHonesty(
+    "La cuota sería de 718,39 € (sin incluir intereses).",
+    { esSimulacion: true },
+  );
+  assert.ok(!/sin incluir intereses/i.test(out), "la afirmación falsa desaparece");
+  assert.ok(out.includes("718,39"), "la cifra sobrevive");
+});
+
+test("PIEZA 4: sin marcador de referencia junto a la cuota → se inserta la cláusula canónica", () => {
+  const out = enforceSimulationHonesty("La cuota sería de 718,39 €.", { esSimulacion: true });
+  assert.ok(/simulaci[oó]n/i.test(out), "queda claro que es una simulación");
+  assert.ok(out.includes("718,39"));
+});
+
+test("PIEZA 4: YA trae marcador de referencia junto a la cuota → no duplica la cláusula", () => {
+  const texto = "Con una TAE de referencia del 7%, la cuota sería de 718,39 €.";
+  const out = enforceSimulationHonesty(texto, { esSimulacion: true });
+  assert.equal(out, texto, "ya está claro que es simulación, no se toca");
+});
+
+test("PIEZA 4: es_simulacion=false → texto intacto, aunque diga 'sin incluir intereses'", () => {
+  const texto = "La cuota es de 718,39 € (sin incluir intereses).";
+  assert.equal(enforceSimulationHonesty(texto, { esSimulacion: false }), texto);
+});
+
+test("PIEZA 4 EN: 'without interest' con es_simulacion=true → eliminada + marcador insertado", () => {
+  const out = enforceSimulationHonesty(
+    "The payment would be $718.39 (without interest).",
+    { esSimulacion: true, lang: "en" },
+  );
+  assert.ok(!/without interest/i.test(out));
+  assert.ok(/simulation/i.test(out));
 });
 
 // ── BUG 1 — segmentador de oraciones NUMERIC-SAFE ─────────────────────────────
