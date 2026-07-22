@@ -394,6 +394,17 @@ export function buildScenarioContext(
         if (anual.ok) {
           realidad.push({ etiqueta: "capacidad_ahorro_anual", valor: anual.valor, formula: `sobrante ${s.valor} × 12` });
         }
+      } else if (s.valor < 0) {
+        // BUG 2 — el déficit ES un concepto de primera clase, no un sobrante
+        // negativo que el modelo tiene que interpretar. Gastas más de lo que
+        // ingresas: es el dato más valioso de la conversación y debe poder
+        // fundamentarse (grounding) igual que cualquier otra cifra real.
+        const deficit = round2(Math.abs(s.valor));
+        realidad.push({
+          etiqueta: "deficit_mensual",
+          valor: deficit,
+          formula: `gastas ${deficit} € más de lo que ingresas: gastos ${gasto} − ingreso ${ingreso}`,
+        });
       }
     }
     const ref = porcentajeDe(ingreso, AHORRO_SUGERIDO_PCT);
@@ -508,6 +519,7 @@ const ETIQUETA_A_CONCEPTO: Record<string, string> = {
   ingreso_mensual: "ingreso",
   gastos_mensuales: "gastos",
   sobrante_mensual: "sobrante",
+  deficit_mensual: "deficit",
   capacidad_ahorro_anual: "capacidad_anual",
   monto_credito: "monto",
   plazo_credito_meses: "plazo",

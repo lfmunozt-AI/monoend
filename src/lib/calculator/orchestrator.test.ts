@@ -4,7 +4,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { buildVerifiedContext } from "./orchestrator";
+import { buildVerifiedContext, buildScenarioContext } from "./orchestrator";
+import { mergeScenario } from "./scenario";
 import { validateGrounding } from "../guardrail/validate";
 
 // ── PIEZA 2 — buildVerifiedContext ──────────────────────────────────────────
@@ -189,4 +190,39 @@ test("validateGrounding sin cifrasCalculadas mantiene el comportamiento previo",
   // Firma de 2 argumentos intacta: 999 sin respaldo se bloquea igual.
   const r = validateGrounding("Pagarás 999 al mes.", []);
   assert.ok(r.cifras_bloqueadas.some((c) => c.valor === 999));
+});
+
+// ── BUG 2 — el déficit es un concepto de primera clase ──────────────────────
+test("BUG 2: gastos > ingreso → línea deficit_mensual propia (no un sobrante negativo)", () => {
+  const s = mergeScenario(undefined, { ingreso_mensual: 10000, gastos_mensuales: 11000 });
+  const { bloque, conceptos, valores } = buildScenarioContext(s, "");
+  assert.ok(bloque.includes("deficit_mensual: 1000"), `bloque:\n${bloque}`);
+  assert.ok(!bloque.includes("sobrante_mensual: 0"), "el déficit nunca se presenta como sobrante 0");
+  assert.ok(bloque.includes("sobrante_mensual: -1000"), "el sobrante real (negativo) sigue en el bloque");
+  assert.equal(conceptos.deficit, 1000);
+  assert.ok(valores.includes(1000));
+  // Con déficit no hay capacidad de ahorro: nunca debe aparecer.
+  assert.ok(!bloque.includes("capacidad_ahorro_anual"));
+});
+
+test("BUG 2: sobrante positivo → NUNCA aparece deficit_mensual", () => {
+  const s = mergeScenario(undefined, { ingreso_mensual: 3000, gastos_mensuales: 2000 });
+  const { bloque, conceptos } = buildScenarioContext(s, "");
+  assert.ok(!bloque.includes("deficit_mensual"));
+  assert.equal(conceptos.deficit, undefined);
+});
+
+test("BUG 2: grounding — 'gastas 400 de más' (déficit real 1000) se BLOQUEA y corrige a 1000", () => {
+  const cif = { valores: [10000, 11000, 1000], conceptos: { ingreso: 10000, gastos: 11000, deficit: 1000 } };
+  const r = validateGrounding("Estás en déficit: gastas 400 € de más de lo que ingresas.", [], cif);
+  const bloq = r.cifras_bloqueadas.find((c) => c.valor === 400);
+  assert.ok(bloq, "400 en posición de déficit se bloquea");
+  assert.equal(bloq?.correccion, 1000);
+});
+
+test("BUG 2: grounding — 'tu déficit mensual es de 1000 €' (correcto) → APROBADA", () => {
+  const cif = { valores: [10000, 11000, 1000], conceptos: { ingreso: 10000, gastos: 11000, deficit: 1000 } };
+  const r = validateGrounding("Tu déficit mensual es de 1000 €.", [], cif);
+  assert.equal(r.cifras_bloqueadas.length, 0);
+  assert.ok(r.cifras_aprobadas.some((c) => c.valor === 1000));
 });

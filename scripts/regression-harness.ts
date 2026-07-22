@@ -133,6 +133,8 @@ const CONCEPT_PATTERNS: Record<string, RegExp> = {
   reserva: /reserva|reserve/g,
   ratio: /ratio/g,
   meta: /meta|goal|objetivo/g,
+  gastos: /gastos|gasto|despesas|expenses|spending/g,
+  deficit: /d[eé]ficit|d[eé]fice|shortfall/g,
 }
 
 /** Ventana máxima (chars) entre la palabra del concepto y su cifra. */

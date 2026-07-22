@@ -24,6 +24,8 @@ export interface CreditoState {
   /** TAE en %. Si `tae_es_referencia`, es el 7% supuesto, no el del usuario. */
   tae_pct?: number;
   tae_es_referencia: boolean;
+  /** Objeto de compra detectado en el mensaje que creó el crédito ("carro", "casa"…). */
+  objeto?: string;
 }
 
 export interface MetaState {
@@ -40,6 +42,12 @@ export interface ScenarioState {
   gastos_es_detalle?: boolean;
   credito?: CreditoState;
   meta?: MetaState;
+  /**
+   * true si `meta` la puso el motor (derivada del crédito), no el usuario. Una
+   * meta EXPLÍCITA del usuario siempre pisa la derivada y apaga este flag para
+   * siempre: una vez el usuario habla, el motor deja de inventar.
+   */
+  meta_derivada?: boolean;
   /** Qué falta para completar el playbook activo. Recalculado en cada merge. */
   missing: string[];
 }
@@ -72,6 +80,13 @@ const AMOUNT = /(\d[\d.,]*)/;
 
 // Meta.
 const META_CTX = /\b(meta|objetivo|quiero (?:comprar|llegar|ahorrar)|goal|target|juntar|reunir)\b/;
+
+// Objeto de compra de un crédito (BUG 3): qué se está financiando. Se captura
+// SOLO en el mensaje que crea el crédito (monto+plazo) para poder derivar una
+// meta con título con sentido ("carro de 30000" → meta "carro") en vez de
+// preguntar por una meta que el usuario ya dio, solo que sin la palabra "meta".
+const OBJETO_CREDITO =
+  /\b(carro|coche|auto|vehiculo|moto|casa|piso|apartamento|viatura|car|house|apartment|vehicle)\b/;
 
 /** Convierte un plazo a meses. "3 años" → 36; "36 meses" → 36. */
 function toMonths(value: number, unit: string): number {
@@ -135,10 +150,12 @@ export function extractScenarioDelta(
       const meses = toMonths(parseDigitAmount(plazo[1]), plazo[2]);
       const monto = parseDigitAmount(amount[1]);
       if (Number.isFinite(monto) && monto > 0 && meses > 0) {
+        const objetoMatch = OBJETO_CREDITO.exec(n);
         delta.credito = {
           ...(delta.credito ?? { tae_es_referencia: true }),
           monto,
           plazo_meses: meses,
+          ...(objetoMatch ? { objeto: objetoMatch[1] } : {}),
         };
       }
     }
@@ -189,10 +206,22 @@ export function extractScenarioDelta(
   return delta;
 }
 
+function round2(n: number): number {
+  return Math.round((n + Number.EPSILON) * 100) / 100;
+}
+
 /**
  * Fusiona el estado previo con un delta. Merge por campo, ÚLTIMO gana. El crédito
  * se fusiona a nivel de subcampo (una TAE nueva no borra el monto). Si llega una
  * TAE real, `tae_es_referencia` pasa a false. Recalcula `missing`.
+ *
+ * REGLA DE PERSISTENCIA (transversal a todo el estado): un campo NUNCA se borra
+ * por ausencia en un mensaje posterior — el usuario no repite en cada turno lo
+ * que ya dijo. Solo se sobreescribe cuando el delta trae un valor NUEVO Y
+ * EXPLÍCITO para ese campo exacto (`!== undefined`, nunca "delta no lo menciona
+ * → lo borro"). Por eso cada asignación de abajo está guardada tras un
+ * `if (delta.x !== undefined)`, y el merge de `credito` parte de `{...base.credito}`
+ * en vez de reconstruirlo desde cero.
  */
 export function mergeScenario(
   prev: ScenarioState | Partial<ScenarioState> | undefined,
@@ -202,9 +231,26 @@ export function mergeScenario(
 
   if (delta.ingreso_mensual !== undefined) base.ingreso_mensual = delta.ingreso_mensual;
   if (delta.gastos_mensuales !== undefined) base.gastos_mensuales = delta.gastos_mensuales;
-  if (delta.gastos_detalle !== undefined) base.gastos_detalle = delta.gastos_detalle;
   if (delta.gastos_es_detalle !== undefined) base.gastos_es_detalle = delta.gastos_es_detalle;
-  if (delta.meta !== undefined) base.meta = { ...(base.meta ?? {}), ...delta.meta };
+
+  // BUG 1 — el detalle manda SIEMPRE sobre el agregado: si llega un desglose
+  // (≥2 ítems — la única forma en que `extractScenarioDelta` produce
+  // `gastos_detalle`), `gastos_mensuales` se RECALCULA como la suma de todo el
+  // detalle, pisando el agregado previo aunque estuviera obsoleto. Dos fuentes
+  // de verdad para el mismo dato es el bug: a partir de aquí solo hay una.
+  if (delta.gastos_detalle !== undefined) {
+    base.gastos_detalle = delta.gastos_detalle;
+    base.gastos_mensuales = round2(
+      delta.gastos_detalle.vitales + delta.gastos_detalle.noVitales + delta.gastos_detalle.desconocidos,
+    );
+  }
+
+  // Meta EXPLÍCITA del usuario: pisa cualquier meta derivada y apaga el flag
+  // para siempre (ver `meta_derivada` más abajo).
+  if (delta.meta !== undefined) {
+    base.meta = { ...(base.meta ?? {}), ...delta.meta };
+    base.meta_derivada = false;
+  }
 
   if (delta.credito !== undefined) {
     const merged: CreditoState = {
@@ -212,6 +258,7 @@ export function mergeScenario(
     };
     if (delta.credito.monto) merged.monto = delta.credito.monto;
     if (delta.credito.plazo_meses) merged.plazo_meses = delta.credito.plazo_meses;
+    if (delta.credito.objeto) merged.objeto = delta.credito.objeto;
     if (delta.credito.tae_pct !== undefined) {
       merged.tae_pct = delta.credito.tae_pct;
       // Una TAE aportada por el usuario deja de ser la de referencia.
@@ -220,8 +267,26 @@ export function mergeScenario(
     base.credito = merged;
   }
 
+  // BUG 3 — si hay un crédito con monto y el usuario nunca dio una meta propia
+  // (o la que hay sigue siendo la derivada de un crédito previo), la meta ES el
+  // crédito: comprar ese carro/casa/lo-que-sea, en ese monto y ese plazo. Sin
+  // esto, `missing` pide "meta" con el carro ya sobre la mesa — el modelo
+  // pierde contexto y repite preguntas.
+  if (base.credito && base.credito.monto > 0 && (base.meta === undefined || base.meta_derivada)) {
+    base.meta = {
+      titulo: base.credito.objeto ? capitalize(base.credito.objeto) : "compra financiada",
+      monto: base.credito.monto,
+      plazo_meses: base.credito.plazo_meses,
+    };
+    base.meta_derivada = true;
+  }
+
   base.missing = computeMissing(base);
   return base;
+}
+
+function capitalize(s: string): string {
+  return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
 /**
