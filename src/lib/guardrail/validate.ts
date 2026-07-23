@@ -158,6 +158,23 @@ function exactMatch(a: number, b: number): boolean {
   return Math.abs(a - b) <= 0.01;
 }
 
+// FIX A.2 / MANDAMIENTO 8 — un número al inicio de línea seguido de "." ")" o
+// "-" es un ENUMERADOR de lista ("1. Ajustar el ocio", "2) Aumentar ingresos",
+// "3 - Financiar a más largo plazo"), no una cifra financiera. QA real: el
+// guardarraíl trataba "1"/"2"/"3" como montos, encontraba un concepto cercano
+// en la misma frase (recorte, aumento_necesario…) y los REESCRIBÍA a la cifra
+// de ese concepto — la lista de pasos salía con números de otro planeta
+// ("7000. Ajustar el ocio"). Se excluye ANTES de cualquier chequeo: nunca se
+// aprueba, nunca se corrige, nunca se bloquea — es como si no existiera.
+export function isListEnumerator(text: string, m: NumberMention): boolean {
+  const lineStart = text.lastIndexOf("\n", m.start - 1) + 1;
+  const prefix = text.slice(lineStart, m.start);
+  if (!/^[ \t]*$/.test(prefix)) return false; // hay contenido antes en la misma línea
+  // Admite un espacio entre la cifra y el separador ("3 - Financiar…").
+  const after = text.slice(m.end, m.end + 3);
+  return /^ ?[.)-]/.test(after);
+}
+
 /**
  * Valida el grounding de todas las cifras de la respuesta del modelo contra los
  * hechos verificados del usuario.
@@ -202,12 +219,15 @@ export function validateGrounding(
   };
 
   for (const m of figs) {
+    // FIX A.2 / MANDAMIENTO 8 — enumerador de lista, no una cifra financiera.
+    if (isListEnumerator(modelResponse, m)) continue;
+
     const moneda = detectCurrency(modelResponse, m);
     const [sentStart, sentEnd] = sentenceRangeAt(modelResponse, m.start, m.end);
     const esReferencia = hasReferenceMarker(modelResponse.slice(sentStart, sentEnd));
 
     // (POSICIONAL · FIX 4) — PRIORIDAD sobre el chequeo por frase. Si la cifra
-    // está ADYACENTE a un patrón de rol ("crédito de <X>", "cuota … <X>",
+    // está ADYACENTE a un patrón de rol INEQUÍVOCO ("crédito de <X>",
     // "a <X> meses") y el motor conoce ese concepto, la cifra DEBE ser ese
     // concepto (±1). Impide que la cuota se cite como el monto del crédito.
     const rol = roleConcept(modelResponse, m);
@@ -215,13 +235,18 @@ export function validateGrounding(
       if (Math.abs(m.value - conceptos[rol]) <= 1) {
         aprobadas.push({ ...base(m, moneda), categoria: "calculo", motivo: `coincide con el concepto verificado (${rol}, por posición)` });
       } else {
+        // FIX A (QA real) — SOLO monto/plazo son patrones posicionales
+        // INEQUÍVOCOS ("crédito de <X>", "a <X> meses"): su `correccion` es
+        // segura porque la posición fija sin ambigüedad qué concepto es.
+        // Sustituir por el valor de OTRO concepto fabrica una cifra con
+        // apariencia verificada — sin `correccion` aquí, la frase se ELIMINA.
         bloqueadas.push({
           ...base(m, moneda),
           motivo: `posición de ${rol} pero no coincide con su valor verificado`,
           etiqueta: labelWithinSentence(modelResponse, m),
           start: m.start,
           end: m.end,
-          correccion: conceptos[rol],
+          ...(rol === "monto" || rol === "plazo" ? { correccion: conceptos[rol] } : {}),
         });
       }
       continue;
@@ -279,15 +304,18 @@ export function validateGrounding(
       } else if (Math.abs(m.value - conceptos[conceptoCercano]) <= 1) {
         aprobadas.push({ ...base(m, moneda), categoria: "calculo", motivo: `coincide con el concepto verificado (${conceptoCercano})` });
       } else {
-        // El motor conoce el valor correcto del concepto → se ofrece como
-        // corrección en su sitio (la Pieza 3 decide sustituir vs eliminar).
+        // FIX A (QA real) — el motor conoce el valor correcto, pero SUSTITUIRLO
+        // fabrica una mentira con apariencia verificada ("liberar al menos
+        // 10000 €" — brecha real ~247 € — reescrita al ingreso; "gastas 1000 €"
+        // — 11.000 real — reescrito a otro concepto). Solo monto/plazo (patrón
+        // posicional inequívoco, más arriba) se corrigen en su sitio; todo lo
+        // demás se ELIMINA — sin `correccion`.
         bloqueadas.push({
           ...base(m, moneda),
           motivo: `no coincide con el concepto verificado por el motor (${conceptoCercano})`,
           etiqueta: labelWithinSentence(modelResponse, m),
           start: m.start,
           end: m.end,
-          correccion: conceptos[conceptoCercano],
         });
       }
       continue;
@@ -380,7 +408,6 @@ function normLite(s: string): string {
 // modelo suele escribir el objeto, no la palabra "crédito".
 const ROLE_MONTO_BEFORE =
   /\b(credito|prestamo|emprestimo|loan|financiacion|financiamento|financiar|carro|coche|auto|vehiculo|moto|casa|piso|apartamento|viatura|car|house|apartment|vehicle)\s+(?:de\s+|of\s+)?$/;
-const ROLE_CUOTA_BEFORE = /\b(cuota|prestacao|mensualidad|mensualidade|payment|installment)\b/;
 const ROLE_PLAZO_AFTER = /^\s*(?:€\s*)?(meses|mes|months?|parcelas|prestacoes)\b/;
 // FIX 1b — patrón ESTRUCTURAL cazatodo: la cifra que va "de <CIFRA> €? a <N>
 // meses" es SIEMPRE el monto (esa estructura es precio + plazo), aunque no haya
@@ -392,7 +419,15 @@ const ROLE_MONTO_STRUCT_AFTER =
 /**
  * Concepto que denota la cifra `m` por adyacencia, o null. Orden de precisión:
  * plazo (sufijo "meses") → monto (objeto/crédito "de <X>", justo antes) → monto
- * estructural ("de <X> a <N> meses") → cuota (la palabra en la ventana previa).
+ * estructural ("de <X> a <N> meses").
+ *
+ * FIX B (QA real) — "cuota" YA NO es un rol posicional aquí: su ventana de 40
+ * caracteres NO es inequívoca ("la suma de cuota y déficit es 1609,25" cae
+ * dentro de esa ventana sin que la cifra sea la cuota) y competía con
+ * conceptos más específicos de la misma frase (p. ej. esfuerzo_total). El
+ * semántico (`conceptsInSentence` + `nearestConceptInSentence`, más abajo) ya
+ * cubre "cuota" — sin ventana fija, con prioridad direccional por CERCANÍA
+ * real, no por "aparece en algún punto de los últimos 40 caracteres".
  */
 function roleConcept(text: string, m: NumberMention): string | null {
   const before = normLite(text.slice(Math.max(0, m.start - 40), m.start));
@@ -400,7 +435,6 @@ function roleConcept(text: string, m: NumberMention): string | null {
   if (ROLE_PLAZO_AFTER.test(after)) return "plazo";
   if (ROLE_MONTO_BEFORE.test(before)) return "monto";
   if (ROLE_MONTO_BEFORE_DE.test(before) && ROLE_MONTO_STRUCT_AFTER.test(after)) return "monto";
-  if (ROLE_CUOTA_BEFORE.test(before)) return "cuota";
   return null;
 }
 

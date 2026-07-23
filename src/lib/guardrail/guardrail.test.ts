@@ -83,7 +83,10 @@ test("C: 'cuota 1.000 €' con conceptos.cuota=954 → BLOQUEADA aunque 1000 est
   const cif = { valores: [2500, 1500, 1000, 12000, 954], conceptos: { cuota: 954, sobrante: 1000 } };
   const r = validateGrounding("La cuota rondaría los 1.000 €/mes.", [], cif);
   assert.ok(r.cifras_bloqueadas.some((c) => c.valor === 1000), "c0 no puede aprobar 1000 como cuota");
-  assert.equal(r.cifras_bloqueadas[0].correccion, 954, "ofrece la corrección al valor correcto");
+  // FIX A (QA real): "cuota" se detecta por una VENTANA de 40 caracteres, no un
+  // patrón posicional inequívoco ("crédito de <X>", "a <X> meses") — su
+  // mismatch ya NO se corrige en sitio, se elimina la frase entera.
+  assert.equal(r.cifras_bloqueadas[0].correccion, undefined, "ya no se corrige en sitio — solo monto/plazo lo hacen");
 });
 
 test("C: 'tu sobrante es 1.000 €' → APROBADA (el concepto sobrante sí es 1000)", () => {
@@ -93,15 +96,15 @@ test("C: 'tu sobrante es 1.000 €' → APROBADA (el concepto sobrante sí es 10
   assert.ok(r.cifras_aprobadas.some((c) => c.valor === 1000));
 });
 
-test("C: la política corrige la cuota EN SU SITIO (1.000 → 954), conserva la frase", () => {
+test("C (FIX A): la cuota mal citada se ELIMINA (ya no se corrige en sitio), el resto sobrevive", () => {
   const cif = { valores: [2500, 1500, 1000, 12000, 954], conceptos: { cuota: 954, sobrante: 1000 } };
   const resp = "La cuota rondaría los 1.000 €/mes. ¿Confirmamos ese plan?";
   const v = validateGrounding(resp, [], cif);
   const p = applyPolicy(resp, v, "h");
   assert.equal(p.bloqueado, true);
   assert.ok(!p.texto_final.includes("1.000"), "la cifra errónea desaparece");
-  assert.ok(p.texto_final.includes("954"), "se sustituye por la correcta");
-  assert.ok(p.texto_final.includes("¿Confirmamos ese plan?"), "la frase se conserva, no se borra");
+  assert.ok(!p.texto_final.includes("954"), "ya NO se fabrica una cifra sustituta");
+  assert.ok(p.texto_final.includes("¿Confirmamos ese plan?"), "el resto de la respuesta sobrevive");
 });
 
 // ── HUECO QA — ingreso/gastos sin concepto (caso real: 10000/9500/500) ────────
@@ -114,18 +117,18 @@ const CIF_INGRESO_GASTOS = {
   conceptos: { ingreso: 10000, gastos: 9500, sobrante: 500 },
 };
 
-test("HUECO QA: 'tus ingresos son de 500 €' (real 10000) → BLOQUEADA, corrección a 10000", () => {
+test("HUECO QA: 'tus ingresos son de 500 €' (real 10000) → BLOQUEADA, SIN corrección (FIX A: se elimina)", () => {
   const r = validateGrounding("Tus ingresos son de 500 €.", [], CIF_INGRESO_GASTOS);
   const bloq = r.cifras_bloqueadas.find((c) => c.valor === 500);
   assert.ok(bloq, "500 en posición de ingreso se bloquea aunque esté en valores como sobrante");
-  assert.equal(bloq?.correccion, 10000, "ofrece la corrección al ingreso real");
+  assert.equal(bloq?.correccion, undefined, "FIX A: ya no se sustituye por el valor de otro concepto");
 });
 
-test("HUECO QA: 'tus gastos son de 500 €' (real 9500) → BLOQUEADA, corrección a 9500", () => {
+test("HUECO QA: 'tus gastos son de 500 €' (real 9500) → BLOQUEADA, SIN corrección (FIX A: se elimina)", () => {
   const r = validateGrounding("Tus gastos son de 500 €.", [], CIF_INGRESO_GASTOS);
   const bloq = r.cifras_bloqueadas.find((c) => c.valor === 500);
   assert.ok(bloq, "500 en posición de gastos se bloquea aunque esté en valores como sobrante");
-  assert.equal(bloq?.correccion, 9500, "ofrece la corrección a los gastos reales");
+  assert.equal(bloq?.correccion, undefined, "FIX A: ya no se sustituye por el valor de otro concepto");
 });
 
 test("HUECO QA: 'lo que te deja un sobrante de 500 €' → APROBADA (el concepto sí es 500)", () => {
@@ -140,11 +143,11 @@ test("HUECO QA: 'tus ingresos son de 10.000 €' (correcto) → intacta, sin blo
   assert.ok(r.cifras_aprobadas.some((c) => c.valor === 10000));
 });
 
-test("HUECO QA EN: 'your income is 500' (real 10000) → BLOQUEADA", () => {
+test("HUECO QA EN: 'your income is 500' (real 10000) → BLOQUEADA, SIN corrección", () => {
   const r = validateGrounding("Your income is 500 this month.", [], CIF_INGRESO_GASTOS);
   const bloq = r.cifras_bloqueadas.find((c) => c.valor === 500);
   assert.ok(bloq, "500 en posición de income se bloquea");
-  assert.equal(bloq?.correccion, 10000);
+  assert.equal(bloq?.correccion, undefined);
 });
 
 // La frase REAL del QA: los tres conceptos en UNA sola frase (sin punto entre
@@ -160,11 +163,9 @@ test("HUECO QA: la frase combinada real (los 3 conceptos en una frase) → solo 
   assert.equal(r.cifras_aprobadas.length, 1, "solo el sobrante (500, correcto) se aprueba");
   assert.equal(r.cifras_bloqueadas.length, 2, "ingreso y gastos, ambos citados como 500, se bloquean");
   assert.ok(r.cifras_bloqueadas.every((c) => c.valor === 500));
-  assert.deepEqual(
-    r.cifras_bloqueadas.map((c) => c.correccion).sort((a, b) => (a ?? 0) - (b ?? 0)),
-    [9500, 10000],
-    "las correcciones apuntan a los valores reales de gastos e ingreso",
-  );
+  // FIX A: ninguna se corrige en sitio (ingreso/gastos no son patrón posicional
+  // monto/plazo) — ambas frases se eliminan en vez de fabricar una cifra ajena.
+  assert.ok(r.cifras_bloqueadas.every((c) => c.correccion === undefined));
 });
 
 // ── AUDITORÍA AG01 (H1) — concepto DERIVADO afirmado sin cálculo ("déficit
@@ -211,6 +212,57 @@ test("H1: sin mapa de conceptos (modo histórico number[]) → NO aplica esta re
   const facts = extractInputFacts("gano 3000, gasto 2000");
   const r = validateGrounding("Tu sobrante de 1.000 € es sólido.", facts, [1000]);
   assert.equal(r.cifras_bloqueadas.length, 0);
+});
+
+// ── FIX A — política de reescritura restringida ───────────────────────────────
+test("FIX A.2: lista numerada real del QA — los enumeradores NUNCA se tratan como cifras", () => {
+  const cif = { valores: [7000, 10000, 746.55], conceptos: { recorte: 7000, cuota: 746.55 } };
+  const texto = "1. Ajustar el ocio\n2. Aumentar ingresos\n3. Financiar a más largo plazo";
+  const r = validateGrounding(texto, [], cif);
+  assert.equal(r.cifras_bloqueadas.length, 0, "1/2/3 son enumeradores — nunca se bloquean ni se reescriben");
+  assert.equal(r.cifras_aprobadas.length, 0, "tampoco se aprueban como cifra: no son cifras");
+
+  const p = applyPolicy(texto, r, "h");
+  assert.equal(p.texto_final, texto, "la lista sale intacta, número por número");
+});
+
+test("FIX A.2: variantes de enumerador — '.', ')', '-'", () => {
+  const cif = { valores: [], conceptos: {} };
+  for (const linea of ["1. Ajustar el ocio", "2) Aumentar ingresos", "3 - Financiar a más largo plazo"]) {
+    const r = validateGrounding(linea, [], cif);
+    assert.equal(r.cifras_bloqueadas.length + r.cifras_aprobadas.length, 0, `"${linea}" no debe generar ninguna cifra`);
+  }
+});
+
+test("FIX A.2: un número que NO está al inicio de línea sigue siendo una cifra normal", () => {
+  const cif = { valores: [1000], conceptos: {} };
+  const r = validateGrounding("Tu sobrante mensual es de 1000 €.", [], cif);
+  assert.ok(r.cifras_aprobadas.some((c) => c.valor === 1000), "cifra en medio de frase se procesa normalmente");
+});
+
+test("FIX A.1: cifra sin concepto que la respalde → la frase se ELIMINA, nunca se sustituye por otro concepto", () => {
+  // Caso real QA ('liberar al menos 10000 €', brecha real ~247 € reescrita al
+  // ingreso): un concepto SÍ nombrado en la frase ("ingreso") con una cifra que
+  // NO coincide con su valor Y que tampoco está en `valores` (para que no cuele
+  // por c0). Antes: se sustituía por 10000 (el ingreso). Ahora: se elimina.
+  const cif = { valores: [10000, 9500, 500], conceptos: { ingreso: 10000, gastos: 9500, sobrante: 500 } };
+  const texto = "Necesitas aumentar tus ingresos en 300 € para que el plan cuadre. ¿Seguimos?";
+  const r = validateGrounding(texto, [], cif);
+  const bloq = r.cifras_bloqueadas.find((c) => c.valor === 300);
+  assert.ok(bloq, "300 no coincide con el ingreso real (10000) ni está en valores");
+  assert.equal(bloq?.correccion, undefined, "FIX A: ya no se sustituye por el valor de otro concepto");
+
+  const p = applyPolicy(texto, r, "h");
+  assert.ok(!p.texto_final.includes("300"), "la frase con la cifra sin respaldo desaparece");
+  assert.ok(!p.texto_final.includes("10000"), "no se fabrica el ingreso como sustituto");
+  assert.ok(p.texto_final.includes("¿Seguimos?"), "el resto de la respuesta sobrevive");
+});
+
+test("FIX A.1: patrón posicional monto/plazo sigue reescribiendo en su sitio (sin cambios)", () => {
+  const cif = { valores: [30000, 36, 953.99], conceptos: { monto: 30000, plazo: 36, cuota: 953.99 } };
+  const r = validateGrounding("Para el crédito de 425,81 € a 91 meses, la cuota es de 953,99 €.", [], cif);
+  const bloq = r.cifras_bloqueadas.find((c) => c.valor === 425.81);
+  assert.equal(bloq?.correccion, 30000, "monto sigue reescribiendo en su sitio");
 });
 
 // ── FIX 4 — grounding POSICIONAL por adyacencia ───────────────────────────────

@@ -1,0 +1,25 @@
+{
+  "name": "brecha_mensual_grounding",
+  "playbook": "PB3",
+  "language": "es",
+  "description": "Caso real QA (FIX B): el modelo intentaba calcular él mismo cuánto le faltaba para cubrir la cuota y caía en la trampa ('liberar al menos 10000 €' — brecha real ~247€ reescrita al ingreso). El motor ahora calcula brecha_mensual = cuota − sobrante y la expone como concepto: la cifra correcta (246,55) se aprueba; una brecha citada mal (999) se bloquea SIN sustituirla por otro concepto (FIX A).",
+  "turns": [
+    {
+      "user": "Gano 2500 euros al mes y mis gastos son 2000. Quiero financiar un carro de 30000 a 48 meses.",
+      "fixtureResponse": "Con una TAE de referencia del 7%, la cuota sería de 718,39 €/mes. ¿Qué TAE te ofrece tu banco?",
+      "expectBlocked": false
+    },
+    {
+      "user": "El banco me ofrece 9%",
+      "fixtureResponse": "Con tu TAE real, la cuota es de 746,55 €. Te falta una brecha de 246,55 € al mes para que cuadre. ¿Aumentamos ingresos o recortamos gastos?",
+      "expectBlocked": false,
+      "expectContains": ["746,55", "246,55"]
+    },
+    {
+      "user": "¿Confirmamos?",
+      "fixtureResponse": "La brecha sigue siendo de 999 € al mes. ¿Seguimos?",
+      "expectBlocked": true,
+      "expectNotContains": ["999"]
+    }
+  ]
+}

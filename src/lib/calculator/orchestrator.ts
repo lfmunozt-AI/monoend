@@ -37,6 +37,17 @@ const MESES_FONDO = 6; // colchón de emergencia por defecto (tope del rango 3-6
 const AHORRO_SUGERIDO_PCT = 10; // % del INGRESO: referencia estándar de ahorro.
 export const TAE_REFERENCIA = 7; // % TAE de referencia para simular cuotas de crédito.
 
+// MANDAMIENTO 6 — valores de EJEMPLO canónicos por campo, para cuando el campo
+// aún está vacío (scenario.missing) y hace falta ilustrar sin inventar. Mismo
+// espíritu que TAE_REFERENCIA, generalizado a todo el estado.
+const EJEMPLOS_CANONICOS: Record<string, number> = {
+  ingreso: 2000,
+  gastos: 1000,
+  tae: TAE_REFERENCIA,
+  plazo: 36,
+  meta: 5000,
+};
+
 function normaliza(s: string): string {
   return s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
 }
@@ -377,6 +388,10 @@ export function buildScenarioContext(
   const gasto = scenario.gastos_mensuales;
 
   let capacidadMensual: number | null = null;
+  // FIX B — hospedados para que el bloque de crédito (más abajo) pueda derivar
+  // brecha_mensual/esfuerzo_total sin recalcular sobrante/déficit.
+  let sobranteValor: number | null = null;
+  let deficitValor: number | null = null;
 
   if (ingreso !== undefined) {
     realidad.push({ etiqueta: "ingreso_mensual", valor: ingreso, formula: "dato que aportaste" });
@@ -387,6 +402,7 @@ export function buildScenarioContext(
   if (ingreso !== undefined && gasto !== undefined) {
     const s = sobrante(ingreso, gasto);
     if (s.ok) {
+      sobranteValor = s.valor;
       realidad.push({ etiqueta: "sobrante_mensual", valor: s.valor, formula: `ingreso ${ingreso} − gastos ${gasto}` });
       if (s.valor > 0) {
         capacidadMensual = s.valor;
@@ -400,6 +416,7 @@ export function buildScenarioContext(
         // ingresas: es el dato más valioso de la conversación y debe poder
         // fundamentarse (grounding) igual que cualquier otra cifra real.
         const deficit = round2(Math.abs(s.valor));
+        deficitValor = deficit;
         realidad.push({
           etiqueta: "deficit_mensual",
           valor: deficit,
@@ -448,6 +465,35 @@ export function buildScenarioContext(
           formula: `TAE real ${tae}% del banco; monto ${c.monto} a ${c.plazo_meses} meses`,
         });
       }
+
+      // FIX B — DERIVADAS DE DECISIÓN: el modelo intentaba calcular estas
+      // cifras él mismo y caía en la trampa (las citaba mal, o el guardarraíl
+      // las bloqueaba sin ofrecer nada en su lugar). El motor las calcula y
+      // las expone como conceptos de primera clase, con su fórmula visible.
+      if (sobranteValor !== null) {
+        const brecha = round2(cuota.valor - sobranteValor);
+        if (brecha > 0) {
+          // brecha_mensual: cuánto le falta al sobrante para cubrir la cuota.
+          // aumento_necesario/recorte_necesario son el MISMO número — la
+          // brecha se cierra subiendo ingresos o bajando gastos — así que
+          // ambas etiquetas de concepto apuntan al mismo valor verificado.
+          realidad.push({
+            etiqueta: "brecha_mensual",
+            valor: brecha,
+            formula: `cuota ${cuota.valor} − sobrante ${sobranteValor}`,
+          });
+        }
+      }
+      if (deficitValor !== null) {
+        // esfuerzo_total: si ya hay déficit, la cuota se suma a lo que YA
+        // sobra gastar — es el esfuerzo mensual completo para que el crédito
+        // sea viable, no solo la cuota sola.
+        realidad.push({
+          etiqueta: "esfuerzo_total",
+          valor: round2(cuota.valor + deficitValor),
+          formula: `cuota ${cuota.valor} + déficit ${deficitValor}`,
+        });
+      }
     }
   }
 
@@ -479,6 +525,18 @@ export function buildScenarioContext(
       realidad.push({ etiqueta: "meses_hasta_meta", valor: t.valor, formula: `meta ${scenario.meta.monto} ÷ capacidad ${capacidadMensual}/mes` });
     }
   }
+  // FIX B — ahorro_necesario_mensual: la pregunta INVERSA a meses_hasta_meta.
+  // Con monto Y plazo fijos (el usuario ya decidió en cuánto tiempo), cuánto
+  // necesita ahorrar cada mes para llegar — independiente de si su capacidad
+  // actual alcanza o no (el veredicto de viabilidad lo da comparar contra el
+  // sobrante, no esta fórmula).
+  if (scenario.meta?.monto !== undefined && scenario.meta.plazo_meses !== undefined && scenario.meta.plazo_meses > 0) {
+    realidad.push({
+      etiqueta: "ahorro_necesario_mensual",
+      valor: round2(scenario.meta.monto / scenario.meta.plazo_meses),
+      formula: `meta ${scenario.meta.monto} ÷ plazo ${scenario.meta.plazo_meses} meses`,
+    });
+  }
 
   // FIX 1 — deriva el resto de `conceptos` automáticamente de TODAS las líneas
   // de realidad ya acumuladas (ingreso, gastos, sobrante, capacidad anual,
@@ -487,6 +545,28 @@ export function buildScenarioContext(
   // añade una línea nueva a `realidad`, basta con registrarla en
   // ETIQUETA_A_CONCEPTO para que el grounding la cubra.
   deriveConceptos(realidad, conceptos);
+
+  // FIX B — aumento_necesario/recorte_necesario son ALIAS de brecha_mensual:
+  // la misma cifra verificada, dos formas de decirla ("sube ingresos" o "baja
+  // gastos"). No tienen línea propia en TU REALIDAD (evitaría triplicar el
+  // bloque por el mismo número) — solo alimentan el grounding semántico.
+  if ("brecha" in conceptos) {
+    conceptos.aumento_necesario = conceptos.brecha;
+    conceptos.recorte_necesario = conceptos.brecha;
+  }
+
+  // MANDAMIENTO 6 — valor de EJEMPLO declarado: generaliza la tercera vía a
+  // cualquier campo vacío (no solo TAE). Si el usuario aún no dio un dato,
+  // el motor ofrece un ejemplo CANÓNICO para que, si el modelo ilustra con un
+  // número, ese número sea verificable Y la frase declare que es un ejemplo
+  // (enforceCommandments, Mandamiento 6). No entra a `realidad` (no es un dato
+  // del usuario) ni a `valores` — solo a `conceptos`, como puente de conocimiento.
+  for (const campoMissing of scenario.missing ?? []) {
+    const campo = campoMissing === "meta_monto" ? "meta" : campoMissing;
+    if (campo in EJEMPLOS_CANONICOS && !(`ejemplo_${campo}` in conceptos)) {
+      conceptos[`ejemplo_${campo}`] = EJEMPLOS_CANONICOS[campo];
+    }
+  }
 
   const secciones: string[] = [];
   if (realidad.length > 0 || sinClasificar.length > 0) {
@@ -527,6 +607,11 @@ const ETIQUETA_A_CONCEPTO: Record<string, string> = {
   cuota_credito: "cuota",
   recorte_propuesto_50pct: "recorte",
   nueva_capacidad: "nueva_capacidad",
+  // FIX B — derivadas de decisión (aumento_necesario/recorte_necesario son
+  // alias de "brecha", asignados aparte más abajo — no tienen línea propia).
+  brecha_mensual: "brecha",
+  esfuerzo_total: "esfuerzo_total",
+  ahorro_necesario_mensual: "ahorro_necesario_mensual",
 };
 
 /**

@@ -37,10 +37,13 @@ const TIMEOUT_MS = 30_000;
 
 /**
  * Cap de generación del chat. El Consigliere responde en ≤120 palabras (ver
- * REGLAS DE CONDUCTA en prompts/consigliere.ts); 400 tokens dan margen de sobra
+ * REGLAS DE CONDUCTA en prompts/consigliere.ts); 500 tokens dan margen de sobra
  * y recortan la latencia, que es lineal en tokens generados.
+ *
+ * FIX D (QA real): con 400, una respuesta de PB3 (cuota + veredicto + cierre)
+ * se cortó a mitad de frase — el margen no alcanzaba para el caso más largo.
  */
-const CHAT_MAX_TOKENS = 400;
+const CHAT_MAX_TOKENS = 500;
 
 function getClient(): OpenAI {
   const apiKey = process.env.LLM_API_KEY || (isOpenAI ? process.env.OPENAI_API_KEY : undefined);

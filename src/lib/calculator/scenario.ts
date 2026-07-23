@@ -34,6 +34,61 @@ export interface MetaState {
   plazo_meses?: number;
 }
 
+// FIX C — anti-repetición: distancia de Levenshtein normalizada. Suficiente
+// para textos del tamaño de una respuesta del chat (unos pocos cientos de
+// caracteres) — el bug real eran 5 turnos con la respuesta prácticamente
+// calcada, no una coincidencia parcial que exija algo más sofisticado.
+function levenshtein(a: string, b: string): number {
+  const m = a.length;
+  const n = b.length;
+  const dp: number[] = new Array(n + 1);
+  for (let j = 0; j <= n; j++) dp[j] = j;
+  for (let i = 1; i <= m; i++) {
+    let prev = dp[0];
+    dp[0] = i;
+    for (let j = 1; j <= n; j++) {
+      const tmp = dp[j];
+      dp[j] = a[i - 1] === b[j - 1] ? prev : 1 + Math.min(prev, dp[j], dp[j - 1]);
+      prev = tmp;
+    }
+  }
+  return dp[n];
+}
+
+/** Similitud aproximada entre dos textos, 0 (nada en común) a 1 (idénticos). */
+export function similitudTexto(a: string, b: string): number {
+  const s1 = a.trim().toLowerCase();
+  const s2 = b.trim().toLowerCase();
+  if (s1 === s2) return 1;
+  if (!s1.length || !s2.length) return 0;
+  return 1 - levenshtein(s1, s2) / Math.max(s1.length, s2.length);
+}
+
+/**
+ * ¿`actual` repite casi literalmente la respuesta ANTERIOR del asistente en la
+ * misma conversación? QA real: el modelo prometía "¿quieres que te proyecte el
+ * plan?" cinco turnos seguidos, prácticamente palabra por palabra. Umbral por
+ * defecto 90% — texto distinto con la misma ESTRUCTURA (cifras que cambian de
+ * un turno a otro) no cuenta como repetición.
+ */
+export function esRespuestaRepetida(actual: string, anterior: string | undefined, umbral = 0.9): boolean {
+  if (!anterior) return false;
+  return similitudTexto(actual, anterior) >= umbral;
+}
+
+/**
+ * FIX C (QA real: 5 turnos idénticos) — la última respuesta cerró proponiendo
+ * un plan concreto ("¿quieres que te proyecte el plan?", "¿Confirmamos?"). Se
+ * recuerda para que una confirmación corta del usuario ("sí") dispare la
+ * EJECUCIÓN (PB7) en vez de que el modelo vuelva a diagnosticar desde cero.
+ */
+export interface PropuestaPendiente {
+  /** Clasificación gruesa de la propuesta ("credito" | "meta" | "general"). */
+  tipo: string;
+  /** El cierre propuesto, tal cual se le mostró al usuario (para dar contexto). */
+  resumen: string;
+}
+
 export interface ScenarioState {
   ingreso_mensual?: number;
   gastos_mensuales?: number;
@@ -48,6 +103,10 @@ export interface ScenarioState {
    * siempre: una vez el usuario habla, el motor deja de inventar.
    */
   meta_derivada?: boolean;
+  /** FIX C — propuesta de plan aún sin confirmar por el usuario. */
+  propuesta_pendiente?: PropuestaPendiente;
+  /** FIX C — el usuario confirmó: PB7 debe ENTREGAR el plan, no re-diagnosticar. */
+  plan_confirmado?: boolean;
   /** Qué falta para completar el playbook activo. Recalculado en cada merge. */
   missing: string[];
 }
@@ -87,6 +146,18 @@ const META_CTX = /\b(meta|objetivo|quiero (?:comprar|llegar|ahorrar)|goal|target
 // preguntar por una meta que el usuario ya dio, solo que sin la palabra "meta".
 const OBJETO_CREDITO =
   /\b(carro|coche|auto|vehiculo|moto|casa|piso|apartamento|viatura|car|house|apartment|vehicle)\b/;
+
+// FIX C — confirmación CORTA del usuario tras una propuesta ("sí", "ok",
+// "dale", "arrancamos", "sim", "yes"…). Anclada a ^…$ (con puntuación/énfasis
+// tolerado): un "sí" perdido dentro de una frase larga NO cuenta — el usuario
+// tiene que estar respondiendo A la propuesta, no mencionando la palabra.
+const CONFIRMACION_CORTA_RE =
+  /^(si|s[ií]+|ok(?:ay)?|vale|dale|arrancamos|arranquemos|vamos|adelante|hagamoslo|confirmado|de acuerdo|sim|isso|vamos la|yes|yep|yeah|sure|deal|let'?s go|go ahead|sounds good)[!.\s]*$/;
+
+/** ¿Es `message` una confirmación corta ("sí", "dale", "yes"…)? */
+export function esConfirmacionCorta(message: string): boolean {
+  return CONFIRMACION_CORTA_RE.test(norm(message).trim());
+}
 
 /** Convierte un plazo a meses. "3 años" → 36; "36 meses" → 36. */
 function toMonths(value: number, unit: string): number {
@@ -203,6 +274,14 @@ export function extractScenarioDelta(
     if (meta.monto !== undefined || meta.plazo_meses !== undefined) delta.meta = meta;
   }
 
+  // ── FIX C — confirmación corta tras una propuesta pendiente ────────────────
+  // "sí" SOLO dispara ejecución si había algo que confirmar; sobre un estado
+  // sin propuesta pendiente es ruido conversacional ("sí, sigue así") y no
+  // marca nada — evita falsos positivos de plan_confirmado.
+  if (prev?.propuesta_pendiente && esConfirmacionCorta(message)) {
+    delta.plan_confirmado = true;
+  }
+
   return delta;
 }
 
@@ -252,6 +331,14 @@ export function mergeScenario(
     base.meta_derivada = false;
   }
 
+  // FIX C — confirmación corta ("sí") con propuesta pendiente → PB7 ejecuta.
+  // Se limpia la pendiente: ya cumplió su propósito, y así una nueva propuesta
+  // (route.ts, tras generar la respuesta) puede detectarse limpiamente.
+  if (delta.plan_confirmado) {
+    base.plan_confirmado = true;
+    base.propuesta_pendiente = undefined;
+  }
+
   if (delta.credito !== undefined) {
     const merged: CreditoState = {
       ...(base.credito ?? { monto: 0, plazo_meses: 0, tae_es_referencia: true }),
@@ -289,6 +376,45 @@ function capitalize(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
+// FIX C — ¿la respuesta del asistente cierra PROPONIENDO un plan concreto
+// ("¿quieres que te proyecte el plan?", "¿Confirmamos ese plan?", "¿Arrancamos
+// con esto?")? Deliberadamente más estrecho que "termina en pregunta": una
+// pregunta de DATO ("¿cuál es tu ingreso?") no es una propuesta de plan — el
+// bug real era específicamente el ciclo propuesta→"sí"→re-diagnóstico.
+const PROPUESTA_PLAN_RE =
+  /\b(el plan|ese plan|este plan|te proyecte|proyectar tu|confirmamos|arrancamos|registramos|seguimos con esto|adelante con esto|quieres que (?:te )?(?:arme|proyecte|calcule)|o plano|avancamos|registamos|the plan|shall we proceed|move forward with this|shall we log it)\b/;
+
+/**
+ * ¿La ÚLTIMA frase de `text` es una propuesta de plan que espera confirmación?
+ * Pura; no muta nada — el llamante (route.ts) decide qué hacer con el resultado.
+ */
+export function esPropuestaDePlan(text: string): boolean {
+  if (!text || !text.trim().endsWith("?")) return false;
+  const ultimaFrase = text.trim().split(/(?<=[.!?])\s+/).at(-1) ?? "";
+  return PROPUESTA_PLAN_RE.test(norm(ultimaFrase));
+}
+
+/**
+ * FIX C — se llama tras generar `finalText` (route.ts), ANTES de persistir el
+ * escenario. Si el cierre propone un plan, lo recuerda como
+ * `propuesta_pendiente` (para que un "sí" del próximo turno dispare PB7) y
+ * apaga `plan_confirmado`: una propuesta NUEVA exige una confirmación NUEVA.
+ * Si no propone nada, el escenario vuelve intacto — no borra una pendiente
+ * previa que el modelo simplemente no repitió en este turno.
+ */
+export function registrarPropuestaPendiente(
+  scenario: ScenarioState,
+  finalText: string,
+): ScenarioState {
+  if (!esPropuestaDePlan(finalText)) return scenario;
+  const tipo = scenario.credito ? "credito" : scenario.meta ? "meta" : "general";
+  return {
+    ...scenario,
+    propuesta_pendiente: { tipo, resumen: finalText.trim() },
+    plan_confirmado: false,
+  };
+}
+
 /**
  * Resumen compacto del estado para inyectar como "ESTADO ACTUAL CONOCIDO" en el
  * prompt (LLAMADA 1 de function calling). Texto plano, sin cifras derivadas: solo
@@ -310,6 +436,15 @@ export function summarizeScenario(s: Partial<ScenarioState> | undefined): string
     if (partes.length) l.push(`meta: ${partes.join(", ")}`);
   }
   if (s.missing && s.missing.length) l.push(`falta por saber: ${s.missing.join(", ")}`);
+  // FIX C — PB7 EJECUCIÓN: el modelo necesita saber esto YA en la primera
+  // llamada (una confirmación corta como "sí" no dispara tool_call, así que no
+  // hay una segunda llamada donde colarlo) — si no, sigue diagnosticando en
+  // vez de entregar el plan.
+  if (s.plan_confirmado) {
+    l.push("plan_confirmado: true — el usuario YA confirmó. PROHIBIDO re-diagnosticar: entrega el plan (PLAYBOOK 7).");
+  } else if (s.propuesta_pendiente) {
+    l.push(`propuesta pendiente de confirmar: "${s.propuesta_pendiente.resumen}"`);
+  }
   return l.length ? l.map((x) => `- ${x}`).join("\n") : "Nada aún — el usuario no ha aportado datos.";
 }
 
