@@ -155,6 +155,8 @@ export interface ToolResultPayload {
   bloque: string;
   missing: string[];
   credito: { es_simulacion: boolean | null; tae_usada: number | null };
+  /** FIX C — PB7 EJECUCIÓN: si true, el modelo debe entregar el plan, no re-diagnosticar. */
+  plan_confirmado: boolean;
 }
 
 /**
@@ -174,5 +176,6 @@ export function buildToolResult(
     bloque: verified.bloque,
     missing: verified.missing,
     credito: { es_simulacion: c?.tae_es_referencia ?? null, tae_usada: taeUsada },
+    plan_confirmado: scenario.plan_confirmado === true,
   };
 }

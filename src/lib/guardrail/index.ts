@@ -19,6 +19,7 @@ import {
   logGuardrailEvents,
   type GuardrailLogEntry,
   type PolicyMode,
+  type Mutation,
 } from "./policy";
 import { parseModelOutput } from "./schema";
 import { detectInjection } from "./injection";
@@ -41,6 +42,8 @@ export interface RunGuardrailOptions {
   cifrasCalculadas?: number[] | GroundingCifras;
   /** Idioma del cierre. Si no se da, se infiere de la respuesta del modelo. */
   idioma?: Language;
+  /** REGISTRO DE MUTACIONES — si se da, cada corrección en sitio se anota aquí. */
+  mutations?: Mutation[];
 }
 
 /** Señal anti-inyección del mensaje del usuario. Nunca bloquea (M3). */
@@ -112,6 +115,7 @@ export async function runGuardrail(
     mode: options.mode,
     dataHint: options.dataHint,
     idioma: options.idioma,
+    mutations: options.mutations,
   });
 
   if (options.supabase && options.userId && policy.logEntries.length > 0) {
@@ -159,15 +163,16 @@ export {
   type PolicyResult,
   type GuardrailLogEntry,
   type ResolveClosingOptions,
+  type Mutation,
 } from "./policy";
 export { classifyTurn, type Carril } from "./turn-classifier";
 export {
-  assertOutputInvariants,
-  type OutputInvariantContext,
-  type InvariantReport,
-  type InvariantViolation,
-  type InvariantId,
-} from "./invariants";
+  enforceCommandments,
+  type CommandmentContext,
+  type CommandmentReport,
+  type CommandmentViolation,
+  type CommandmentId,
+} from "./commandments";
 export {
   parseModelOutput,
   ModelOutputSchema,

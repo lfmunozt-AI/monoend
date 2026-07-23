@@ -138,6 +138,12 @@ const REFERENCE_MARKERS = [
   "orientativa",
   "habitualmente",
   "tipicamente",
+  // MANDAMIENTO 6 — generaliza la tercera vía a cualquier campo (no solo TAE):
+  // un valor de EJEMPLO declarado como tal es el mismo puente de conocimiento.
+  "como ejemplo",
+  "a modo de ejemplo",
+  "ilustrativo",
+  "ilustrativa",
   // PT
   "o padrao",
   "costuma",
@@ -145,6 +151,9 @@ const REFERENCE_MARKERS = [
   "a titulo indicativo",
   "indicativo",
   "geralmente",
+  "como exemplo",
+  "a titulo de exemplo",
+  "ilustrativo",
   // EN
   "as a reference",
   "for reference",
@@ -156,6 +165,9 @@ const REFERENCE_MARKERS = [
   "generally",
   "on average",
   "ballpark",
+  "as an example",
+  "for example",
+  "illustrative",
 ];
 
 /** ¿La frase presenta la cifra como estándar/orientación, no como diagnóstico? */
@@ -172,6 +184,24 @@ export function hasReferenceMarker(sentence: string): boolean {
 // porque ni "ingreso" ni "gastos" tenían concepto — caían a la heurística
 // genérica y 500 (el sobrante) coincidía por c0. Mismo patrón del defecto C.
 const CONCEPT_KEYWORDS: [RegExp, string][] = [
+  // FIX B — derivadas de decisión (QA real): el modelo intentaba calcular
+  // estas cifras él mismo y caía en la trampa (la brecha real ~247€ se
+  // reescribía al ingreso; la suma de cuota+déficit se reescribía a la cuota).
+  // Ahora el motor las calcula y expone como conceptos de primera clase.
+  // VAN PRIMERO en la lista a propósito: `nearestConceptInSentence` desempata
+  // por orden de aparición cuando dos matches terminan en la MISMA posición
+  // ("la suma de cuota y déficit es X" — la frase completa de esfuerzo_total
+  // y la palabra suelta "déficit" terminan las dos en "déficit"). La frase
+  // compuesta, más específica, debe ganar el empate sobre la palabra suelta.
+  [/\b(brecha|gap|falta|diferencia)\b/, "brecha"],
+  // "esfuerzo total" es el término canónico (ver prompt); "la suma de cuota y
+  // déficit" es la frase NATURAL que causó el bug real de QA ("la suma de
+  // cuota y déficit es 1609,25" reescrita a la cuota) — se reconoce igual,
+  // sin depender de que el modelo adopte la terminología nueva.
+  [/esfuerzo total|total effort|suma de (?:la )?cuota y (?:el )?deficit|sum of (?:the )?(?:payment|installment) and deficit/, "esfuerzo_total"],
+  [/aumentar ingresos|aumento necesario|\bincrease\b/, "aumento_necesario"],
+  [/recorte necesario|\breducir\b|cut needed/, "recorte_necesario"],
+  [/ahorro necesario|necesitas ahorrar|savings needed|need to save/, "ahorro_necesario_mensual"],
   [/\b(cuota|cuotas|mensualidad|mensualidade|prestacao|prestacoes|payment|installment)\b/, "cuota"],
   [/\b(sobrante|excedente|surplus|left ?over)\b/, "sobrante"],
   [/\b(recorte|corte|cut)\b/, "recorte"],

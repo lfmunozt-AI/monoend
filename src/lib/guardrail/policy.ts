@@ -29,6 +29,21 @@ import type { Carril } from "./turn-classifier";
 
 export type PolicyMode = "mvp" | "passthrough";
 
+/**
+ * REGISTRO DE MUTACIONES — cada capa que reescribe texto (grounding, policy,
+ * validator, resolveClosing) añade una entrada aquí. Habilita el diagnóstico de
+ * capa en `enforceCommandments`: ante una violación puede señalar QUIÉN la
+ * causó ("Mandamiento 8 violado — capa: grounding, regla: posicional_monto,
+ * antes: '1', después: '7000'") y, cuando la mutación es la causa, REVERTIR al
+ * valor original en vez de adivinar una corrección nueva.
+ */
+export interface Mutation {
+  capa: string;
+  regla: string;
+  antes: string;
+  despues: string;
+}
+
 export interface PolicyOptions {
   /** "mvp" (reescribe la frase) | "passthrough" (solo loguea). Por defecto "mvp". */
   mode?: PolicyMode;
@@ -39,6 +54,8 @@ export interface PolicyOptions {
   dataHint?: string;
   /** Idioma del cierre. Si no se da, se infiere de la respuesta del modelo. */
   idioma?: Language;
+  /** Si se da, cada corrección en sitio (monto/plazo) se registra aquí. */
+  mutations?: Mutation[];
 }
 
 /** Entrada de log: SOLO metadatos. Nunca el texto del usuario ni la respuesta. */
@@ -665,6 +682,7 @@ function esNum(n: number): string {
 function removeBlockedSentences(
   text: string,
   blocked: BlockedFigure[],
+  mutations?: Mutation[],
 ): { texto: string; eliminadas: number; corregidas: number } {
   const segments = segmentSentences(text);
   const kept: string[] = [];
@@ -688,8 +706,11 @@ function removeBlockedSentences(
     let s = seg.text;
     for (const b of enFrase.sort((a, c) => c.start - a.start)) {
       const rel = b.start - seg.start;
-      s = s.slice(0, rel) + esNum(b.correccion as number) + s.slice(rel + (b.end - b.start));
+      const antes = s.slice(rel, rel + (b.end - b.start));
+      const despues = esNum(b.correccion as number);
+      s = s.slice(0, rel) + despues + s.slice(rel + (b.end - b.start));
       corregidas++;
+      mutations?.push({ capa: "grounding", regla: b.motivo, antes, despues });
     }
     kept.push(s);
   }
@@ -739,7 +760,7 @@ export function applyPolicy(
   // MODO MVP (v2): corrige las cifras de concepto conocido en su sitio y elimina
   // las frases con montos inventados. El cierre (si falta tras eliminar) lo
   // decide la capa 8, nunca esta.
-  const { texto, eliminadas, corregidas } = removeBlockedSentences(modelResponse, blocked);
+  const { texto, eliminadas, corregidas } = removeBlockedSentences(modelResponse, blocked, options.mutations);
 
   const texto_final = eliminadas === 0
     ? (corregidas > 0 ? texto : modelResponse)

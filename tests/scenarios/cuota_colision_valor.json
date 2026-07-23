@@ -2,7 +2,7 @@
   "name": "cuota_colision_valor",
   "playbook": "PB3",
   "language": "es",
-  "description": "REGRESIÓN C. El modelo redondea la cuota a '1.000', que colisiona con el sobrante real (1000 €). validate.ts prueba (c0) coincidencia exacta con `valores` ANTES de (c1) el grounding semántico por `conceptos`, así que la cifra se aprueba como cálculo verificado y el guardarraíl NO bloquea — justo el caso que el comentario de (c1) dice impedir. Solo expectConcept lo caza.",
+  "description": "REGRESIÓN C. El modelo redondea la cuota a '1.000', que colisiona con el sobrante real (1000 €). validate.ts prueba (c0) coincidencia exacta con `valores` ANTES de (c1) el grounding semántico por `conceptos`, así que la cifra se aprueba como cálculo verificado y el guardarraíl NO bloquea — justo el caso que el comentario de (c1) dice impedir. FIX A (QA real): 'cuota' ya no es un patrón posicional inequívoco (solo monto/plazo lo son) — la frase con la cuota mal citada se ELIMINA en vez de corregirse en sitio; el sobrante, en su propia frase, sobrevive.",
   "turns": [
     {
       "user": "Gano 2500 euros al mes y mis gastos son 1500. Quiero financiar un carro de 30000 a 36 meses.",
@@ -12,8 +12,8 @@
     {
       "user": "El banco me ofrece 9%",
       "fixtureResponse": "La cuota rondaría los 1.000 €/mes. Tu sobrante mensual es de 1000 €. ¿Confirmamos ese plan?",
-      "expectConcept": { "cuota": { "value": 954, "tol": 1 } },
-      "expectNotContains": ["1.000"],
+      "expectNotContains": ["1.000", "954", "953"],
+      "expectContains": ["Tu sobrante mensual es de 1000", "¿Confirmamos ese plan?"],
       "expectBlocked": true
     }
   ]

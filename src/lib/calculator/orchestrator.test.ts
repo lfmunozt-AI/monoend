@@ -212,12 +212,14 @@ test("BUG 2: sobrante positivo → NUNCA aparece deficit_mensual", () => {
   assert.equal(conceptos.deficit, undefined);
 });
 
-test("BUG 2: grounding — 'gastas 400 de más' (déficit real 1000) se BLOQUEA y corrige a 1000", () => {
+test("BUG 2: grounding — 'gastas 400 de más' (déficit real 1000) se BLOQUEA, SIN corrección (FIX A)", () => {
   const cif = { valores: [10000, 11000, 1000], conceptos: { ingreso: 10000, gastos: 11000, deficit: 1000 } };
   const r = validateGrounding("Estás en déficit: gastas 400 € de más de lo que ingresas.", [], cif);
   const bloq = r.cifras_bloqueadas.find((c) => c.valor === 400);
   assert.ok(bloq, "400 en posición de déficit se bloquea");
-  assert.equal(bloq?.correccion, 1000);
+  // FIX A: "déficit" no es un patrón posicional inequívoco (monto/plazo) —
+  // ya no se corrige en sitio, se elimina la frase.
+  assert.equal(bloq?.correccion, undefined);
 });
 
 test("BUG 2: grounding — 'tu déficit mensual es de 1000 €' (correcto) → APROBADA", () => {
@@ -225,4 +227,74 @@ test("BUG 2: grounding — 'tu déficit mensual es de 1000 €' (correcto) → A
   const r = validateGrounding("Tu déficit mensual es de 1000 €.", [], cif);
   assert.equal(r.cifras_bloqueadas.length, 0);
   assert.ok(r.cifras_aprobadas.some((c) => c.valor === 1000));
+});
+
+// ── FIX B — derivadas de decisión (caso real QA: cuota 746,55, sobrante 500) ──
+test("FIX B: caso real — cuota 746,55 − sobrante 500 → brecha_mensual 246,55, aprobada", () => {
+  const s = mergeScenario(undefined, {
+    ingreso_mensual: 2500,
+    gastos_mensuales: 2000,
+    credito: { monto: 30000, plazo_meses: 48, tae_pct: 9, tae_es_referencia: false },
+  });
+  const { bloque, conceptos } = buildScenarioContext(s, "");
+  assert.ok(bloque.includes("brecha_mensual: 246,55"), `bloque:\n${bloque}`);
+  assert.equal(conceptos.cuota, 746.55);
+  assert.equal(conceptos.brecha, 246.55);
+  assert.equal(conceptos.aumento_necesario, 246.55, "alias de brecha para 'aumentar ingresos'");
+  assert.equal(conceptos.recorte_necesario, 246.55, "alias de brecha para 'recorte necesario'");
+
+  const ok = validateGrounding("Te falta una brecha de 246,55 € al mes para cubrir la cuota.", [], { valores: [], conceptos });
+  assert.equal(ok.cifras_bloqueadas.length, 0);
+  assert.ok(ok.cifras_aprobadas.some((c) => c.valor === 246.55));
+});
+
+test("FIX B: brecha citada mal (999 en vez de 246,55) → BLOQUEADA", () => {
+  const s = mergeScenario(undefined, {
+    ingreso_mensual: 2500,
+    gastos_mensuales: 2000,
+    credito: { monto: 30000, plazo_meses: 48, tae_pct: 9, tae_es_referencia: false },
+  });
+  const { conceptos } = buildScenarioContext(s, "");
+  const r = validateGrounding("Te falta una brecha de 999 € al mes para cubrir la cuota.", [], { valores: [], conceptos });
+  const bloq = r.cifras_bloqueadas.find((c) => c.valor === 999);
+  assert.ok(bloq, "999 no coincide con la brecha real (246,55)");
+  assert.equal(bloq?.correccion, undefined, "FIX A: se elimina, no se sustituye");
+});
+
+test("FIX B: sin brecha (sobrante cubre la cuota) → brecha_mensual NUNCA aparece", () => {
+  const s = mergeScenario(undefined, {
+    ingreso_mensual: 5000,
+    gastos_mensuales: 1000,
+    credito: { monto: 10000, plazo_meses: 48, tae_pct: 9, tae_es_referencia: false },
+  });
+  const { bloque, conceptos } = buildScenarioContext(s, "");
+  assert.ok(!bloque.includes("brecha_mensual"), `bloque:\n${bloque}`);
+  assert.equal(conceptos.brecha, undefined);
+});
+
+test("FIX B: esfuerzo_total = cuota + déficit cuando hay déficit real", () => {
+  const s = mergeScenario(undefined, {
+    ingreso_mensual: 2000,
+    gastos_mensuales: 2500, // déficit 500
+    credito: { monto: 30000, plazo_meses: 48, tae_pct: 9, tae_es_referencia: false },
+  });
+  const { bloque, conceptos } = buildScenarioContext(s, "");
+  assert.equal(conceptos.deficit, 500);
+  const esfuerzoEsperado = Math.round((conceptos.cuota + 500) * 100) / 100;
+  assert.ok(bloque.includes(`esfuerzo_total: ${String(esfuerzoEsperado).replace(".", ",")}`), `bloque:\n${bloque}`);
+  assert.equal(conceptos.esfuerzo_total, esfuerzoEsperado);
+
+  const r = validateGrounding(
+    `La suma de cuota y déficit es ${String(esfuerzoEsperado).replace(".", ",")} €.`,
+    [],
+    { valores: [], conceptos },
+  );
+  assert.equal(r.cifras_bloqueadas.length, 0, "esfuerzo_total correcto se aprueba");
+});
+
+test("FIX B: ahorro_necesario_mensual = meta.monto / meta.plazo_meses", () => {
+  const s = mergeScenario(undefined, { meta: { titulo: "viaje", monto: 6000, plazo_meses: 12 } });
+  const { bloque, conceptos } = buildScenarioContext(s, "");
+  assert.ok(bloque.includes("ahorro_necesario_mensual: 500"), `bloque:\n${bloque}`);
+  assert.equal(conceptos.ahorro_necesario_mensual, 500);
 });

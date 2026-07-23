@@ -3,7 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { extractScenarioDelta, mergeScenario } from "./scenario";
+import { extractScenarioDelta, mergeScenario, registrarPropuestaPendiente, esConfirmacionCorta, esPropuestaDePlan, esRespuestaRepetida } from "./scenario";
 
 test("merge: TAE 9% real sobre un crédito previo → recalcula tae_es_referencia", () => {
   const prev = mergeScenario(
@@ -219,4 +219,84 @@ test("persistencia: ingreso fijado en T1 sobrevive intacto varios turnos sin men
   s = mergeScenario(s, extractScenarioDelta("Mi meta es juntar 12000 en 24 meses."));
   s = mergeScenario(s, extractScenarioDelta("¿Cuánto es mi capacidad de ahorro anual?"));
   assert.equal(s.ingreso_mensual, 3000, "ningún turno posterior lo tocó ni lo borró");
+});
+
+// ── FIX C — PB7 ejecución tras confirmación (bug real: 5 turnos idénticos) ───
+
+test("esPropuestaDePlan: '¿quieres que te proyecte el plan?' → true", () => {
+  assert.equal(esPropuestaDePlan("Con esto cuadra el número. ¿Quieres que te proyecte el plan?"), true);
+});
+
+test("esPropuestaDePlan: '¿Confirmamos ese plan?' → true; pregunta de DATO → false", () => {
+  assert.equal(esPropuestaDePlan("Tu sobrante es de 500 €. ¿Confirmamos ese plan?"), true);
+  assert.equal(esPropuestaDePlan("¿Cuál es tu ingreso neto mensual?"), false, "pedir un dato no es proponer un plan");
+});
+
+test("registrarPropuestaPendiente: cierre de propuesta → queda pendiente, plan_confirmado se apaga", () => {
+  const s = mergeScenario(undefined, { ingreso_mensual: 3000, gastos_mensuales: 2000 });
+  const conPropuesta = registrarPropuestaPendiente(s, "Tu sobrante es de 1000 €. ¿Quieres que te proyecte el plan?");
+  assert.ok(conPropuesta.propuesta_pendiente, "queda registrada la propuesta");
+  assert.equal(conPropuesta.propuesta_pendiente?.tipo, "general");
+  assert.equal(conPropuesta.plan_confirmado, false);
+});
+
+test("registrarPropuestaPendiente: cierre que NO propone plan → escenario intacto", () => {
+  const s = mergeScenario(undefined, { ingreso_mensual: 3000 });
+  const out = registrarPropuestaPendiente(s, "¿Cuáles son tus gastos mensuales?");
+  assert.equal(out, s, "sin propuesta, no se toca el escenario");
+});
+
+test("esConfirmacionCorta: 'sí'/'ok'/'dale'/'arrancamos'/'sim'/'yes' → true; frase larga → false", () => {
+  for (const msg of ["sí", "Sí!", "ok", "vale", "dale", "arrancamos", "sim", "yes", "yep"]) {
+    assert.equal(esConfirmacionCorta(msg), true, `"${msg}" debía ser confirmación corta`);
+  }
+  assert.equal(esConfirmacionCorta("sí, pero antes dime cuánto es la cuota"), false, "no es una confirmación pura");
+});
+
+test("FIX C: confirmación tras propuesta pendiente → plan_confirmado=true, pendiente se limpia", () => {
+  let s = mergeScenario(undefined, { ingreso_mensual: 2500, gastos_mensuales: 1500 });
+  s = registrarPropuestaPendiente(s, "Tu sobrante es de 1000 €. ¿Quieres que te proyecte el plan?");
+  assert.ok(s.propuesta_pendiente);
+
+  s = mergeScenario(s, extractScenarioDelta("sí", "es", s));
+  assert.equal(s.plan_confirmado, true, "PB7 debe ejecutar, no re-diagnosticar");
+  assert.equal(s.propuesta_pendiente, undefined, "la pendiente se limpia al confirmarse");
+});
+
+test("FIX C: 'sí' SIN propuesta pendiente → no marca nada", () => {
+  const s = mergeScenario(undefined, { ingreso_mensual: 2500, gastos_mensuales: 1500 });
+  assert.equal(s.propuesta_pendiente, undefined);
+
+  const s2 = mergeScenario(s, extractScenarioDelta("sí", "es", s));
+  assert.equal(s2.plan_confirmado, undefined, "sin propuesta pendiente, un 'sí' suelto no dispara nada");
+});
+
+test("FIX C: una propuesta NUEVA siempre exige una confirmación NUEVA", () => {
+  let s = mergeScenario(undefined, { ingreso_mensual: 2500, gastos_mensuales: 1500 });
+  s = registrarPropuestaPendiente(s, "¿Confirmamos ese plan?");
+  s = mergeScenario(s, extractScenarioDelta("sí", "es", s));
+  assert.equal(s.plan_confirmado, true);
+
+  // El siguiente turno propone un plan DISTINTO (p. ej. el sprint del primer
+  // hito): plan_confirmado se apaga hasta la nueva confirmación.
+  s = registrarPropuestaPendiente(s, "Arrancamos. Primer hito: recortar 100 € en 30 días. ¿Registramos?");
+  assert.equal(s.plan_confirmado, false);
+  assert.ok(s.propuesta_pendiente);
+});
+
+// ── FIX C — anti-repetición (bug real: 5 turnos con la misma respuesta) ──────
+test("esRespuestaRepetida: texto casi idéntico (≥90%) → true", () => {
+  const anterior = "Con tus datos, ¿quieres que te proyecte el plan completo?";
+  const actual = "Con tus datos, ¿quieres que te proyecte el plan completo?";
+  assert.equal(esRespuestaRepetida(actual, anterior), true);
+});
+
+test("esRespuestaRepetida: texto claramente distinto → false", () => {
+  const anterior = "Con tus datos, ¿quieres que te proyecte el plan completo?";
+  const actual = "Arrancamos. Primer hito: recorta 100 € en ocio antes del día 30. ¿Registramos el acuerdo?";
+  assert.equal(esRespuestaRepetida(actual, anterior), false);
+});
+
+test("esRespuestaRepetida: sin respuesta anterior → false (nada que comparar)", () => {
+  assert.equal(esRespuestaRepetida("Cualquier cosa.", undefined), false);
 });
