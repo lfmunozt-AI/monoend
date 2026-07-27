@@ -11,7 +11,7 @@ const DATA_ITEMS = [
   },
   {
     type: 'Transacciones financieras',
-    reason: 'Ingresos, gastos y categorías — el núcleo de tu análisis de soberanía financiera.',
+    reason: 'Ingresos, gastos y categorías — el núcleo de tu análisis de dominio financiero.',
   },
   {
     type: 'Perfil fiscal',

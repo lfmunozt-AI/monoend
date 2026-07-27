@@ -107,12 +107,12 @@ export function calcularICA(
 /**
  * Determina el nivel cualitativo del score ICA.
  * @param score - Score ICA 0–100
- * @returns Nivel: 'ceguera' | 'vision' | 'soberania'
+ * @returns Nivel: 'ceguera' | 'vision' | 'dominio'
  */
-export function getICALevel(score: number): 'ceguera' | 'vision' | 'soberania' {
+export function getICALevel(score: number): 'ceguera' | 'vision' | 'dominio' {
   if (score <= 30) return 'ceguera';
   if (score <= 70) return 'vision';
-  return 'soberania';
+  return 'dominio';
 }
 
 /**
@@ -123,5 +123,5 @@ export function getICALevel(score: number): 'ceguera' | 'vision' | 'soberania' {
 export function getICAColor(score: number): '#E85C5C' | '#E8A93C' | '#C9A84C' {
   if (score <= 30) return '#E85C5C'; // ceguera
   if (score <= 70) return '#E8A93C'; // visión
-  return '#C9A84C';                  // soberanía
+  return '#C9A84C';                  // dominio
 }
