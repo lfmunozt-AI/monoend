@@ -1,0 +1,67 @@
+// TELEMETRÍA DE RESPUESTAS — compuerta G1b (piloto 6 semanas).
+//
+// Captura, por turno del chat, lo necesario para medir por telemetría (no por
+// reporte del usuario) si el texto publicado contradice al calculador o cita
+// cifras no trazables. AG07 construye la revisión nocturna sobre
+// `response_telemetry` (migración 011).
+//
+// Contrato: fire-and-forget, NUNCA lanza — un fallo de telemetría no puede
+// bloquear ni degradar la respuesta al usuario.
+
+import type { SupabaseClient } from '@supabase/supabase-js'
+import type { Mutation, CommandmentViolation, Carril } from '@/lib/guardrail'
+
+export interface ResponseTelemetryPayload {
+  userId: string
+  conversationId: string | null
+  messageId: string | null
+  carril: Carril | null
+  model: string | null
+  tokensUsed: number | null
+  toolCallUsed: boolean | null
+  latencyGenerationMs: number | null
+  latencyValidationMs: number | null
+  latencyTotalMs: number | null
+  calculatorConceptos: Record<string, number> | null
+  scenarioMissing: string[] | null
+  responseRaw: string | null
+  responseFinal: string | null
+  mutations: Mutation[] | null
+  commandmentViolations: CommandmentViolation[] | null
+  guardrailIntervened: boolean | null
+}
+
+/**
+ * Inserta una fila de telemetría de respuesta. Nunca lanza: si falla, solo
+ * hace console.warn — la conversación ya se persistió y no debe verse
+ * afectada por esto.
+ */
+export async function logResponseTelemetry(
+  admin: SupabaseClient,
+  payload: ResponseTelemetryPayload,
+): Promise<void> {
+  try {
+    const { error } = await admin.from('response_telemetry').insert({
+      user_id: payload.userId,
+      conversation_id: payload.conversationId,
+      message_id: payload.messageId,
+      carril: payload.carril,
+      model: payload.model,
+      tokens_used: payload.tokensUsed,
+      tool_call_used: payload.toolCallUsed,
+      latency_generation_ms: payload.latencyGenerationMs,
+      latency_validation_ms: payload.latencyValidationMs,
+      latency_total_ms: payload.latencyTotalMs,
+      calculator_conceptos: payload.calculatorConceptos,
+      scenario_missing: payload.scenarioMissing,
+      response_raw: payload.responseRaw,
+      response_final: payload.responseFinal,
+      mutations: payload.mutations,
+      commandment_violations: payload.commandmentViolations,
+      guardrail_intervened: payload.guardrailIntervened,
+    })
+    if (error) throw new Error(error.message)
+  } catch (err) {
+    console.warn('[telemetry] logResponseTelemetry falló (no bloquea el chat):', err)
+  }
+}

@@ -30,6 +30,7 @@ import {
 } from '@/lib/llm/output-validator'
 import { getICAScore } from '@/lib/ica-service'
 import { getICALevel } from '@/lib/ica'
+import { logResponseTelemetry } from '@/lib/telemetry'
 import { NextResponse } from 'next/server'
 
 const RATE_LIMIT_FREE = 20
@@ -55,6 +56,9 @@ const ADMIN_USER_IDS = (process.env.ADMIN_USER_IDS ?? '')
   .filter(Boolean)
 
 export async function POST(request: Request) {
+  // TELEMETRÍA G1b — marca de inicio del route, para latency_total_ms.
+  const routeStart = Date.now()
+
   // ── Auth ────────────────────────────────────────────────────────────────────
   const supabase = await createClient()
   const { data: { user }, error: authError } = await supabase.auth.getUser()
@@ -304,6 +308,10 @@ export async function POST(request: Request) {
   // BONUS de latencia/coste (Pieza 2): en META no hay nada financiero que
   // extraer — una sola llamada, sin tool, con presupuesto de tokens de
   // respuesta completa (no de mero tool_call).
+  // TELEMETRÍA G1b — marca de inicio del bloque de generación (LLAMADA 1 en
+  // adelante, incluida la LLAMADA 2 y el reintento anti-repetición FIX C).
+  const generationStart = Date.now()
+
   const call1 = await callLLMWithTools(
     allMessages,
     systemPrompt1,
@@ -388,6 +396,13 @@ export async function POST(request: Request) {
     }
   }
 
+  // TELEMETRÍA G1b — fin del bloque de generación / respuesta cruda del LLM
+  // (pre-runGuardrail). Se guarda aparte porque `llmResult.content` se
+  // reescribe más abajo en el REINTENTO ÚNICO ACOTADO.
+  const generationEnd = Date.now()
+  let latencyGenerationMs = generationEnd - generationStart
+  let responseRawForTelemetry = llmResult.content
+
   // ── Guardarraíl de cifras (código externo al modelo) ─────────────────────────
   // Pieza 2: la jaula de cifras SOLO aplica a la parte financiera del turno.
   // META no tiene nada que fundamentar (charla trivial, identidad, gracias):
@@ -411,6 +426,10 @@ export async function POST(request: Request) {
     // entrada aquí. enforceCommandments (Mandamiento 8) lo usa para identificar
     // la capa culpable de una violación y revertir en vez de adivinar.
     const mutations: Mutation[] = []
+    // TELEMETRÍA G1b — `guardrail.bloqueado` es true cuando el grounding ELIMINÓ
+    // una frase entera por un monto inventado sin respaldo (a diferencia de una
+    // corrección en sitio, esa eliminación no dejaría rastro en `mutations`).
+    let guardrailBloqueado = false
 
     if (carril === 'META') {
       finalContent = rawContent
@@ -433,6 +452,7 @@ export async function POST(request: Request) {
       finalContent = guardrail.texto_final
       injectionDetected = guardrail.injection.detected
       injectionPatterns = guardrail.injection.patterns
+      guardrailBloqueado = guardrail.bloqueado
 
       // PIEZA 4 — simulación: la cuota simulada (TAE de referencia) nunca puede
       // afirmar que "no incluye intereses" (sí los incluye) y siempre debe dejar
@@ -562,10 +582,13 @@ export async function POST(request: Request) {
       }))
     }
 
-    return { finalContent, commandments }
+    return { finalContent, commandments, mutations, guardrailBloqueado }
   }
 
+  // TELEMETRÍA G1b — capas de validación: guardrail + validator + Commandments.
+  const validationStart = Date.now()
   let safety = await runSafetyPipeline(llmResult.content)
+  let latencyValidationMs = Date.now() - validationStart
   let finalContent = safety.finalContent
 
   // REINTENTO ÚNICO ACOTADO — cuando los Mandamientos vacían la respuesta
@@ -591,16 +614,21 @@ export async function POST(request: Request) {
     const instruccionCorrectiva =
       'Tu respuesta anterior citó una cifra de decisión incorrecta y fue eliminada por completo. ' +
       `Usa EXACTAMENTE estos valores ya calculados (no los recalcules, no inventes otros): ${cifrasCorrectas}.`
+    const boundedRetryGenStart = Date.now()
     const retry = await callLLMWithTools(
       respondingMessages,
       `${respondingSystemPrompt}\n\n${instruccionCorrectiva}`,
       [registrarDatosFinancieros],
       { maxTokens: 500, toolChoice: 'none' },
     )
+    latencyGenerationMs += Date.now() - boundedRetryGenStart
     if (retry.content) {
+      const boundedRetryValStart = Date.now()
       safety = await runSafetyPipeline(retry.content)
+      latencyValidationMs += Date.now() - boundedRetryValStart
       finalContent = safety.finalContent
       llmResult = { content: retry.content, tokensUsed: llmResult.tokensUsed + retry.tokensUsed, model: retry.model }
+      responseRawForTelemetry = retry.content
     }
     if (finalContent.trim() === '') {
       finalContent = ensureSubstance('', { lang: userLang, missing: scenario.missing })
@@ -620,7 +648,7 @@ export async function POST(request: Request) {
       role: 'assistant',
       content: finalContent,
       tokens_used: llmResult.tokensUsed,
-    }),
+    }).select('id').single(),
     admin.from('conversations')
       .update({ updated_at: new Date().toISOString(), scenario_state: scenarioAPersistir })
       .eq('id', convId),
@@ -649,6 +677,32 @@ export async function POST(request: Request) {
   } catch (err) {
     console.error('[chat] actualizar ICA (no crítico):', err)
   }
+
+  // TELEMETRÍA G1b — compuerta medible: registro de mutaciones + violaciones
+  // de mandamientos de este turno. `await` deliberado: en serverless el
+  // trabajo post-response no está garantizado, así que se espera antes del
+  // return (logResponseTelemetry nunca lanza — fire-and-forget con try/catch).
+  const messageId = (assistantMsgResult.data as { id: string } | null)?.id ?? null
+  await logResponseTelemetry(admin, {
+    userId: user.id,
+    conversationId: convId,
+    messageId,
+    carril,
+    model: llmResult.model,
+    tokensUsed: llmResult.tokensUsed,
+    toolCallUsed: usedTool,
+    latencyGenerationMs,
+    latencyValidationMs,
+    latencyTotalMs: Date.now() - routeStart,
+    calculatorConceptos: verified.conceptos,
+    scenarioMissing: scenario.missing,
+    responseRaw: responseRawForTelemetry,
+    responseFinal: finalContent,
+    mutations: safety.mutations,
+    commandmentViolations: safety.commandments.violaciones,
+    guardrailIntervened:
+      safety.mutations.length > 0 || safety.commandments.violaciones.length > 0 || safety.guardrailBloqueado,
+  })
 
   return NextResponse.json({
     response: finalContent,
