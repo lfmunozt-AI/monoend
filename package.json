@@ -11,7 +11,8 @@
     "test:guardrail": "npx tsx src/lib/guardrail/guardrail.test.ts && npx tsx src/lib/guardrail/numbers.test.ts && npx tsx src/lib/guardrail/injection.test.ts && npx tsx src/lib/guardrail/turn-classifier.test.ts && npx tsx src/lib/guardrail/commandments.test.ts",
     "test:calculator": "npx tsx src/lib/calculator/operations.test.ts && npx tsx src/lib/calculator/orchestrator.test.ts && npx tsx src/lib/calculator/expenses.test.ts && npx tsx src/lib/calculator/scenario.test.ts && npx tsx src/lib/calculator/tools.test.ts",
     "test:regression": "npx tsx scripts/regression-harness.ts",
-    "smoke:db": "npx tsx scripts/smoke-db.ts"
+    "smoke:db": "npx tsx scripts/smoke-db.ts",
+    "telemetry:review": "npx tsx scripts/telemetry-review.ts"
   },
   "dependencies": {
     "@stripe/stripe-js": "^9.4.0",
