@@ -426,6 +426,10 @@ export async function POST(request: Request) {
     // entrada aquí. enforceCommandments (Mandamiento 8) lo usa para identificar
     // la capa culpable de una violación y revertir en vez de adivinar.
     const mutations: Mutation[] = []
+    // TELEMETRÍA G1b — `guardrail.bloqueado` es true cuando el grounding ELIMINÓ
+    // una frase entera por un monto inventado sin respaldo (a diferencia de una
+    // corrección en sitio, esa eliminación no dejaría rastro en `mutations`).
+    let guardrailBloqueado = false
 
     if (carril === 'META') {
       finalContent = rawContent
@@ -448,6 +452,7 @@ export async function POST(request: Request) {
       finalContent = guardrail.texto_final
       injectionDetected = guardrail.injection.detected
       injectionPatterns = guardrail.injection.patterns
+      guardrailBloqueado = guardrail.bloqueado
 
       // PIEZA 4 — simulación: la cuota simulada (TAE de referencia) nunca puede
       // afirmar que "no incluye intereses" (sí los incluye) y siempre debe dejar
@@ -577,7 +582,7 @@ export async function POST(request: Request) {
       }))
     }
 
-    return { finalContent, commandments, mutations }
+    return { finalContent, commandments, mutations, guardrailBloqueado }
   }
 
   // TELEMETRÍA G1b — capas de validación: guardrail + validator + Commandments.
@@ -695,7 +700,8 @@ export async function POST(request: Request) {
     responseFinal: finalContent,
     mutations: safety.mutations,
     commandmentViolations: safety.commandments.violaciones,
-    guardrailIntervened: safety.mutations.length > 0 || safety.commandments.violaciones.length > 0,
+    guardrailIntervened:
+      safety.mutations.length > 0 || safety.commandments.violaciones.length > 0 || safety.guardrailBloqueado,
   })
 
   return NextResponse.json({
