@@ -12,7 +12,8 @@
     "test:calculator": "npx tsx src/lib/calculator/operations.test.ts && npx tsx src/lib/calculator/orchestrator.test.ts && npx tsx src/lib/calculator/expenses.test.ts && npx tsx src/lib/calculator/scenario.test.ts && npx tsx src/lib/calculator/tools.test.ts",
     "test:regression": "npx tsx scripts/regression-harness.ts",
     "smoke:db": "npx tsx scripts/smoke-db.ts",
-    "telemetry:review": "npx tsx scripts/telemetry-review.ts"
+    "telemetry:review": "npx tsx scripts/telemetry-review.ts",
+    "telemetry:purge": "npx tsx scripts/telemetry-purge.ts"
   },
   "dependencies": {
     "@stripe/stripe-js": "^9.4.0",

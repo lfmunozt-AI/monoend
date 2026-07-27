@@ -54,6 +54,13 @@ export async function logResponseTelemetry(
       latency_total_ms: payload.latencyTotalMs,
       calculator_conceptos: payload.calculatorConceptos,
       scenario_missing: payload.scenarioMissing,
+      // TODO(post-piloto, ver docs/TELEMETRIA_RETENCION.md § Estrategia
+      // post-piloto): a esta escala (10 usuarios) se captura el 100% del
+      // texto y la purga de 30 días basta. Con más usuarios, punto de
+      // extensión: capturar response_raw/response_final solo en un 5-10% de
+      // muestra + el 100% de los turnos con guardrailIntervened===true o
+      // commandmentViolations.length>0 — el resto entra como NULL desde el
+      // insert (no hace falta esperar a la purga de 30 días).
       response_raw: payload.responseRaw,
       response_final: payload.responseFinal,
       mutations: payload.mutations,
