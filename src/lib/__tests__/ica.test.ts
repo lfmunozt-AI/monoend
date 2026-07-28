@@ -7,6 +7,7 @@ import {
   calcularPuntosEvento,
   calcularICA,
   getICALevel,
+  getICALabel,
   getICAColor,
   type Transaccion,
   type Perfil,
@@ -54,12 +55,24 @@ test('evento_desconocido → 0', () => assertEqual(calcularPuntosEvento('evento_
 
 console.log('\ngetICALevel');
 
-test('score 0 → ceguera', () => assertEqual(getICALevel(0), 'ceguera'));
-test('score 30 → ceguera', () => assertEqual(getICALevel(30), 'ceguera'));
-test('score 31 → vision', () => assertEqual(getICALevel(31), 'vision'));
-test('score 70 → vision', () => assertEqual(getICALevel(70), 'vision'));
-test('score 71 → dominio', () => assertEqual(getICALevel(71), 'dominio'));
-test('score 100 → dominio', () => assertEqual(getICALevel(100), 'dominio'));
+test('score 0 → conocimiento_inicial', () => assertEqual(getICALevel(0), 'conocimiento_inicial'));
+test('score 30 → conocimiento_inicial', () => assertEqual(getICALevel(30), 'conocimiento_inicial'));
+test('score 31 → conocimiento_parcial', () => assertEqual(getICALevel(31), 'conocimiento_parcial'));
+test('score 70 → conocimiento_parcial', () => assertEqual(getICALevel(70), 'conocimiento_parcial'));
+test('score 71 → conocimiento_pleno', () => assertEqual(getICALevel(71), 'conocimiento_pleno'));
+test('score 100 → conocimiento_pleno', () => assertEqual(getICALevel(100), 'conocimiento_pleno'));
+
+// ─── getICALabel ─────────────────────────────────────────────────────────────
+
+console.log('\ngetICALabel');
+
+test('es · score 0 → "Te conozco poco"', () => assertEqual(getICALabel(0, 'es'), 'Te conozco poco'));
+test('es · score 50 → "Te voy conociendo"', () => assertEqual(getICALabel(50, 'es'), 'Te voy conociendo'));
+test('es · score 100 → "Te conozco a fondo"', () => assertEqual(getICALabel(100, 'es'), 'Te conozco a fondo'));
+test('pt · score 0 → "Conheço-te pouco"', () => assertEqual(getICALabel(0, 'pt'), 'Conheço-te pouco'));
+test('pt · score 100 → "Conheço-te a fundo"', () => assertEqual(getICALabel(100, 'pt'), 'Conheço-te a fundo'));
+test('en · score 0 → "I barely know you"', () => assertEqual(getICALabel(0, 'en'), 'I barely know you'));
+test('en · score 100 → "I know you well"', () => assertEqual(getICALabel(100, 'en'), 'I know you well'));
 
 // ─── getICAColor ─────────────────────────────────────────────────────────────
 

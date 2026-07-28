@@ -4,6 +4,8 @@
  * Voz: analítico, frío, protector, estratégico. Nunca motivacional.
  */
 
+import { getICALevel, type ICALevel } from '@/lib/ica';
+
 export interface ConsigliereContext {
   nombre: string;
   pais: string;
@@ -24,17 +26,11 @@ const IDIOMA_INSTRUCCIONES: Record<ConsigliereContext['idioma'], string> = {
   sv: 'Svara alltid på svenska. Använd exakt finansiell terminologi.',
 };
 
-const ICA_DIAGNOSTICO: Record<string, string> = {
-  ceguera: 'CEGUERA FINANCIERA (ICA 0–30): el usuario opera sin visibilidad real. Prioriza diagnóstico.',
-  vision:  'VISIÓN TÁCTICA (ICA 31–70): el usuario tiene conciencia parcial. Consolida posiciones.',
-  dominio: 'DOMINIO FINANCIERO (ICA 71–100): el usuario está en control. Optimiza y expande.',
+const ICA_DIAGNOSTICO: Record<ICALevel, string> = {
+  conocimiento_inicial: 'CONOCIMIENTO INICIAL (ICA 0–30): el usuario opera sin visibilidad real. Prioriza diagnóstico.',
+  conocimiento_parcial: 'CONOCIMIENTO PARCIAL (ICA 31–70): el usuario tiene conciencia parcial. Consolida posiciones.',
+  conocimiento_pleno:   'CONOCIMIENTO PLENO (ICA 71–100): el usuario está en control. Optimiza y expande.',
 };
-
-function icaNivel(score: number): string {
-  if (score <= 30) return 'ceguera';
-  if (score <= 70) return 'vision';
-  return 'dominio';
-}
 
 /**
  * System prompt base del Consigliere — parte estática.
@@ -204,7 +200,7 @@ Para encender tus motores y calcular tu Índice de Certeza Algorítmica (ICA), d
  */
 export function buildSystemPrompt(context: ConsigliereContext): string {
   const { nombre, pais, idioma, icaScore, ingresosMes, gastosMes, fugas, metas } = context;
-  const nivel = icaNivel(icaScore);
+  const nivel = getICALevel(icaScore);
   const saldo = ingresosMes - gastosMes;
   const tasaFuga = ingresosMes > 0 ? ((gastosMes / ingresosMes) * 100).toFixed(1) : '0.0';
   const instruccionIdioma = IDIOMA_INSTRUCCIONES[idioma] ?? IDIOMA_INSTRUCCIONES['es'];
