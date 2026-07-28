@@ -1,7 +1,7 @@
 /**
  * @module ica
  * Algoritmo ICA — Índice de Certeza Algorítmica.
- * Escala 0–100: 0-30 Ceguera Financiera · 31-70 Visión Táctica · 71-100 Dominio Financiero.
+ * Escala 0–100: 0-30 Conocimiento Inicial · 31-70 Conocimiento Parcial · 71-100 Conocimiento Pleno.
  */
 
 export interface Transaccion {
@@ -104,15 +104,46 @@ export function calcularICA(
   return Math.min(Math.max(score, 0), 100);
 }
 
+export type ICALevel = 'conocimiento_inicial' | 'conocimiento_parcial' | 'conocimiento_pleno';
+
 /**
  * Determina el nivel cualitativo del score ICA.
  * @param score - Score ICA 0–100
- * @returns Nivel: 'ceguera' | 'vision' | 'dominio'
+ * @returns Nivel: 'conocimiento_inicial' | 'conocimiento_parcial' | 'conocimiento_pleno'
  */
-export function getICALevel(score: number): 'ceguera' | 'vision' | 'dominio' {
-  if (score <= 30) return 'ceguera';
-  if (score <= 70) return 'vision';
-  return 'dominio';
+export function getICALevel(score: number): ICALevel {
+  if (score <= 30) return 'conocimiento_inicial';
+  if (score <= 70) return 'conocimiento_parcial';
+  return 'conocimiento_pleno';
+}
+
+/** Etiquetas visibles por nivel e idioma (regla trilingüe del proyecto). */
+const ICA_LABELS: Record<'es' | 'pt' | 'en', Record<ICALevel, string>> = {
+  es: {
+    conocimiento_inicial: 'Te conozco poco',
+    conocimiento_parcial: 'Te voy conociendo',
+    conocimiento_pleno: 'Te conozco a fondo',
+  },
+  pt: {
+    conocimiento_inicial: 'Conheço-te pouco',
+    conocimiento_parcial: 'Vou-te conhecendo',
+    conocimiento_pleno: 'Conheço-te a fundo',
+  },
+  en: {
+    conocimiento_inicial: 'I barely know you',
+    conocimiento_parcial: 'Getting to know you',
+    conocimiento_pleno: 'I know you well',
+  },
+};
+
+/**
+ * Devuelve la etiqueta visible del nivel ICA en el idioma solicitado.
+ * @param score - Score ICA 0–100
+ * @param lang - Idioma de la etiqueta ('es' | 'pt' | 'en')
+ * @returns Etiqueta trilingüe del nivel cualitativo
+ */
+export function getICALabel(score: number, lang: 'es' | 'pt' | 'en'): string {
+  return ICA_LABELS[lang][getICALevel(score)];
 }
 
 /**
@@ -121,7 +152,7 @@ export function getICALevel(score: number): 'ceguera' | 'vision' | 'dominio' {
  * @returns Color hex según nivel (rojo · naranja · dorado)
  */
 export function getICAColor(score: number): '#E85C5C' | '#E8A93C' | '#C9A84C' {
-  if (score <= 30) return '#E85C5C'; // ceguera
-  if (score <= 70) return '#E8A93C'; // visión
-  return '#C9A84C';                  // dominio
+  if (score <= 30) return '#E85C5C'; // conocimiento_inicial
+  if (score <= 70) return '#E8A93C'; // conocimiento_parcial
+  return '#C9A84C';                  // conocimiento_pleno
 }

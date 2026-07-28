@@ -12,7 +12,17 @@
  *  - Integración wrapper `calcularIDF` con cliente mock + fallback forzado
  */
 
-import { calcularIDF, computeFromData, type GoalRow, type TxRow } from '../calculator';
+import {
+  calcularIDF,
+  computeFromData,
+  levelFromScore,
+  getIdfLevelDisplay,
+  buildIdfScoreResponse,
+  mesesRestantes,
+  type GoalRow,
+  type TxRow,
+  type ActiveGoalRow,
+} from '../calculator';
 import type { IDFResult } from '../types';
 
 // ─── Mini runner ─────────────────────────────────────────────────────────────
@@ -476,6 +486,102 @@ function makeMockClient(opts: MockOpts): import('@supabase/supabase-js').Supabas
   };
   return client as unknown as import('@supabase/supabase-js').SupabaseClient;
 }
+
+// ─── levelFromScore — fronteras canónicas del documento ───────────────────────
+
+console.log('\nlevelFromScore — fronteras 25/26 · 50/51 · 75/76');
+
+test('score 25 → bronce', () => assertEqual(levelFromScore(25), 'bronce'));
+test('score 26 → plata', () => assertEqual(levelFromScore(26), 'plata'));
+test('score 50 → plata', () => assertEqual(levelFromScore(50), 'plata'));
+test('score 51 → oro', () => assertEqual(levelFromScore(51), 'oro'));
+test('score 75 → oro', () => assertEqual(levelFromScore(75), 'oro'));
+test('score 76 → diamante', () => assertEqual(levelFromScore(76), 'diamante'));
+
+test('getIdfLevelDisplay(90) → diamante + label + badge', () => {
+  const d = getIdfLevelDisplay(90);
+  assertEqual(d.level, 'diamante');
+  assertEqual(d.label, 'Diamante');
+  assertEqual(d.badge, '💎');
+});
+
+// ─── mesesRestantes ────────────────────────────────────────────────────────────
+
+console.log('\nmesesRestantes');
+
+test('12 meses exactos hacia adelante', () =>
+  assertEqual(mesesRestantes(new Date('2026-01-15T00:00:00Z'), '2027-01-15'), 12));
+test('meta vencida → nunca negativo (clamp a 0)', () =>
+  assertEqual(mesesRestantes(new Date('2026-06-01T00:00:00Z'), '2026-01-01'), 0));
+
+// ─── buildIdfScoreResponse — núcleo puro de /api/idf/score ────────────────────
+
+console.log('\nbuildIdfScoreResponse');
+
+const NOW_RESP = new Date('2026-07-28T00:00:00Z');
+
+function scoredResult(overrides: Partial<IDFResult> = {}): IDFResult {
+  return {
+    score: 62,
+    level: 'oro',
+    components: { progresoMeta: 70, controlFugas: 80, estabilidadBase: 50, velocidadAhorro: 33 },
+    dataAvailable: true,
+    computedAt: NOW_RESP.toISOString(),
+    ...overrides,
+  };
+}
+
+function nullResult(reason = 'no_goal_declared'): IDFResult {
+  return {
+    score: null,
+    level: null,
+    components: { progresoMeta: null, controlFugas: null, estabilidadBase: null, velocidadAhorro: null },
+    dataAvailable: false,
+    computedAt: NOW_RESP.toISOString(),
+    reason,
+  };
+}
+
+test('sin meta activa → hasGoal false, reason no_goal_declared, goal null', () => {
+  const r = buildIdfScoreResponse(null, nullResult(), NOW_RESP);
+  assertEqual(r.hasGoal, false);
+  assertEqual(r.score, null);
+  assertEqual(r.reason, 'no_goal_declared');
+  assertEqual(r.goal, null);
+});
+
+test('con meta activa → hasGoal true, score y 4 dimensiones presentes', () => {
+  const goal: ActiveGoalRow = { title: 'Comprar piso', target_amount: 40000, target_date: '2027-07-28' };
+  const r = buildIdfScoreResponse(goal, scoredResult(), NOW_RESP);
+  assertEqual(r.hasGoal, true);
+  assertEqual(r.score, 62);
+  assertEqual(r.level, 'oro');
+  if (!r.dimensions) throw new Error('dimensions ausente con meta activa');
+  assertEqual(r.dimensions.progreso, 70);
+  assertEqual(r.dimensions.fugas, 80);
+  assertEqual(r.dimensions.estabilidad, 50);
+  assertEqual(r.dimensions.ahorro, 33);
+  if (!r.goal) throw new Error('goal ausente con meta activa');
+  assertEqual(r.goal.titulo, 'Comprar piso');
+  assertEqual(r.goal.monto, 40000);
+  assertEqual(r.goal.plazo_meses, 12);
+});
+
+test('meta existe pero sin datos suficientes → nunca inventa score, cae a hasGoal false', () => {
+  const goal: ActiveGoalRow = { title: 'Fondo emergencia', target_amount: 5000, target_date: '2026-12-01' };
+  const r = buildIdfScoreResponse(goal, nullResult('insufficient_data'), NOW_RESP);
+  assertEqual(r.hasGoal, false);
+  assertEqual(r.score, null);
+  assertEqual(r.reason, 'insufficient_data');
+  assertEqual(r.goal, null);
+});
+
+test('dimensión null en el resultado se refleja como null, no se rellena', () => {
+  const goal: ActiveGoalRow = { title: 'Meta X', target_amount: 1000, target_date: '2026-08-28' };
+  const r = buildIdfScoreResponse(goal, scoredResult({ components: { progresoMeta: 70, controlFugas: null, estabilidadBase: 50, velocidadAhorro: 33 } }), NOW_RESP);
+  if (!r.dimensions) throw new Error('dimensions ausente');
+  assertEqual(r.dimensions.fugas, null);
+});
 
 // ─── Resumen ─────────────────────────────────────────────────────────────────
 

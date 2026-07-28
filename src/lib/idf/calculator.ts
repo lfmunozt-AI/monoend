@@ -358,11 +358,37 @@ function dimVelocidadAhorro(ingresos: number, gastos: number): number {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
-function levelFromScore(score: number): IDFLevel {
+/**
+ * Función canónica de nivel IDF — cortes exactos del documento
+ * (Bronce 0–25 · Plata 26–50 · Oro 51–75 · Diamante 76–100, ver §Niveles en
+ * FORMULAS_IDF_ICA.md). Única fuente de verdad para mapear score → nivel;
+ * reemplaza la copia local desalineada de `dashboard/page.tsx`
+ * (`getIdfLevel`, hallazgo #7 de `AUDITORIA_AG06_ica_idf.md`, cortes
+ * `<30/<50/<76`).
+ */
+export function levelFromScore(score: number): IDFLevel {
   if (score <= 25) return 'bronce';
   if (score <= 50) return 'plata';
   if (score <= 75) return 'oro';
   return 'diamante';
+}
+
+/** Etiqueta + badge de UI por nivel IDF. */
+export const IDF_LEVEL_DISPLAY: Record<IDFLevel, { label: string; badge: string }> = {
+  bronce: { label: 'Bronce', badge: '⬜' },
+  plata: { label: 'Plata', badge: '🔵' },
+  oro: { label: 'Oro', badge: '🟡' },
+  diamante: { label: 'Diamante', badge: '💎' },
+};
+
+/**
+ * Conveniencia: score → `{ level, label, badge }` en un solo paso, con los
+ * cortes canónicos del documento. Pensada para sustituir directamente la
+ * función local `getIdfLevel(score)` del dashboard.
+ */
+export function getIdfLevelDisplay(score: number): { level: IDFLevel; label: string; badge: string } {
+  const level = levelFromScore(score);
+  return { level, ...IDF_LEVEL_DISPLAY[level] };
 }
 
 function emptyComponents(): IDFComponents {
@@ -417,6 +443,77 @@ function onlyDate(d: Date): string {
   const m = String(d.getUTCMonth() + 1).padStart(2, '0');
   const day = String(d.getUTCDate()).padStart(2, '0');
   return `${y}-${m}-${day}`;
+}
+
+// ─── Respuesta pública de /api/idf/score ───────────────────────────────────
+
+/** Meta activa mínima requerida para construir la respuesta del endpoint. */
+export interface ActiveGoalRow {
+  title: string;
+  target_amount: number;
+  target_date: string;
+}
+
+export interface IdfScoreResponse {
+  hasGoal: boolean;
+  score: number | null;
+  level?: IDFLevel | null;
+  reason?: string;
+  dimensions?: {
+    progreso: number | null;
+    fugas: number | null;
+    estabilidad: number | null;
+    ahorro: number | null;
+  };
+  goal: { titulo: string; monto: number; plazo_meses: number } | null;
+}
+
+/** Meses restantes (≥0) entre `now` y `targetDate` (fecha `YYYY-MM-DD`). */
+export function mesesRestantes(now: Date, targetDate: string): number {
+  const target = new Date(`${targetDate}T00:00:00Z`);
+  const months =
+    (target.getUTCFullYear() - now.getUTCFullYear()) * 12 +
+    (target.getUTCMonth() - now.getUTCMonth());
+  return Math.max(0, months);
+}
+
+/**
+ * Núcleo puro de `/api/idf/score`: dada la meta activa (o `null`) y el
+ * `IDFResult` ya calculado, arma el body JSON de la respuesta. Nunca inventa
+ * un score — si `calcularIDF` no pudo puntuar (aunque exista una fila en
+ * `goals`), se refleja como `hasGoal: false` con el `reason` real, jamás con
+ * un valor relleno.
+ */
+export function buildIdfScoreResponse(
+  goal: ActiveGoalRow | null,
+  result: IDFResult,
+  now: Date,
+): IdfScoreResponse {
+  if (!goal || result.score === null) {
+    return {
+      hasGoal: false,
+      score: null,
+      reason: (goal ? result.reason : undefined) ?? 'no_goal_declared',
+      goal: null,
+    };
+  }
+
+  return {
+    hasGoal: true,
+    score: result.score,
+    level: result.level,
+    dimensions: {
+      progreso: result.components.progresoMeta,
+      fugas: result.components.controlFugas,
+      estabilidad: result.components.estabilidadBase,
+      ahorro: result.components.velocidadAhorro,
+    },
+    goal: {
+      titulo: goal.title,
+      monto: goal.target_amount,
+      plazo_meses: mesesRestantes(now, goal.target_date),
+    },
+  };
 }
 
 // ─── Tipos auxiliares re-exportados para tests ─────────────────────────────

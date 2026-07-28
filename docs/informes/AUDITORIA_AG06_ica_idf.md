@@ -190,3 +190,60 @@ lógica, solo el literal.
 - No se toca `005_ica_trigger.sql` ni se elimina el trigger fantasma — mismo motivo.
 - La Tarea 1 (backfill `'soberania'`→`'dominio'`) sí se ejecutó y es independiente de
   estos hallazgos: afecta solo el literal de nivel, no qué función lo calcula.
+
+---
+
+## Actualización 2026-07-28 — qué se corrigió en esta tanda y qué queda como deuda aceptada
+
+Decisión de Luis: solo se arregla lo que el usuario ve. Esto es lo que cambió respecto
+al informe original de arriba, y lo que se deja explícitamente para después del piloto.
+
+### Resuelto en esta tanda
+
+- **Hallazgo #1 (crítico, IDF nunca calculado)** — **RESUELTO.** Nuevo endpoint
+  `GET /api/idf/score` invoca `calcularIDF()` de verdad (RPC `calcular_idf_dimensions`
+  con fallback TS) y devuelve `{ hasGoal, score, level, dimensions, goal }` — nunca
+  inventa un componente que falte, lo refleja `null`. Verificado end-to-end contra la
+  RPC real en BD (no solo en tests): con meta activa devuelve `score`/`nivel`/
+  componentes reales; sin meta, `{ hasGoal: false, reason: 'no_goal_declared' }`.
+  Sustituye al `data.score` de `/api/ica/score` que el dashboard usaba como IDF.
+- **Hallazgo #7 (menor, off-by-one de niveles IDF)** — **RESUELTO** en la fuente:
+  `levelFromScore()` de `src/lib/idf/calculator.ts` (cortes exactos 25/26, 50/51,
+  75/76 del documento) queda exportada junto con `getIdfLevelDisplay()` para que AG04
+  sustituya la copia local desalineada de `dashboard/page.tsx`. La sustitución en el
+  componente UI en sí es trabajo de AG04, no de este commit.
+- **Niveles narrativos ICA** — renombrados de `ceguera/vision/dominio` a nomenclatura
+  de CONOCIMIENTO (`conocimiento_inicial/parcial/pleno`), con `getICALabel()`
+  trilingüe. Mismos umbrales (≤30/≤70/>70) — no se tocó la lógica, solo el
+  vocabulario. Esto **no** resuelve el hallazgo #6 (el doc canónico sigue
+  especificando 4 tramos narrativos con mensajes propios del Consigliere, distintos de
+  estos 3 niveles técnicos) — solo evita que el vocabulario interno choque con IDF.
+
+### ACEPTADO PARA EL PILOTO — no se toca
+
+- **[ACEPTADO PARA EL PILOTO] Tres implementaciones paralelas de ICA.** Siguen
+  coexistiendo `ica.ts::calcularICA` (puntos+CAPS, muerta), `ica-service.ts::
+  updateICAScore` (aditivo simple vía `POST /api/ica/score`, endpoint sin caller real)
+  y `ica/calculator.ts::calcularICA` (5 componentes ponderados, muerta). El camino que
+  realmente escribe `ica_history` en producción sigue siendo el `+2` inline por
+  `chat_consulta` en `chat/route.ts`. No se consolida ni se cablea ninguna de las tres
+  — el usuario no ve estas rutas muertas, así que quedan fuera del criterio "solo se
+  arregla lo que el usuario ve".
+- **[ACEPTADO PARA EL PILOTO] Pesos y definiciones de `ica/calculator.ts` divergen del
+  documento canónico.** PerfilCompleto (20% vs 25% doc), Engagement (20% vs 15% doc), y
+  las definiciones de PerfilCompleto/DiversidadFuentes/Consistencia miden campos
+  distintos a los especificados en `FORMULAS_IDF_ICA.md`. Como el módulo no está
+  cableado a ningún endpoint (ver punto anterior), no hay usuario afectado hoy; se
+  documenta para cuando alguien decida activarlo.
+- **[ACEPTADO PARA EL PILOTO] Niveles narrativos ICA de 4 tramos sin implementar.** El
+  documento especifica 4 mensajes del Consigliere por rango (0–30/31–60/61–85/86–100);
+  lo único que existe en producción son 3 niveles técnicos con cortes en 30/70 (ahora
+  con nomenclatura de conocimiento) y un diagnóstico de 3 tramos aparte en
+  `consigliere.ts` (`ICA_DIAGNOSTICO`, ahora también sincronizado a la nomenclatura de
+  conocimiento pero sin los 4 tramos del doc). Implementar el cuarto tramo narrativo
+  requeriría decidir primero cuál de las tres implementaciones de ICA es la fuente de
+  verdad — bloqueado por el punto anterior.
+- **`005_ica_trigger.sql`** — no se elimina el archivo, se neutraliza como NO-OP con
+  cabecera explicativa (Tarea 3 de esta tanda). El ICA sigue mutándose desde código de
+  aplicación, tal como confirma esta auditoría; formalizar esa arquitectura (o revivir
+  un trigger real) queda pendiente de decisión de Luis.
