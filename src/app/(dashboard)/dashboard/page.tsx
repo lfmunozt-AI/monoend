@@ -2,9 +2,32 @@
 
 import { useEffect, useState, useCallback, useRef } from 'react'
 import { useRouter } from 'next/navigation'
+import Link from 'next/link'
 import Sidebar from '@/components/layout/Sidebar'
 import { createClient } from '@/lib/supabase/client'
 import TypewriterText from '@/components/chat/TypewriterText'
+import { levelFromScore, getIdfLevelDisplay, type IdfScoreResponse } from '@/lib/idf/calculator'
+import { getICALabel } from '@/lib/ica'
+
+type Lang = 'es' | 'pt' | 'en'
+
+const IDF_EMPTY_COPY: Record<Lang, { titulo: string; texto: string; cta: string }> = {
+  es: {
+    titulo: 'Define tu primera meta',
+    texto: 'Tu progreso se mide contra una meta concreta. Dime qué quieres conquistar y en qué plazo, y la calculamos juntos.',
+    cta: 'Hablar con el Consigliere',
+  },
+  pt: {
+    titulo: 'Define a tua primeira meta',
+    texto: 'O teu progresso mede-se face a uma meta concreta. Diz-me o que queres conquistar e em que prazo, e calculamo-la juntos.',
+    cta: 'Falar com o Consigliere',
+  },
+  en: {
+    titulo: 'Set your first goal',
+    texto: "Your progress is measured against a concrete goal. Tell me what you want to conquer and by when, and we'll map it together.",
+    cta: 'Talk to the Consigliere',
+  },
+}
 
 // ══════════════════════════════════════
 // Types
@@ -55,20 +78,6 @@ function useAnimatedNumber(target: number, duration = 1800, active = true) {
   return value
 }
 
-function getIcaLevel(score: number) {
-  if (score < 30) return 'Bajo'
-  if (score < 50) return 'Parcial'
-  if (score < 70) return 'Bueno'
-  return 'Completo'
-}
-
-function getIdfLevel(score: number) {
-  if (score < 30) return { label: 'Bronce', badge: '\u2b1c' }
-  if (score < 50) return { label: 'Plata', badge: '\ud83d\udfe6' }
-  if (score < 76) return { label: 'Oro', badge: '\ud83d\udfe1' }
-  return { label: 'Diamante', badge: '\ud83d\udc8e' }
-}
-
 // ══════════════════════════════════════
 // Main
 // ══════════════════════════════════════
@@ -78,9 +87,11 @@ export default function DashboardPage() {
 
   // Data
   const [data, setData] = useState<DashboardData | null>(null)
+  const [idfData, setIdfData] = useState<IdfScoreResponse | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [userName, setUserName] = useState('')
+  const [userLang, setUserLang] = useState<Lang>('es')
 
   // Theme
   const [isDark, setIsDark] = useState(false)
@@ -130,18 +141,25 @@ export default function DashboardPage() {
       if (user) {
         const { data: profile } = await supabase
           .from('profiles')
-          .select('name')
+          .select('name, language')
           .eq('user_id', user.id)
           .maybeSingle()
         const nombre = (profile?.name as string | null | undefined)
           || user.email?.split('@')[0]
           || 'amigo'
         setUserName(nombre.split(' ')[0])
+        const lang = profile?.language as string | null | undefined
+        setUserLang(lang === 'pt' || lang === 'en' ? lang : 'es')
       }
-      const res = await fetch('/api/ica/score')
-      if (res.status === 401) { router.push('/login'); return }
-      if (!res.ok) throw new Error('Error al cargar datos')
-      setData(await res.json())
+      const [icaRes, idfRes] = await Promise.all([
+        fetch('/api/ica/score'),
+        fetch('/api/idf/score'),
+      ])
+      if (icaRes.status === 401 || idfRes.status === 401) { router.push('/login'); return }
+      if (!icaRes.ok) throw new Error('Error al cargar datos')
+      if (!idfRes.ok) throw new Error('Error al cargar datos')
+      setData(await icaRes.json())
+      setIdfData(await idfRes.json())
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Error desconocido')
     } finally { setLoading(false) }
@@ -216,8 +234,7 @@ export default function DashboardPage() {
       })
       setFugaResolved(true); setFugaModalOpen(false)
 
-      const lvl = getIdfLevel(Math.min((data.score || 0) + 8, 100))
-      setToast(`\u00a1\u20ac${amt} recuperados! IDF subi\u00f3 \u2014 nivel ${lvl.badge} ${lvl.label} desbloqueado`)
+      setToast(`\u00a1\u20ac${amt} recuperados! Reflejado en tus gastos y tu saldo.`)
       setTimeout(() => setToast(null), 4000)
 
       if ((data.score || 0) + 8 >= 76) {
@@ -261,7 +278,7 @@ export default function DashboardPage() {
 
   // Animated values
   const animIca = useAnimatedNumber(icaScore, 1800, !loading && !!data)
-  const animIdf = useAnimatedNumber(data?.score ?? 0, 1800, !loading && !!data)
+  const animIdf = useAnimatedNumber(idfData?.score ?? 0, 1800, !loading && !!idfData?.hasGoal)
   const animIncome = useAnimatedNumber(data?.metrics.monthlyIncome ?? 0, 1800, !loading && !!data)
   const animExpenses = useAnimatedNumber(data?.metrics.monthlyExpenses ?? 0, 1800, !loading && !!data)
   const animLeaks = useAnimatedNumber(data?.metrics.leaksAmount ?? 0, 1800, !loading && !!data)
@@ -280,9 +297,14 @@ export default function DashboardPage() {
   if (error || !data) return <ErrorState error={error} onRetry={fetchData} />
 
   const icaStroke = (icaScore >= 70) ? '#2D6A4F' : '#92570A'
-  const idfStroke = (data.score >= 76) ? '#2D6A4F' : '#C9A84C'
-  const idfLevel = getIdfLevel(data.score)
+  const hasGoal = idfData?.hasGoal === true && idfData.score !== null
+  const idfScore = idfData?.score ?? 0
+  const idfStroke = levelFromScore(idfScore) === 'diamante' ? '#2D6A4F' : '#C9A84C'
+  const idfLevelDisplay = hasGoal ? getIdfLevelDisplay(idfScore) : null
+  const idfEmptyCopy = IDF_EMPTY_COPY[userLang]
   const saldo = data.metrics.monthlyIncome - data.metrics.monthlyExpenses
+  const hasTxData = data.metrics.monthlyIncome > 0 || data.metrics.monthlyExpenses > 0
+  const hasExpenseData = data.metrics.monthlyExpenses > 0
 
   return (
     <>
@@ -318,7 +340,7 @@ export default function DashboardPage() {
               <IcaMini score={animIca} realScore={icaScore} stroke={icaStroke} />
               <div style={{ flex: 1 }}>
                 <div style={{ fontSize: '13px', color: T.fg2, marginBottom: '2px' }}>Lo que sé de ti</div>
-                <div style={{ fontSize: '15px', fontWeight: 600, color: T.fg }}>{getIcaLevel(icaScore)}</div>
+                <div style={{ fontSize: '15px', fontWeight: 600, color: T.fg }}>{getICALabel(icaScore, userLang)}</div>
                 <div style={{ fontSize: '11px', color: T.fg2, marginTop: '4px' }}>
                   Sube tu extracto bancario para mejorar mis proyecciones
                 </div>
@@ -327,27 +349,54 @@ export default function DashboardPage() {
 
             {/* IDF hero */}
             <div style={{ backgroundColor: isDark ? '#1A1A1A' : '#FFFFFF', borderRadius: '14px', padding: '28px', border: `${T.borderWidth} solid ${T.border}`, textAlign: 'center', boxShadow: isDark ? 'none' : '0 1px 4px rgba(0,0,0,.08)' }}>
-              <div style={{ fontSize: '13px', color: T.fg2, marginBottom: '4px' }}>Tu progreso hacia</div>
-              <div style={{ fontSize: '17px', fontWeight: 700, color: T.fg, marginBottom: '16px' }}>
-                Tu primera meta financiera
-              </div>
-              <IdfCircle score={animIdf} realScore={data.score} stroke={idfStroke} />
-              <div style={{ marginTop: '14px', fontSize: '13px', color: T.fg2 }}>
-                {idfLevel.badge} {idfLevel.label}
-              </div>
-              {/* Progress bar */}
-              <div style={{ marginTop: '12px', height: '6px', borderRadius: '3px', background: T.card2, overflow: 'hidden' }}>
-                <div style={{ width: `${data.score}%`, height: '100%', background: idfStroke, borderRadius: '3px', transition: 'width 1.8s cubic-bezier(.22,.61,.36,1)' }} />
-              </div>
-              <div style={{ fontSize: '11px', color: T.fg2, marginTop: '8px' }}>
-                +5 pts este mes · {idfLevel.badge} a los 76%
-              </div>
+              {hasGoal && idfLevelDisplay ? (
+                <>
+                  <div style={{ fontSize: '13px', color: T.fg2, marginBottom: '4px' }}>Tu progreso hacia</div>
+                  <div style={{ fontSize: '17px', fontWeight: 700, color: T.fg, marginBottom: '16px' }}>
+                    {idfData?.goal?.titulo}
+                  </div>
+                  <IdfCircle score={animIdf} realScore={idfScore} stroke={idfStroke} />
+                  <div style={{ marginTop: '14px', fontSize: '13px', color: T.fg2 }}>
+                    {idfLevelDisplay.badge} {idfLevelDisplay.label}
+                  </div>
+                  {/* Progress bar */}
+                  <div style={{ marginTop: '12px', height: '6px', borderRadius: '3px', background: T.card2, overflow: 'hidden' }}>
+                    <div style={{ width: `${idfScore}%`, height: '100%', background: idfStroke, borderRadius: '3px', transition: 'width 1.8s cubic-bezier(.22,.61,.36,1)' }} />
+                  </div>
+                </>
+              ) : (
+                <div style={{ padding: '10px 0' }}>
+                  <div style={{ fontSize: '17px', fontWeight: 700, color: T.fg, marginBottom: '12px' }}>
+                    {idfEmptyCopy.titulo}
+                  </div>
+                  <p style={{ fontSize: '13px', color: T.fg2, lineHeight: '1.6', marginBottom: '20px' }}>
+                    {idfEmptyCopy.texto}
+                  </p>
+                  <Link href="/chat" style={{
+                    display: 'inline-block', background: '#C9A84C', color: '#1A1A1A',
+                    fontSize: '13px', fontWeight: 600, padding: '10px 20px', borderRadius: '10px',
+                    textDecoration: 'none',
+                  }}>
+                    {idfEmptyCopy.cta}
+                  </Link>
+                </div>
+              )}
             </div>
 
             {/* Metric cards 2x2 */}
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
-              <Card t={T} label="Ingresos" value={`${animIncome.toLocaleString('es-ES')}\u20ac`} color="#2D6A4F" trendUp isDark={isDark} />
-              <Card t={T} label="Gastos" value={`${animExpenses.toLocaleString('es-ES')}\u20ac`} color={T.fg} isDark={isDark} />
+              <Card
+                t={T} label="Ingresos"
+                value={hasTxData ? `${animIncome.toLocaleString('es-ES')}\u20ac` : '\u2014'}
+                color={hasTxData ? '#2D6A4F' : T.fg2} trendUp={hasTxData} isDark={isDark}
+                hint={hasTxData ? undefined : 'Cu\u00e9ntame cu\u00e1nto ingresas y gastas'}
+              />
+              <Card
+                t={T} label="Gastos"
+                value={hasTxData ? `${animExpenses.toLocaleString('es-ES')}\u20ac` : '\u2014'}
+                color={hasTxData ? T.fg : T.fg2} isDark={isDark}
+                hint={hasTxData ? undefined : 'Cu\u00e9ntame cu\u00e1nto ingresas y gastas'}
+              />
               <div style={{
                 backgroundColor: isDark ? '#1A1A1A' : '#FFFFFF', borderRadius: '12px',
                 padding: '16px 18px', border: `${T.borderWidth} solid ${fugaResolved ? '#2D6A4F' : T.border}`,
@@ -355,6 +404,13 @@ export default function DashboardPage() {
                 boxShadow: isDark ? 'none' : '0 1px 4px rgba(0,0,0,.08)',
               }}>
                 <div style={{ fontSize: '11px', color: T.fg2, textTransform: 'uppercase', letterSpacing: '.5px' }}>Fugas detectadas</div>
+                {!hasExpenseData ? (
+                  <>
+                    <div style={{ fontSize: '24px', fontWeight: 700, color: T.fg2 }}>\u2014</div>
+                    <div style={{ fontSize: '11px', color: T.fg2 }}>A\u00fan no hay datos para detectar fugas</div>
+                  </>
+                ) : (
+                <>
                 <div style={{ fontSize: '24px', fontWeight: 700, color: fugaResolved ? '#2D6A4F' : '#8B2635' }}>
                   {fugaResolved ? '0\u20ac' : `${animLeaks.toLocaleString('es-ES')}\u20ac`}
                 </div>
@@ -383,8 +439,15 @@ export default function DashboardPage() {
                     Revertir ↩ ({revertTimer}s)
                   </button>
                 ) : null}
+                </>
+                )}
               </div>
-              <Card t={T} label="Saldo fin de mes" value={`${Math.max(0, saldo).toLocaleString('es-ES')}\u20ac`} color="#2D6A4F" trendUp isDark={isDark} />
+              <Card
+                t={T} label="Saldo fin de mes"
+                value={hasTxData ? `${Math.max(0, saldo).toLocaleString('es-ES')}\u20ac` : '\u2014'}
+                color={hasTxData ? '#2D6A4F' : T.fg2} trendUp={hasTxData} isDark={isDark}
+                hint={hasTxData ? undefined : 'Se calcula con tus ingresos y gastos'}
+              />
             </div>
           </div>
 
@@ -621,7 +684,7 @@ function IdfCircle({ score, realScore, stroke }: { score: number; realScore: num
 
 interface ThemeTokens { bg: string; card: string; card2: string; fg: string; fg2: string; border: string; borderWidth: string }
 
-function Card({ t, label, value, color, trendUp, isDark }: { t: ThemeTokens; label: string; value: string; color: string; trendUp?: boolean; isDark: boolean }) {
+function Card({ t, label, value, color, trendUp, isDark, hint }: { t: ThemeTokens; label: string; value: string; color: string; trendUp?: boolean; isDark: boolean; hint?: string }) {
   return (
     <div style={{
       backgroundColor: isDark ? '#1A1A1A' : '#FFFFFF', borderRadius: '12px', padding: '16px 18px',
@@ -637,6 +700,7 @@ function Card({ t, label, value, color, trendUp, isDark }: { t: ThemeTokens; lab
           </svg>
         )}
       </div>
+      {hint && <div style={{ fontSize: '11px', color: t.fg2 }}>{hint}</div>}
     </div>
   )
 }
