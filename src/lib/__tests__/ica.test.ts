@@ -58,8 +58,8 @@ test('score 0 → ceguera', () => assertEqual(getICALevel(0), 'ceguera'));
 test('score 30 → ceguera', () => assertEqual(getICALevel(30), 'ceguera'));
 test('score 31 → vision', () => assertEqual(getICALevel(31), 'vision'));
 test('score 70 → vision', () => assertEqual(getICALevel(70), 'vision'));
-test('score 71 → soberania', () => assertEqual(getICALevel(71), 'soberania'));
-test('score 100 → soberania', () => assertEqual(getICALevel(100), 'soberania'));
+test('score 71 → dominio', () => assertEqual(getICALevel(71), 'dominio'));
+test('score 100 → dominio', () => assertEqual(getICALevel(100), 'dominio'));
 
 // ─── getICAColor ─────────────────────────────────────────────────────────────
 

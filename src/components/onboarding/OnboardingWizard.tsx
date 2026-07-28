@@ -407,7 +407,7 @@ export default function OnboardingWizard({ onComplete }: OnboardingWizardProps) 
 
               <div>
                 <label className="block text-sm font-semibold text-[#1A1A1A] mb-2">
-                  ¿Cuál es tu primer objetivo de soberanía?
+                  ¿Cuál es tu primer objetivo de dominio?
                 </label>
                 <textarea
                   value={data.mainGoal}
