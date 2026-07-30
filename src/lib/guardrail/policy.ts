@@ -448,6 +448,34 @@ export function enforceMissingClosing(
 //
 // `resolveClosing` es la ÚNICA función que el route llama para decidir el
 // cierre: una sola decisión, por carril, con el missing como máxima prioridad.
+
+// FIX 5 (2ª tanda) — "YA PIDE CUALQUIER DATO CONCRETO". QA real: el modelo
+// cerró con "Dime el precio del carro y en cuántos meses planeas comprarlo" —
+// una petición legítima de OTRO dato, no de missing[0] — y se sustituyó por el
+// cierre canónico. `endsWithRequestOrProposal` ya cubre "?" y los verbos de
+// PROPOSAL_RE; esto añade el caso de una petición interrogativa que NOMBRA un
+// campo concreto sin encajar exactamente en esos patrones. Acotado a propósito:
+// exige AMBAS señales (un marcador interrogativo Y el nombre de un campo) para
+// no confundir una frase puramente declarativa ("tu meta es un carro de 30000
+// en 36 meses", que no pide nada) con una petición real.
+const INTERROGATIVE_RE = new RegExp(
+  "\\b(" +
+    "que|qual|cual|cuanto|cuantos|cuanta|cuantas|como|cuando|donde|" + // ES
+    "quanto|quantos|quanta|quantas|quando|onde|" + // PT extra
+    "what|which|how|when|where" + // EN
+  ")\\b",
+);
+
+/** ¿La última frase ya pide CUALQUIER dato concreto (no necesariamente missing[0])? */
+function pideDatoConcreto(text: string): boolean {
+  if (endsWithRequestOrProposal(text)) return true;
+  const last = lastSentence(text);
+  if (!last) return false;
+  const n = norm(last);
+  if (!INTERROGATIVE_RE.test(n)) return false;
+  return Object.values(MISSING_KEYWORDS).some((re) => re.test(n));
+}
+
 export interface ResolveClosingOptions {
   carril: Carril;
   missing: string[];
@@ -474,8 +502,8 @@ export interface ResolveClosingOptions {
  *    a) cierre DELEGATIVO (pide análisis al usuario, viola el ADN) → se elimina
  *       y se sustituye por la petición canónica. Es la ÚNICA sustitución que
  *       sobrevive a esta tanda: lo delegativo no es "prosa buena".
- *    b) la respuesta YA termina en pregunta o propuesta del modelo → INTACTA,
- *       aunque no coincida con `missing[0]`.
+ *    b) la respuesta YA pide CUALQUIER dato concreto (no necesariamente
+ *       missing[0]) → INTACTA.
  *    c) sin ningún cierre y con `missing` → se AÑADE la petición canónica.
  *    d) sin cierre y sin `missing` → intacta (no hay nada que pedir).
  *
@@ -506,8 +534,8 @@ export function resolveClosing(text: string, opts: ResolveClosingOptions): strin
       : rewriteDelegativeClosing(text, lang);
   }
 
-  // (b) el modelo YA cerró con su propia pregunta o propuesta → intacto.
-  if (endsWithRequestOrProposal(limpio)) return limpio;
+  // (b) el modelo YA pide cualquier dato concreto → intacto.
+  if (pideDatoConcreto(limpio)) return limpio;
 
   // (c) no hay cierre: se AÑADE el canónico del dato que falta.
   if (missing && missing.length > 0) return enforceMissingClosing(limpio, missing, lang);
@@ -688,6 +716,39 @@ function safeAsk(missing: string | undefined, lang: Language): string {
   return (table ?? SAFE_GENERIC)[lang];
 }
 
+// ── FIX 6 (2ª tanda) — TEXTOS CANÓNICOS PROPIOS INMUNES ──────────────────────
+//
+// QA real: "Con ese dato la cuota es exacta al 100%" (MISSING_REQUEST.tae,
+// nuestro propio cierre canónico, inyectado por `resolveClosing`) fue
+// eliminado por el Mandamiento 3 (`stripUnbackedConcepts`, commandments.ts) al
+// mencionar "cuota" sin que `conceptos.cuota` estuviera poblado todavía (missing
+// aún incluía 'tae'). Las capas posteriores NO pueden volver a juzgar lo que
+// NOSOTROS inyectamos: por construcción no citamos cifras sin respaldo. "Las
+// capas no pueden pelearse entre sí" — se marca cada texto canónico propio
+// como inmune a la reescritura de capas posteriores.
+function flattenStrings(x: unknown): string[] {
+  if (typeof x === "string") return [x];
+  if (x && typeof x === "object") return Object.values(x as Record<string, unknown>).flatMap(flattenStrings);
+  return [];
+}
+
+// Se registra tanto el texto COMPLETO de cada plantilla como cada una de sus
+// oraciones por separado (`splitSentences`): varias plantillas (MISSING_REQUEST)
+// son DOS oraciones ("¿Qué TAE…? Con ese dato…") y las capas posteriores
+// (Mandamiento 3) filtran frase a frase — sin esto, ninguna mitad calzaría
+// exacta contra el texto completo.
+const TEXTOS_CANONICOS = new Set(
+  [SAFE_ASK, SAFE_GENERIC, SAFE_EMPTY, MISSING_REQUEST, INSUMO_REQUEST, GENERIC_REQUEST]
+    .flatMap(flattenStrings)
+    .flatMap((s) => [s, ...splitSentences(s)])
+    .map((s) => s.trim().toLowerCase()),
+);
+
+/** ¿`sentence` ES (exactamente, tras normalizar) uno de nuestros textos canónicos (o una de sus oraciones)? */
+export function esTextoCanonico(sentence: string): boolean {
+  return TEXTOS_CANONICOS.has(sentence.trim().toLowerCase());
+}
+
 // ── PIEZA 2 — ¿la respuesta está REALMENTE vacía? ────────────────────────────
 //
 // CAUSA RAÍZ del Caso B del diagnóstico: `ensureSubstance` juzgaba "esqueleto"
@@ -821,6 +882,70 @@ export function cleanup(text: string): string {
     .join("\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
+}
+
+// ── PIEZA 3 (2ª tanda) — RENUMERAR LISTAS TRAS ELIMINACIÓN ───────────────────
+//
+// QA real: "1. Identificar…\n2. Buscar…\n3. Mantener…\n4. Revisar…" con los
+// ítems 1 y 2 eliminados por el guardarraíl publicó "1.2.3. Mantener…\n4.
+// Revisar…". CAUSA: el segmentador de frases (`segmentSentences`, único en el
+// sistema) trata "1." como su PROPIA oración — el punto va seguido de espacio
+// + mayúscula, cumple la regla de límite de frase — separada de "Identificar…"
+// El ENUMERADOR nunca contiene una cifra financiera (`isListEnumerator` lo
+// excluye en origen), así que NUNCA aparece en `blocked`: sobrevive siempre,
+// aunque su CONTENIDO se elimine entero. Al eliminar los contenidos de los
+// ítems 1 y 2, sus enumeradores huérfanos ("1." "2.") quedan pegados entre sí
+// justo delante del primer ítem que sí sobrevivió ("3."). Nunca debe
+// publicarse un salto de numeración ni un enumerador pegado — se repara en dos
+// pasos, ambos por línea (cada ítem numerado vive en su propia línea):
+//   a) colapsar runs de 2+ enumeradores huérfanos pegados al principio de
+//      línea ("1.2.3. ") a solo el ÚLTIMO (el que de verdad precede contenido);
+//   b) renumerar 1..N cada racha CONTIGUA de líneas "N.<sep> contenido".
+
+/** Runs de 2+ enumeradores huérfanos pegados al principio de línea ("1.2.3. "). */
+function collapseGluedEnumerators(text: string): string {
+  return text.replace(
+    /^(\s*)((?:\d+[.):-]\s*){2,})/gm,
+    (_all: string, indent: string, glued: string) => {
+      const tokens = glued.match(/\d+[.):-]\s*/g) ?? [];
+      return indent + (tokens[tokens.length - 1] ?? glued);
+    },
+  );
+}
+
+/** Renumera 1..N cada racha CONTIGUA de líneas "N.<sep> contenido". */
+function renumberSequential(text: string): { texto: string; corregido: boolean } {
+  let corregido = false;
+  let contador = 0;
+  let enRacha = false;
+  const lineas = text.split("\n").map((linea) => {
+    const m = /^(\s*)(\d+)([.):-])(\s.*)$/.exec(linea);
+    if (!m) {
+      enRacha = false;
+      return linea;
+    }
+    const [, indent, numStr, sep, resto] = m;
+    contador = enRacha ? contador + 1 : 1;
+    enRacha = true;
+    if (Number(numStr) === contador) return linea;
+    corregido = true;
+    return `${indent}${contador}${sep}${resto}`;
+  });
+  return { texto: lineas.join("\n"), corregido };
+}
+
+/**
+ * Repara la numeración de una lista tras cualquier eliminación de frase
+ * (grounding o Mandamientos): colapsa enumeradores huérfanos pegados y
+ * renumera 1..N las rachas contiguas de ítems que sobrevivieron. Pura; si no
+ * hay nada que arreglar, devuelve el texto intacto.
+ */
+export function renumberLists(text: string): { texto: string; corregido: boolean } {
+  if (!text) return { texto: text, corregido: false };
+  const colapsado = collapseGluedEnumerators(text);
+  const { texto, corregido: renumerado } = renumberSequential(colapsado);
+  const corregido = colapsado !== text || renumerado;
+  return { texto: corregido ? cleanup(texto) : text, corregido };
 }
 
 /** Formatea a convención es/LatAm ("953.99" → "953,99"). */

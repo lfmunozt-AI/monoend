@@ -41,6 +41,8 @@ export {
   ensureSubstance,
   tieneVerbo,
   tieneSustanciaConversacional,
+  esTextoCanonico,
+  renumberLists,
   cleanup,
   type PolicyMode,
   type PolicyOptions,

@@ -270,3 +270,64 @@ la mutación**. `route.ts` solo decide el modo, el carril y el contexto.
 > Antes de añadir una capa que **reescriba** texto, demuestra que lo que
 > reescribe es FALSO. Si solo es "mejorable", no se toca. Y si algo se toca, se
 > registra.
+
+---
+
+## 7. Enmienda 2026-07-30 (AG08, 2ª tanda) — "validación cifra a cifra + plan fantasma"
+
+**Caso real de producción** (telemetría, ENFORCEMENT_MODE=full): un plan de
+4 pasos con conceptos verificados `{cuota:746.55, sobrante:550, brecha:196.55,
+gastos:1750, ingreso:2300, monto:30000, plazo:48, capacidad_anual:6600,
+aumento_necesario:196.55, recorte_necesario:196.55, ahorro_necesario_mensual:625}`
+llegó con **todas las cifras correctas** y el guardarraíl las bloqueó una a una:
+
+- "…reducir gastos en al menos 196,55 €" — el concepto textualmente más
+  cercano a 196,55 era "gastos" (1750, no coincide); la frase también nombraba
+  `aumento_necesario`/`recorte_necesario` (196,55 exacto), pero el validador
+  solo comparaba contra el concepto MÁS CERCANO, nunca contra los demás
+  nombrados en la misma frase.
+- "1. Identificar y recortar… por 100 €" — una PROPUESTA de acción (100 € a
+  recortar) se validaba como si fuera una AFIRMACIÓN sobre el gasto total
+  (1750), y 100 ≠ 1750 la bloqueaba.
+- Al eliminar los ítems 1 y 2, sus enumeradores ("1." "2.") sobrevivieron
+  huérfanos —`isListEnumerator` los excluye de la validación, así que nunca
+  aparecen en `blocked`— y quedaron pegados delante del ítem 3: **"1.2.3.
+  Mantener la Reserva de Imprevistos intacta."** El usuario confirmó un plan
+  vacío.
+
+### 7.1 Cambios normativos
+
+1. **Validación cifra a cifra** (`validate.ts`): cuando el concepto MÁS
+   CERCANO de una cifra no coincide, se comprueba si coincide con OTRO
+   concepto nombrado en la MISMA frase, salvo que ese concepto YA esté
+   correctamente reclamado por OTRA cifra de la frase (guarda que preserva la
+   regresión "ingreso/gastos/sobrante = 500 los tres" — HUECO QA).
+2. **Cifras de propuesta** (`validate.ts`): una frase que empieza por un verbo
+   en infinitivo/imperativo o es un ítem de lista numerada se valida como
+   RECOMENDACIÓN, no como afirmación — única sanidad: no puede superar el
+   concepto relacionado nombrado en la misma frase.
+3. **Renumerar listas** (`policy.ts::renumberLists`): colapsa enumeradores
+   huérfanos pegados y renumera 1..N las rachas contiguas que sobrevivieron.
+   Corre dos veces en `pipeline.ts` — antes y después de The Commandments.
+4. **Mandamiento 9 — PLAN FANTASMA** (`commandments.ts`): si el texto anuncia
+   un plan y pide confirmación pero, tras el enforcement, no le queda ninguna
+   cifra monetaria real, se revierte al `raw` original (con M4/M5/M1
+   reaplicados sobre él, defensa mínima).
+5. **`resolveClosing` reconoce CUALQUIER petición de dato concreto**, no solo
+   `missing[0]` ni los patrones exactos de `PROPOSAL_RE`: un marcador
+   interrogativo + el nombre de un campo conocido también cuenta como cierre
+   ya resuelto.
+6. **Textos canónicos propios inmunes** (`esTextoCanonico`): lo que NOSOTROS
+   inyectamos (cierres canónicos, respuestas seguras) no vuelve a pasar por el
+   filtro de "concepto sin cálculo" (Mandamiento 3) — las capas no pueden
+   pelearse entre sí.
+7. **Factor multiplicador** (`isMultiplierFactor`, `context.ts`): un número
+   precedido de "×" es un factor aritmético, no un monto propio — mismo trato
+   que un porcentaje o una unidad de tiempo.
+
+### 7.2 Fixture de regresión
+
+`tests/scenarios/plan_no_vaciado.json` reproduce el caso real exacto:
+ingreso 2300, gastos 1750, crédito 30000 a 48 meses con TAE 9% → conceptos
+verificados idénticos a los de producción. `expectContains: ["746,55",
+"196,55", "100 €"]`, `expectNotContains: ["1.2.3."]`.

@@ -38,7 +38,7 @@ const CASO_C_RAW =
 
 // Estado real del Caso A: el motor lo sabía TODO (ingreso 2300, gastos 1750,
 // sobrante 550, cuota 248,85, plazo 48, TAE 9) y scenario_missing estaba vacío.
-const CONCEPTOS_CASO_A = {
+const CONCEPTOS_CASO_A: Record<string, number> = {
   ingreso: 2300,
   gastos: 1750,
   sobrante: 550,
