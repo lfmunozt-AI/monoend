@@ -6,22 +6,24 @@
 // Ninguna capa intermedia vuelve a ser responsable de la garantía global; su
 // trabajo es no introducir violaciones, esta es la red de seguridad
 // determinista. Los invariantes (a)-(e) de AG01 pasan a ser los Mandamientos
-// 1-5; esta tanda añade 6-8.
+// 1-5; una tanda posterior añadió 6-8; esta añade el 9 (PLAN FANTASMA).
 //
 // Contrato: pura, nunca lanza, idempotente (aplicarla dos veces da el mismo
 // resultado). Código PURO, edge-safe, SIN llamadas a ningún LLM.
 
-import { segmentSentences, splitSentences, conceptsInSentence, hasReferenceMarker } from "./context";
+import { segmentSentences, splitSentences, conceptsInSentence, hasReferenceMarker, isPercent, isTimeUnit } from "./context";
 import {
   cleanup,
   endsWithRequestOrProposal,
   isDelegativeClosing,
   stripDelegativeClosing,
   enforceSimulationHonesty,
+  esTextoCanonico,
+  renumberLists,
   MISSING_KEYWORDS,
   type Mutation,
 } from "./policy";
-import { DERIVED_CONCEPTS } from "./validate";
+import { DERIVED_CONCEPTS, isListEnumerator } from "./validate";
 import { findNumberMentions, type NumberMention } from "./numbers";
 import { PROVIDER_LEAK_REGEXES } from "../llm/validator-rules";
 import { detectLanguage, DEFAULT_LANGUAGE, type Language } from "../language";
@@ -44,9 +46,16 @@ export interface CommandmentContext {
    * mandamientos que dependen de ella simplemente no tienen nada que revisar.
    */
   mutations?: Mutation[];
+  /**
+   * Respuesta CRUDA del modelo, antes de cualquier capa (grounding incluido).
+   * Mandamiento 9 (PLAN FANTASMA) la usa para revertir cuando el enforcement
+   * vació un plan hasta dejarlo sin cifras ni acción concreta. Opcional: sin
+   * ella, M9 no tiene nada a lo que revertir y no se activa nunca.
+   */
+  raw?: string;
 }
 
-export type CommandmentId = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
+export type CommandmentId = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;
 export type CommandmentAction = "corregido" | "logueado";
 
 export interface CommandmentViolation {
@@ -143,6 +152,11 @@ function stripUnbackedConcepts(
   let corregido = false;
   const kept = segmentSentences(text)
     .filter((seg) => {
+      // FIX 6 (2ª tanda) — textos canónicos propios INMUNES. QA real: "Con ese
+      // dato la cuota es exacta al 100%" (MISSING_REQUEST.tae) mencionaba
+      // "cuota" sin que `conceptos.cuota` estuviera poblado (missing incluía
+      // 'tae') y este Mandamiento lo eliminaba — las capas peleándose entre sí.
+      if (esTextoCanonico(seg.text)) return true;
       const nombrados = conceptsInSentence(seg.text);
       const deficitContrario = nombrados.includes("deficit") && (conceptos.sobrante ?? 0) > 0;
       const sinCalculo = nombrados.some((c) => DERIVED_CONCEPTS.has(c) && !(c in conceptos));
@@ -274,8 +288,51 @@ function revertOrdinalMutations(
   return { texto: out, corregido, capa };
 }
 
+// ── Mandamiento 9 — PLAN FANTASMA ────────────────────────────────────────────
+//
+// QA real: tras eliminar dos ítems de un plan de 4 pasos (montos que el
+// guardarraíl juzgó sin respaldo — FIX 1/2 de esta misma tanda corrige la
+// causa; esto es la red de seguridad si algo se cuela de todos modos), el
+// texto final anunciaba un plan y pedía confirmación ("¿Arrancamos con este
+// plan?") sobre un cascarón sin ninguna cifra ni acción concreta. Publicar esa
+// pregunta es peor que no responder: el usuario confirma un plan que no
+// existe. Si el enforcement vació el plan hasta ese punto, se revierte al
+// texto ORIGINAL del modelo — el registro de mutaciones ya demuestra que algo
+// cambió; aquí simplemente se usa el propio `raw` en vez de reconstruirlo.
+const PLAN_ANNOUNCE_RE = /\b(plan|planos?|propongo|proponho|i propose|pasos|passos|steps|hitos|marcos|milestones)\b/;
+
+/** ¿El texto trae alguna cifra MONETARIA real (no un %, no una duración, no un enumerador de lista)? */
+function tieneCifraMonetaria(text: string): boolean {
+  return findNumberMentions(text).some((m) => {
+    if (isListEnumerator(text, m)) return false;
+    if (isPercent(text, m)) return false;
+    if (isTimeUnit(text, m)) return false;
+    return true;
+  });
+}
+
 /**
- * Verifica y corrige los 8 Mandamientos sobre `text`, en orden. Devuelve el
+ * ¿`text` es un PLAN FANTASMA? Solo si (a) algo cambió respecto al `raw`
+ * original, (b) el texto sigue anunciando un plan y pidiendo confirmación, y
+ * (c) no le queda ninguna cifra monetaria real — el cascarón sin sustancia
+ * que el diagnóstico real detectó.
+ */
+function esPlanFantasma(text: string, raw: string | undefined): boolean {
+  if (raw === undefined || raw === text) return false;
+  if (!PLAN_ANNOUNCE_RE.test(norm(text))) return false;
+  if (!endsWithRequestOrProposal(text)) return false;
+  // Normaliza la numeración SOLO para detectar sustancia: enumeradores
+  // huérfanos pegados ("1.2.3.") no cuentan como cifra monetaria, pero
+  // `isListEnumerator` solo reconoce un enumerador si abre línea — con la
+  // numeración rota, "2" y "3" dejarían de identificarse como tales y el plan
+  // fantasma pasaría desapercibido. `renumberLists` corre de nuevo, sin
+  // efecto, si el texto que llega aquí ya está limpio (pipeline.ts la aplica
+  // antes de Commandments) — idempotente por diseño.
+  return !tieneCifraMonetaria(renumberLists(text).texto);
+}
+
+/**
+ * Verifica y corrige los 9 Mandamientos sobre `text`, en orden. Devuelve el
  * texto corregido y el detalle de cada violación. Nunca lanza; si una
  * corrección vacía la respuesta, el texto resultante puede ser "" (el llamante
  * decide el fallback de carril).
@@ -371,6 +428,24 @@ export function enforceCommandments(
       anotar(1, "más de una pregunta final", out, closing.texto);
       out = closing.texto;
       violaciones.push({ mandamiento: 1, accion: "corregido", detalle: "más de una pregunta final — se conservó la de mayor prioridad" });
+    }
+
+    // Mandamiento 9 — ÚLTIMO, tras todo lo anterior: solo entonces se sabe si
+    // el plan quedó vacío. Revierte al texto ORIGINAL del modelo; M4/M5/M1
+    // (universales y baratos) se reaplican sobre el raw, que nunca pasó por
+    // ellos — el resto de mandamientos confía en que el raw, con FIX 1/2 de
+    // esta misma tanda, ya no debería necesitar reescritura en primer lugar.
+    if (esPlanFantasma(out, ctx.raw)) {
+      const before = out;
+      let revertido = ctx.raw as string;
+      const leakRaw = stripProviderLeaks(revertido);
+      if (leakRaw.corregido) revertido = leakRaw.texto;
+      if (isDelegativeClosing(revertido)) revertido = stripDelegativeClosing(revertido);
+      const closingRaw = maxOneClosingQuestion(revertido, ctx.missing);
+      if (closingRaw.corregido) revertido = closingRaw.texto;
+      out = revertido;
+      anotar(9, "plan vacío tras enforcement — revertido al original", before, out);
+      violaciones.push({ mandamiento: 9, accion: "corregido", detalle: "plan sin sustancia tras enforcement — revertido al texto original" });
     }
   }
 

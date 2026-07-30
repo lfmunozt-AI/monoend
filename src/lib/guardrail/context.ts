@@ -305,6 +305,17 @@ export function isTimeUnit(text: string, m: NumberMention): boolean {
   return TIME_UNIT_AFTER.test(norm(text.slice(m.end, m.end + 16)));
 }
 
+// ── Multiplicador ("× 12") ────────────────────────────────────────────────────
+// Un número precedido por el signo de multiplicar es un FACTOR aritmético
+// ("550 € de sobrante × 12" = explicar de dónde sale la capacidad anual), no
+// un monto que necesite fundamentarse por sí solo — igual que un porcentaje o
+// una unidad de tiempo.
+const MULTIPLIER_BEFORE_RE = /×\s*$/;
+
+export function isMultiplierFactor(text: string, m: NumberMention): boolean {
+  return MULTIPLIER_BEFORE_RE.test(text.slice(Math.max(0, m.start - 4), m.start));
+}
+
 // ── Moneda ───────────────────────────────────────────────────────────────────
 const CURRENCY_WORDS: [RegExp, Moneda][] = [
   [/\b(euros?|eur)\b/, "EUR"],

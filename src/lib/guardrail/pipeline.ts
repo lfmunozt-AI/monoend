@@ -21,6 +21,7 @@ import {
   ensureSubstance,
   resolveClosing,
   enforceSimulationHonesty,
+  renumberLists,
   type Mutation,
 } from "./policy";
 import { enforceCommandments, type CommandmentViolation } from "./commandments";
@@ -113,9 +114,9 @@ function paso(
  * Cadena completa de enforcement sobre la respuesta cruda del modelo.
  *
  * Orden (PIPELINE_CONTRACT.md): grounding → honestidad de simulación →
- * validador de política → disclaimer → sustancia → cierre → The Commandments.
- * En META se salta el grounding y la simulación (no hay nada que fundamentar),
- * pero la seguridad (validador, M4/M5/M7) se aplica igual.
+ * validador de política → disclaimer → sustancia → cierre → The Commandments →
+ * renumerar listas. En META se salta el grounding y la simulación (no hay nada
+ * que fundamentar), pero la seguridad (validador, M4/M5/M7) se aplica igual.
  */
 export async function applyEnforcement(
   raw: string,
@@ -202,7 +203,20 @@ export async function applyEnforcement(
     resolveClosing(texto, { carril, missing, lang, enforcement }),
   );
 
-  // 7 · THE COMMANDMENTS — red de seguridad final, activa en ambos modos.
+  // 7 · RENUMERAR LISTAS (FIX 3), ANTES de Commandments — repara enumeradores
+  // huérfanos o pegados que el grounding pudo dejar (p. ej. "1.2.3."). Tiene
+  // que correr ANTES del Mandamiento 9: con la numeración rota, "2" y "3" ya
+  // no se detectan como enumeradores puros (`isListEnumerator` exige que el
+  // número abra línea) y se contarían como cifras monetarias, impidiendo que
+  // M9 reconozca un plan realmente vacío. Activo en ambos modos: es una
+  // reparación de la propia eliminación, no una reescritura de contenido.
+  texto = paso("renumberLists", "numeración de lista", texto, mutations, () =>
+    renumberLists(texto).texto,
+  );
+
+  // 8 · THE COMMANDMENTS — red de seguridad final, activa en ambos modos.
+  // `raw` (el parámetro de esta función, no `texto`) es la respuesta CRUDA del
+  // modelo — Mandamiento 9 la usa para revertir un plan vaciado por completo.
   const commandments = enforceCommandments(texto, {
     carril,
     lang,
@@ -210,8 +224,15 @@ export async function applyEnforcement(
     conceptos,
     esSimulacion,
     mutations,
+    raw,
   });
   texto = commandments.texto;
+
+  // 9 · RENUMERAR LISTAS otra vez — por si algún Mandamiento (M1/M3/M4) quitó
+  // otro ítem de la lista después del paso 7.
+  texto = paso("renumberLists", "numeración de lista (post-Commandments)", texto, mutations, () =>
+    renumberLists(texto).texto,
+  );
 
   return {
     texto,

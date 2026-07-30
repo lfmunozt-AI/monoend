@@ -20,6 +20,7 @@ import {
   hasReferenceMarker,
   isPercent,
   isTimeUnit,
+  isMultiplierFactor,
   nearestConceptInSentence,
   sentenceRangeAt,
   type Moneda,
@@ -221,10 +222,47 @@ export function validateGrounding(
   for (const m of figs) {
     // FIX A.2 / MANDAMIENTO 8 — enumerador de lista, no una cifra financiera.
     if (isListEnumerator(modelResponse, m)) continue;
+    // FIX 1 (2ª tanda) — factor multiplicador ("× 12"), no un monto propio.
+    if (isMultiplierFactor(modelResponse, m)) {
+      aprobadas.push({ ...base(m, detectCurrency(modelResponse, m)), categoria: "concepto", motivo: "factor multiplicador" });
+      continue;
+    }
 
     const moneda = detectCurrency(modelResponse, m);
     const [sentStart, sentEnd] = sentenceRangeAt(modelResponse, m.start, m.end);
-    const esReferencia = hasReferenceMarker(modelResponse.slice(sentStart, sentEnd));
+    const sentenceText = modelResponse.slice(sentStart, sentEnd);
+    const esReferencia = hasReferenceMarker(sentenceText);
+
+    // (PLAN — FIX 2, 2ª tanda) — CIFRAS DE PROPUESTA. Una cifra en una frase de
+    // ACCIÓN propuesta por el asesor ("1. Identificar y recortar... por 100 €")
+    // es una recomendación, no una afirmación sobre datos verificados: no debe
+    // exigírsele coincidir con el concepto más cercano. QA real: "recortar...
+    // por 100 €" con gastos=1750 se bloqueaba porque el concepto más cercano
+    // ("gastos") no coincidía con 100 — la propuesta ES menor que el gasto, eso
+    // es justo lo correcto, no un error.
+    // ÚNICA sanidad: la propuesta no puede superar el concepto RELACIONADO
+    // nombrado en la MISMA frase (no proponer recortar 5.000 € si gastos=1.750).
+    // Si la frase no nombra NINGÚN concepto conocido, no hay techo que
+    // comprobar — cae al resto del pipeline (no se aprueba en bloque: una lista
+    // numerada con una cifra sin respaldo alguno sigue sin ser gratis).
+    if (!isPercent(modelResponse, m) && !isTimeUnit(modelResponse, m) && esFraseDePropuesta(sentenceText)) {
+      const conceptosFrase = conceptsInSentence(sentenceText).filter((c) => c in conceptos);
+      if (conceptosFrase.length > 0) {
+        const techo = Math.max(...conceptosFrase.map((c) => conceptos[c]));
+        if (m.value <= techo + 1) {
+          aprobadas.push({ ...base(m, moneda), categoria: "calculo", motivo: "cifra de propuesta del asesor" });
+        } else {
+          bloqueadas.push({
+            ...base(m, moneda),
+            motivo: `propuesta supera el concepto relacionado (${conceptosFrase.join(",")}=${techo})`,
+            etiqueta: labelWithinSentence(modelResponse, m),
+            start: m.start,
+            end: m.end,
+          });
+        }
+        continue;
+      }
+    }
 
     // (POSICIONAL · FIX 4) — PRIORIDAD sobre el chequeo por frase. Si la cifra
     // está ADYACENTE a un patrón de rol INEQUÍVOCO ("crédito de <X>",
@@ -299,17 +337,45 @@ export function validateGrounding(
     // a esa cifra (`nearestConceptInSentence`); si no, el sobrante=500 real
     // aprobaría también un "ingresos son de 500" o "gastos son de 500" falsos
     // solo por compartir frase.
-    const sentenceText = modelResponse.slice(sentStart, sentEnd);
     const knownConcepts = new Set(conceptsInSentence(sentenceText).filter((c) => c in conceptos));
     const conceptoCercano =
       knownConcepts.size > 0
         ? nearestConceptInSentence(sentenceText, { start: m.start - sentStart, end: m.end - sentStart }, knownConcepts)
         : null;
     if (conceptoCercano) {
+      // FIX 1 (2ª tanda) — VALIDACIÓN CIFRA A CIFRA, no frase-contra-un-solo-
+      // concepto. QA real: "debes aumentar ingresos o reducir gastos en al
+      // menos 196,55 €" — el concepto TEXTUALMENTE más cercano a 196,55 es
+      // "gastos" (1750 €, no coincide), pero la misma frase también nombra
+      // "aumento_necesario"/"recorte_necesario" (196,55 € exacto). Antes de
+      // bloquear por el mismatch del concepto más CERCANO, se comprueba si la
+      // cifra coincide con OTRO concepto nombrado en la MISMA frase.
+      //
+      // GUARDA (defecto C, HUECO QA — no reabrir la regresión): un concepto
+      // solo puede rescatar si NO está YA correctamente reclamado por OTRA
+      // cifra de la misma frase. Sin esto, "Tus ingresos son de 500 € y tus
+      // gastos son de 500 €, lo que te deja un sobrante de 500 €" (real:
+      // ingreso 10000, gastos 9500, sobrante 500) aprobaría los TRES 500 —
+      // "sobrante" ya está correctamente reclamado por su propio 500 (el
+      // tercero) y no puede rescatar TAMBIÉN al primero y al segundo. En el
+      // caso real, "aumento_necesario"/"recorte_necesario" no están reclamados
+      // por ninguna otra cifra de la frase (746,55 va con "cuota", 550 va con
+      // "sobrante") — quedan libres para rescatar el 196,55.
+      const reclamados = conceptosYaReclamadosEnFrase(figs, m, sentStart, sentEnd, sentenceText, knownConcepts, conceptos);
+      const rescate = [...knownConcepts].find(
+        (c) => c !== conceptoCercano && !reclamados.has(c) && Math.abs(m.value - conceptos[c]) <= 1,
+      );
+
       if (factValues.some((f) => approxEqual(m.value, f))) {
         aprobadas.push({ ...base(m, moneda), categoria: "hecho", motivo: "dato del usuario" });
       } else if (Math.abs(m.value - conceptos[conceptoCercano]) <= 1) {
         aprobadas.push({ ...base(m, moneda), categoria: "calculo", motivo: `coincide con el concepto verificado (${conceptoCercano})` });
+      } else if (rescate !== undefined) {
+        aprobadas.push({
+          ...base(m, moneda),
+          categoria: "calculo",
+          motivo: `coincide con otro concepto verificado de la misma frase (${rescate})`,
+        });
       } else {
         // FIX A (QA real) — el motor conoce el valor correcto, pero SUSTITUIRLO
         // fabrica una mentira con apariencia verificada ("liberar al menos
@@ -405,6 +471,36 @@ function base(m: NumberMention, moneda: Moneda) {
   return { valor: m.value, texto: m.text, moneda };
 }
 
+/**
+ * Conceptos de la frase que YA están correctamente reclamados por OTRA cifra
+ * distinta de `actual` (su concepto más cercano coincide con su propio valor).
+ * Un concepto reclamado no puede servir de rescate (FIX 1) para una cifra
+ * DIFERENTE: si "sobrante" ya es la explicación correcta del tercer 500 de la
+ * frase, no puede TAMBIÉN explicar el primero o el segundo.
+ */
+function conceptosYaReclamadosEnFrase(
+  figs: NumberMention[],
+  actual: NumberMention,
+  sentStart: number,
+  sentEnd: number,
+  sentenceText: string,
+  knownConcepts: ReadonlySet<string>,
+  conceptos: Record<string, number>,
+): Set<string> {
+  const reclamados = new Set<string>();
+  if (knownConcepts.size === 0) return reclamados;
+  for (const o of figs) {
+    if (o === actual || o.start < sentStart || o.start >= sentEnd) continue;
+    const oCercano = nearestConceptInSentence(
+      sentenceText,
+      { start: o.start - sentStart, end: o.end - sentStart },
+      knownConcepts,
+    );
+    if (oCercano && Math.abs(o.value - conceptos[oCercano]) <= 1) reclamados.add(oCercano);
+  }
+  return reclamados;
+}
+
 function normLite(s: string): string {
   return s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
 }
@@ -469,6 +565,39 @@ function roleConceptEnFrase(
   if (rol !== "plazo") return rol;
   const frase = normLite(text.slice(sentStart, sentEnd));
   return CREDIT_KEYWORD_RE.test(frase) ? "plazo" : null;
+}
+
+// ── FIX 2 (2ª tanda) — CIFRAS DE PROPUESTA ───────────────────────────────────
+//
+// Una frase de ACCIÓN propuesta por el asesor ("1. Identificar y recortar…
+// por 100 €", "Buscar un ingreso extra de 100 €") no es una afirmación sobre
+// datos verificados: es una recomendación. Exigirle coincidir con el concepto
+// más cercano bloqueaba propuestas perfectamente sanas (100 € de recorte no es
+// "el gasto total", es la propuesta). Detección: la frase empieza por un verbo
+// en infinitivo/imperativo, o es un ítem de lista numerada (el formato de
+// PB4/PB7 para planes de acción).
+const PROPOSAL_VERB_START_RE = new RegExp(
+  "^(" +
+    // ES
+    "identificar|identifica|recortar|recorta|reducir|reduce|buscar|busca|" +
+    "aumentar|aumenta|destinar|destina|liberar|libera|ahorrar|ahorra|" +
+    "mantener|manten|revisar|revisa|negociar|negocia|ajustar|ajusta|" +
+    // PT
+    "cortar|corta|reduzir|reduz|procurar|procura|poupar|poupa|" +
+    "manter|rever|reve|" +
+    // EN
+    "identify|cut|reduce|find|look|increase|allocate|free|save|" +
+    "keep|maintain|review|negotiate|adjust" +
+  ")\\b",
+);
+
+// Ítem de lista numerada: "1. " / "2) " / "3 - " al principio de la frase.
+const LIST_ITEM_START_RE = /^\s*\d[\d.,]*\s*[.):-]\s*/;
+
+function esFraseDePropuesta(sentenceText: string): boolean {
+  if (LIST_ITEM_START_RE.test(sentenceText)) return true;
+  const sinEnumerador = sentenceText.replace(LIST_ITEM_START_RE, "");
+  return PROPOSAL_VERB_START_RE.test(normLite(sinEnumerador).trimStart());
 }
 
 /**
