@@ -1,0 +1,28 @@
+{
+  "name": "plan_mutilado",
+  "playbook": "PB7",
+  "language": "es",
+  "description": "FIX 4 (4ª tanda) — Mandamiento 9 ENDURECIDO. Caso real: raw con 3 pasos numerados; tras el enforcement el usuario vio 'propongo estos pasos: 1. Mantén la Reserva intacta. ¿Registramos?' — un plan de UN paso donde el modelo había propuesto TRES. La condición vieja ('sin ninguna cifra monetaria') no bastaba: aquí el paso superviviente SÍ trae una cifra (la cuota, 746,55 €) y aun así el plan está mutilado (perdió 2 de 3 pasos) — el conteo de ítems numerados (raw vs. final) es el chequeo independiente que lo atrapa. Encadena con FIX 3: el paso 1 se bloquea por exceder el sobrante real (factibilidad), el paso 2 por falta de respaldo — ninguno de los dos es un error del guardarraíl, y aun así el plan resultante (1 de 3 pasos) es inaceptable: se revierte al raw completo.",
+  "turns": [
+    {
+      "user": "Gano 2300 euros al mes y mis gastos son 1750. Quiero financiar un carro de 30000 a 48 meses.",
+      "fixtureResponse": "Para financiarlo necesito saber la TAE que te ofrece tu banco.",
+      "expectBlocked": false,
+      "expectScenarioState": {
+        "credito": { "monto": 30000, "plazo_meses": 48, "tae_es_referencia": true }
+      }
+    },
+    {
+      "user": "El banco me ofrece un 9%",
+      "fixtureResponse": "1. Aparta 50.000 € para imprevistos este mismo mes.\n2. Contrata un seguro de 300 € al mes.\n3. Mantén tu cuota de 746,55 € bajo control.\n¿Registramos este plan?",
+      "expectBlocked": true,
+      "expectMandamiento9": true,
+      "expectContains": [
+        "Aparta 50.000 € para imprevistos",
+        "Contrata un seguro de 300 € al mes",
+        "Mantén tu cuota de 746,55 € bajo control"
+      ],
+      "expectNotContains": ["1.2.3."]
+    }
+  ]
+}

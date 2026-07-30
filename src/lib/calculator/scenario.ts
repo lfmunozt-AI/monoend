@@ -553,6 +553,41 @@ export function notaRetornoMeta(
   );
 }
 
+// ── FIX 2b (4ª tanda) — AUTO-CHEQUEO DETERMINISTA ────────────────────────────
+//
+// El bloque de VERIFICACIÓN OBLIGATORIA del prompt (consigliere.ts) le pide al
+// modelo que se autochequee, pero no cuesta nada reforzarlo con una señal
+// determinista: si el playbook activo (hay crédito o meta sobre la mesa)
+// requiere un dato que falta, no hace falta que el modelo "decida" no
+// proponer cifras — el orquestador se lo dice directamente.
+
+/** Campo → nombre humano, para la nota de refuerzo (no user-facing). */
+const CAMPO_LABEL: Record<string, string> = {
+  tae: "la TAE real",
+  gastos: "los gastos",
+  ingreso: "el ingreso",
+  meta_monto: "el monto de la meta",
+  plazo: "el plazo",
+  monto: "el monto del crédito",
+};
+
+/**
+ * Nota de refuerzo para el system prompt, o null si no aplica. Solo se activa
+ * cuando el playbook activo IMPLICA cifras de plan (hay un crédito o una meta
+ * en curso) y falta un dato que ese plan necesita — un `missing` genérico sin
+ * un playbook de por medio (p. ej. justo al arrancar la conversación) no
+ * dispara nada: no hay plan que frenar todavía.
+ */
+export function notaSinCifrasDePlan(s: Partial<ScenarioState> | undefined): string | null {
+  if (!s) return null;
+  const missing = s.missing ?? [];
+  if (missing.length === 0) return null;
+  const implicaCifrasDePlan = !!s.credito || !!s.meta;
+  if (!implicaCifrasDePlan) return null;
+  const campo = CAMPO_LABEL[missing[0]] ?? missing[0];
+  return `NO propongas cifras de plan en este turno: falta ${campo}. Pídelo con calidez.`;
+}
+
 // FIX C — ¿la respuesta del asistente cierra PROPONIENDO un plan concreto
 // ("¿quieres que te proyecte el plan?", "¿Confirmamos ese plan?", "¿Arrancamos
 // con esto?")? Deliberadamente más estrecho que "termina en pregunta": una

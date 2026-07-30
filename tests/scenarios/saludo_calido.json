@@ -1,0 +1,27 @@
+{
+  "name": "saludo_calido",
+  "playbook": "PB7",
+  "language": "es",
+  "description": "FIX 1 (4ª tanda) — turno social cálido, sin fórmulas robóticas. Evidencia de producción: 'Saludo registrado.' y 'No es relevante cómo estoy. Lo que importa es tu meta financiera.' salían directo del system prompt (persona 'fría'), sin intervención de ninguna capa. La persona se corrige en consigliere.ts (bloque TONO); este escenario confirma que el pipeline determinista NO corrompe una respuesta cálida bien formada — carril META, texto intacto, sin cierre forzado.",
+  "turns": [
+    {
+      "user": "Hola, ¿cómo estás?",
+      "fixtureResponse": "Hola — todo en orden por aquí. ¿Seguimos con tu meta del carro o hay algo nuevo que contarme?",
+      "expectCarril": "META",
+      "expectFallback": false,
+      "expectContains": ["Hola — todo en orden por aquí"],
+      "expectNotContains": [
+        "Saludo registrado",
+        "No es relevante",
+        "Para darte una cifra exacta necesito un dato concreto"
+      ]
+    },
+    {
+      "user": "Me pareces un poco grosero a veces.",
+      "fixtureResponse": "Tiene sentido que lo sientas así — a veces voy directo al número. Lo que busco es darte certeza, no incomodarte. ¿Seguimos con el plan?",
+      "expectCarril": "META",
+      "expectContains": ["Tiene sentido que lo sientas así"],
+      "expectNotContains": ["No busco ser grosero, sino claro y preciso"]
+    }
+  ]
+}

@@ -2,10 +2,10 @@
   "name": "saludo_simple_en",
   "playbook": "PB7",
   "language": "en",
-  "description": "Mismo caso que saludo_simple en EN ('hi'): META, sin cierre canónico forzado.",
+  "description": "Mismo caso que saludo_simple en EN ('hello'): META, sin cierre canónico forzado. NOTA (4ª tanda): se usa 'hello' en vez de 'hi' — detectLanguage('hi') detecta 'es' por ambigüedad (gap preexistente y fuera de alcance de esta tanda, language.ts); con userLang mal detectado, el Mandamiento 7 (idioma de entrada) borraba la respuesta en inglés entera al conectar Commandments al harness. 'hello' detecta 'en' correctamente.",
   "turns": [
     {
-      "user": "hi",
+      "user": "hello",
       "fixtureResponse": "Hi! I'm your Consigliere. What can I help you with today?",
       "expectCarril": "META",
       "expectFallback": false,

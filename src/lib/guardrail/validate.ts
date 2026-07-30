@@ -233,6 +233,47 @@ export function validateGrounding(
     const sentenceText = modelResponse.slice(sentStart, sentEnd);
     const esReferencia = hasReferenceMarker(sentenceText);
 
+    // (FACTIBILIDAD — FIX 3, 4ª tanda) — una propuesta de ahorrar/destinar/
+    // reservar no puede superar el SOBRANTE real; una propuesta de recortar no
+    // puede superar el GASTO real. Caso real: "ahorra 746,55 € en 30 días" con
+    // un sobrante de 450 € no es un consejo, es una promesa imposible de
+    // cumplir. Corre ANTES que cualquier otra vía de aprobación — incluida la
+    // de propuesta genérica de abajo — porque una cifra no debe colarse solo
+    // porque "casualmente" coincide con OTRO concepto verificado. El verbo
+    // puede estar en CUALQUIER punto de la frase, no solo al principio (a
+    // diferencia de `esFraseDePropuesta`): "Podrías ahorrar X €" también cuenta.
+    if (!isPercent(modelResponse, m) && !isTimeUnit(modelResponse, m)) {
+      const nFrase = normLite(sentenceText);
+      if (SAVE_VERB_RE.test(nFrase) && conceptos.sobrante !== undefined) {
+        if (m.value > conceptos.sobrante + 1) {
+          bloqueadas.push({
+            ...base(m, moneda),
+            motivo: `propuesta de ahorro/destino supera el sobrante real (sobrante=${conceptos.sobrante})`,
+            etiqueta: labelWithinSentence(modelResponse, m),
+            start: m.start,
+            end: m.end,
+          });
+        } else {
+          aprobadas.push({ ...base(m, moneda), categoria: "calculo", motivo: "propuesta de ahorro dentro del sobrante real" });
+        }
+        continue;
+      }
+      if (CUT_VERB_RE.test(nFrase) && conceptos.gastos !== undefined) {
+        if (m.value > conceptos.gastos + 1) {
+          bloqueadas.push({
+            ...base(m, moneda),
+            motivo: `propuesta de recorte supera el gasto real (gastos=${conceptos.gastos})`,
+            etiqueta: labelWithinSentence(modelResponse, m),
+            start: m.start,
+            end: m.end,
+          });
+        } else {
+          aprobadas.push({ ...base(m, moneda), categoria: "calculo", motivo: "propuesta de recorte dentro del gasto real" });
+        }
+        continue;
+      }
+    }
+
     // (PLAN — FIX 2, 2ª tanda) — CIFRAS DE PROPUESTA. Una cifra en una frase de
     // ACCIÓN propuesta por el asesor ("1. Identificar y recortar... por 100 €")
     // es una recomendación, no una afirmación sobre datos verificados: no debe
@@ -599,6 +640,17 @@ function esFraseDePropuesta(sentenceText: string): boolean {
   const sinEnumerador = sentenceText.replace(LIST_ITEM_START_RE, "");
   return PROPOSAL_VERB_START_RE.test(normLite(sinEnumerador).trimStart());
 }
+
+// ── FIX 3 (4ª tanda) — REGLA DE FACTIBILIDAD ─────────────────────────────────
+//
+// A diferencia de `PROPOSAL_VERB_START_RE` (exige que el verbo abra la frase),
+// estos regex cazan el verbo en CUALQUIER posición: "Podrías ahorrar X €" es
+// tan una propuesta de ahorro como "Ahorra X €". Solo verbos en infinitivo o
+// imperativo — las formas de indicativo ("ahorraste", "ahorra tu abuela") no
+// son propuestas y quedan fuera a propósito.
+const SAVE_VERB_RE =
+  /\b(ahorrar|ahorra|destinar|destina|reservar|reserva|apartar|aparta|poupar|poupa|save|set aside)\b/;
+const CUT_VERB_RE = /\b(recortar|recorta|reducir|reduce|cortar|corta|reduzir|reduz|cut)\b/;
 
 /**
  * Etiqueta de una cifra bloqueada, acotada a SU frase.
