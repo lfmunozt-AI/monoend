@@ -289,12 +289,23 @@ export function enforceCommandments(
 
   let out = text;
   const mutations = ctx.mutations ?? [];
+  // PIEZA 5 — las mutaciones PREVIAS (las de las capas anteriores) se leen de
+  // una copia: a partir de aquí este propio módulo añade las suyas al registro,
+  // y M8 no debe razonar sobre sus propias entradas.
+  const previas = [...mutations];
+
+  /** Registra una corrección de mandamiento en el registro de mutaciones. */
+  const anotar = (mandamiento: CommandmentId, regla: string, antes: string, despues: string) => {
+    if (antes === despues) return;
+    mutations.push({ capa: `commandment_${mandamiento}`, regla, antes, despues });
+  };
 
   // Mandamiento 8 primero: si alguna capa anterior reescribió un enumerador,
   // se revierte ANTES de que el resto de mandamientos razone sobre el texto ya
   // corrompido.
-  const ordinal = revertOrdinalMutations(out, mutations);
+  const ordinal = revertOrdinalMutations(out, previas);
   if (ordinal.corregido) {
+    anotar(8, "enumerador de lista revertido", out, ordinal.texto);
     out = ordinal.texto;
     violaciones.push({ mandamiento: 8, accion: "corregido", detalle: "enumerador de lista reescrito — revertido", capa: ordinal.capa });
   }
@@ -302,6 +313,7 @@ export function enforceCommandments(
   // Mandamientos 4 y 5 aplican SIEMPRE, en todos los carriles (incluido META).
   const leak = stripProviderLeaks(out);
   if (leak.corregido) {
+    anotar(4, "fuga de proveedor", out, leak.texto);
     out = leak.texto;
     violaciones.push({ mandamiento: 4, accion: "corregido", detalle: "fuga de identidad de proveedor/modelo" });
   }
@@ -310,6 +322,7 @@ export function enforceCommandments(
     const before = out;
     out = stripDelegativeClosing(out);
     if (out !== before) {
+      anotar(5, "cierre delegativo", before, out);
       violaciones.push({ mandamiento: 5, accion: "corregido", detalle: "cierre delegativo eliminado" });
     }
   }
@@ -318,6 +331,7 @@ export function enforceCommandments(
   // igual de fuera de lugar en META que en un turno financiero.
   const idioma = enforceInputLanguage(out, ctx.lang);
   if (idioma.corregido) {
+    anotar(7, "idioma de entrada", out, idioma.texto);
     out = idioma.texto;
     violaciones.push({ mandamiento: 7, accion: "corregido", detalle: "término en inglés fuera de la lista exenta" });
   }
@@ -327,29 +341,34 @@ export function enforceCommandments(
   if (ctx.carril !== "META") {
     const concepts = stripUnbackedConcepts(out, ctx.conceptos);
     if (concepts.corregido) {
+      anotar(3, "concepto sin cálculo", out, concepts.texto);
       out = concepts.texto;
       violaciones.push({ mandamiento: 3, accion: "corregido", detalle: "concepto afirmado sin cálculo que lo respalde" });
     }
 
     const sim = enforceSimulationHonesty(out, { esSimulacion: ctx.esSimulacion, lang: ctx.lang });
     if (sim !== out) {
+      anotar(2, "contradicción tasa/simulación", out, sim);
       out = sim;
       violaciones.push({ mandamiento: 2, accion: "corregido", detalle: "contradicción tasa/simulación" });
     }
     const coord = coordinateTaeMention(out, ctx.lang);
     if (coord.corregido) {
+      anotar(2, "cláusula de simulación recortada", out, coord.texto);
       out = coord.texto;
       violaciones.push({ mandamiento: 2, accion: "corregido", detalle: "cláusula de simulación recortada — TAE ya la pide el cierre" });
     }
 
     const ejemplo = enforceExampleDeclared(out, ctx.missing, ctx.conceptos, ctx.lang);
     if (ejemplo.corregido) {
+      anotar(6, "valor de ejemplo sin declarar", out, ejemplo.texto);
       out = ejemplo.texto;
       violaciones.push({ mandamiento: 6, accion: "corregido", detalle: "valor de ejemplo sin declarar como tal" });
     }
 
     const closing = maxOneClosingQuestion(out, ctx.missing);
     if (closing.corregido) {
+      anotar(1, "más de una pregunta final", out, closing.texto);
       out = closing.texto;
       violaciones.push({ mandamiento: 1, accion: "corregido", detalle: "más de una pregunta final — se conservó la de mayor prioridad" });
     }

@@ -34,13 +34,26 @@ const FINANCIAL_KEYWORDS = new RegExp(
     "rendimento|despesas?|poupanca|emprestimo|prestacao|prestacoes|taxa|preco|divida|" +
     "investimento|" +
     // EN
-    "earn(?:ings)?|income|expenses?|spending|savings?|save|loan|payment|installment|rate|apr|" +
-    "goal|price|finance|buy|debt|invest(?:ment)?" +
+    "earn(?:ings)?|income|expenses?|spending|savings?|save|put aside|set aside|loan|payment|" +
+    "installment|rate|apr|goal|price|finance|buy|debt|invest(?:ment)?" +
     ")\\b",
 );
 
 function hasFinancialSignal(n: string): boolean {
   return HAS_DIGIT.test(n) || FINANCIAL_KEYWORDS.test(n);
+}
+
+/**
+ * ¿El MENSAJE trae señal financiera propia (una cifra o una keyword de dominio)?
+ *
+ * Exportado para la PIEZA 7 (digresión con retorno): un turno sin señal propia
+ * se clasifica FINANCIERO por CONTINUIDAD del escenario ("ok", "ninguno", o una
+ * pregunta sobre el tiempo), pero conversacionalmente el usuario está FUERA de
+ * la meta. El contador de digresiones necesita esa distinción; la clasificación
+ * de carril, no.
+ */
+export function tieneSenalFinanciera(message: string): boolean {
+  return hasFinancialSignal(norm(message));
 }
 
 // ── Señal META (charla trivial / identidad / meta-ayuda) ─────────────────────

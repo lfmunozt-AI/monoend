@@ -209,3 +209,64 @@ antes de persistir. Es el último paso del pipeline para TODOS los carriles.
 Ninguna capa nueva puede añadir un segundo punto de inserción de cierre. Si un caso de
 QA parece necesitarlo, es señal de que la invariante correspondiente está mal definida —
 se corrige la invariante, no se añade un parche lateral.
+
+---
+
+## 6. Enmienda 2026-07-30 (AG08) — "bloquear lo falso sin sustituir lo bueno"
+
+**Principio aprobado por Luis, superior a cualquier regla de las secciones 1-5:**
+
+> Los guardarraíles **BLOQUEAN lo falso. NUNCA sustituyen lo bueno.**
+> Eliminar una frase mentirosa es legítimo. Reemplazar prosa del modelo por una
+> plantilla nuestra, no. Se acepta que una respuesta quede más corta o con un
+> hueco antes que con una plantilla que contradice lo que ya sabemos.
+
+**Evidencia (telemetría real, no hipótesis).** De 27 turnos auditados en
+`response_telemetry`, **13 (48%)** tuvieron el texto modificado por nuestras
+capas. Tres casos verificados contra el código de `develop`:
+
+| Caso | Qué hizo el modelo | Qué publicamos nosotros |
+|---|---|---|
+| A (21:03:40) | confirmó el registro y propuso el siguiente paso (`missing` VACÍO, conceptos completos) | la plantilla "…¿me compartes tus ingresos y gastos mensuales?" — pidiendo lo que el motor ya tenía, con `mutations: []` |
+| B (20:55:55) | resolvió una digresión y volvió a la meta | la misma plantilla |
+| C (21:02:58) | "Reserva de Imprevistos … al menos **3 meses** de gastos" | "… al menos **48 meses** de gastos" (el plazo del crédito) — absurdo financiero fabricado por nuestra capa |
+
+### 6.1 Cambios normativos
+
+1. **`ENFORCEMENT_MODE`** (`full` | `minimal`, por defecto `full`). En `minimal`
+   siguen activos el guardarraíl de entrada, el grounding de **bloqueo puro**, el
+   validador de seguridad y The Commandments; se desactivan `ensureSubstance`, la
+   sustitución de cierres y la sustitución de cifras. Se registra por turno en
+   `response_telemetry.enforcement_mode`.
+2. **`ensureSubstance` es último recurso**, no destructor: solo actúa si la
+   respuesta está realmente vacía (<30 chars, sin verbo, o puro relleno
+   genérico). Confirmación, propuesta, redirección de digresión, explicación sin
+   cifras, pregunta del modelo o mención a un concepto del estado cuentan como
+   sustancia válida. **Con `missing` vacío tiene PROHIBIDO pedir datos.**
+3. **La sustitución de cifras se restringe al contexto inequívoco**: el rol
+   posicional `plazo` solo aplica si la MISMA frase contiene una keyword de
+   crédito. Fuera de ahí, la cifra no se toca; y si no se puede verificar, la
+   frase se elimina — jamás se reescribe.
+4. **El cierre solo AÑADE, nunca pisa** (deroga la regla de prioridad del
+   `missing` de la sección 3.a cuando el modelo ya cerró): si la respuesta
+   termina con una pregunta o propuesta del modelo, queda INTACTA aunque no
+   coincida con `missing[0]`. La única sustitución que sobrevive es la del cierre
+   **delegativo**.
+5. **Registro completo de mutaciones**: toda operación que modifique el texto
+   (incluidas `ensureSubstance`, `resolveClosing`, `enforceOutputPolicy`, las
+   eliminaciones del grounding y The Commandments) anota `{capa, regla, antes,
+   despues}`. Invariante de auditoría, verificada en test:
+   **`raw !== final` ⇒ `mutations.length > 0`**.
+
+### 6.2 Dónde vive ahora la cadena
+
+`src/lib/guardrail/pipeline.ts` → `applyEnforcement(raw, input)`. El orden de la
+sección 1 no cambia; lo que cambia es que deja de estar duplicado dentro de
+`route.ts` y que cada paso pasa por un envoltorio que **garantiza el registro de
+la mutación**. `route.ts` solo decide el modo, el carril y el contexto.
+
+### 6.3 Regla de oro, revisada
+
+> Antes de añadir una capa que **reescriba** texto, demuestra que lo que
+> reescribe es FALSO. Si solo es "mejorable", no se toca. Y si algo se toca, se
+> registra.

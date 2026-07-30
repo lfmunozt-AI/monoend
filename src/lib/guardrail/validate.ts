@@ -230,7 +230,14 @@ export function validateGrounding(
     // está ADYACENTE a un patrón de rol INEQUÍVOCO ("crédito de <X>",
     // "a <X> meses") y el motor conoce ese concepto, la cifra DEBE ser ese
     // concepto (±1). Impide que la cuota se cite como el monto del crédito.
-    const rol = roleConcept(modelResponse, m);
+    //
+    // PIEZA 3 (esta tanda) — el rol `plazo` SOLO es inequívoco dentro de una
+    // frase de crédito. CASO C real: "Revisa tu Reserva de Imprevistos para
+    // asegurar que cubra al menos 3 meses de gastos" con conceptos.plazo=48 se
+    // reescribió a "48 meses de gastos" — un absurdo financiero fabricado por
+    // NOSOTROS (violación G1b causada por nuestra propia capa). Fuera del
+    // contexto de crédito, "<N> meses" es una regla temporal y no se toca.
+    const rol = roleConceptEnFrase(modelResponse, m, sentStart, sentEnd);
     if (rol && rol in conceptos && !isPercent(modelResponse, m)) {
       if (Math.abs(m.value - conceptos[rol]) <= 1) {
         aprobadas.push({ ...base(m, moneda), categoria: "calculo", motivo: `coincide con el concepto verificado (${rol}, por posición)` });
@@ -436,6 +443,32 @@ function roleConcept(text: string, m: NumberMention): string | null {
   if (ROLE_MONTO_BEFORE.test(before)) return "monto";
   if (ROLE_MONTO_BEFORE_DE.test(before) && ROLE_MONTO_STRUCT_AFTER.test(after)) return "monto";
   return null;
+}
+
+/**
+ * PIEZA 3 — contexto INEQUÍVOCO de crédito dentro de la MISMA frase. Sin una de
+ * estas palabras, un "<N> meses" habla de otra cosa (Reserva de Imprevistos,
+ * ritmo de ahorro, horizonte de una meta) y el plazo del crédito no tiene nada
+ * que decir sobre él.
+ */
+const CREDIT_KEYWORD_RE =
+  /\b(credito|creditos|prestamo|prestamos|emprestimo|emprestimos|financiar|financiacion|financiamento|cuota|cuotas|prestacao|prestacoes|loan|installment|installments)\b/;
+
+/**
+ * Rol posicional de la cifra, ACOTADO al contexto de su frase. `plazo` solo
+ * cuenta como rol si la frase habla de un crédito; en cualquier otro tema la
+ * cifra vuelve al camino normal (regla temporal → aprobada, intacta).
+ */
+function roleConceptEnFrase(
+  text: string,
+  m: NumberMention,
+  sentStart: number,
+  sentEnd: number,
+): string | null {
+  const rol = roleConcept(text, m);
+  if (rol !== "plazo") return rol;
+  const frase = normLite(text.slice(sentStart, sentEnd));
+  return CREDIT_KEYWORD_RE.test(frase) ? "plazo" : null;
 }
 
 /**

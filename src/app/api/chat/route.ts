@@ -3,14 +3,11 @@ import { adminClient } from '@/lib/supabase/admin'
 import { buildSystemPrompt } from '@/lib/prompts/consigliere'
 import { callLLMWithTools } from '@/lib/llm'
 import {
-  runGuardrail,
+  applyEnforcement,
+  auditarMutaciones,
   ensureSubstance,
-  resolveClosing,
-  enforceSimulationHonesty,
   classifyTurn,
-  detectInjection,
-  enforceCommandments,
-  type Mutation,
+  getEnforcementMode,
 } from '@/lib/guardrail'
 import { buildScenarioContext } from '@/lib/calculator/orchestrator'
 import {
@@ -19,15 +16,12 @@ import {
   esConfirmacionCorta,
   registrarPropuestaPendiente,
   esRespuestaRepetida,
+  actualizarDigresiones,
+  notaRetornoMeta,
   type ScenarioState,
 } from '@/lib/calculator/scenario'
 import { registrarDatosFinancieros, resolveDelta, buildToolResult } from '@/lib/calculator/tools'
 import { detectLanguage } from '@/lib/language'
-import {
-  validateConsigliereOutput,
-  enforceOutputPolicy,
-  mentionsSpecificProduct,
-} from '@/lib/llm/output-validator'
 import { getICAScore } from '@/lib/ica-service'
 import { getICALevel } from '@/lib/ica'
 import { logResponseTelemetry } from '@/lib/telemetry'
@@ -264,7 +258,25 @@ export async function POST(request: Request) {
   // financiera/META en el texto; el escenario solo desempata cuando no hay
   // ninguna ("ninguno", "ok").
   const carril = classifyTurn(cleanMessage, seed, userLang)
-  console.warn('[chat] carril', JSON.stringify({ user_id: user.id, conversation_id: convId, carril }))
+
+  // PIEZA 1 — modo de enforcement del turno ('full' por defecto). Se resuelve
+  // UNA vez y baja por toda la cadena; se registra en telemetría para el A/B.
+  const enforcementMode = getEnforcementMode()
+
+  // PIEZA 7 — DIGRESIÓN CON RETORNO. Un turno META habiendo meta activa no es un
+  // fallo: es conversación. Se cuenta, no se corta. Al tercero seguido se le
+  // pide al modelo que reconduzca con naturalidad; cualquier turno FINANCIERO
+  // reinicia el contador.
+  seed.digresiones_seguidas = actualizarDigresiones(prevScenario, carril, cleanMessage)
+  const notaDigresion = notaRetornoMeta(seed)
+
+  console.warn('[chat] carril', JSON.stringify({
+    user_id: user.id,
+    conversation_id: convId,
+    carril,
+    enforcement_mode: enforcementMode,
+    digresiones: seed.digresiones_seguidas,
+  }))
 
   // ── System prompt (persona + idioma espejo) ──────────────────────────────────
   const basePrompt = buildSystemPrompt({
@@ -302,6 +314,7 @@ export async function POST(request: Request) {
   const systemPrompt1 = [
     basePrompt,
     `ESTADO ACTUAL CONOCIDO (lo que ya sabemos del usuario):\n${summarizeScenario(seed)}`,
+    notaDigresion,
     idiomaObligatorio,
   ].filter(Boolean).join('\n\n')
 
@@ -346,7 +359,7 @@ export async function POST(request: Request) {
   let respondingMessages: Parameters<typeof callLLMWithTools>[0]
   if (usedTool && toolCall) {
     const toolResult = JSON.stringify(buildToolResult(scenario, verified))
-    const systemPrompt2 = [basePrompt, idiomaObligatorio].filter(Boolean).join('\n\n')
+    const systemPrompt2 = [basePrompt, notaDigresion, idiomaObligatorio].filter(Boolean).join('\n\n')
     const messages2 = [
       ...allMessages,
       { role: 'assistant' as const, content: call1.content, toolCalls: [toolCall] },
@@ -417,172 +430,71 @@ export async function POST(request: Request) {
   // anidada; se captura ya-no-nulo aquí para no repetir `user!.id`.
   const userId = user.id
   async function runSafetyPipeline(rawContent: string) {
-    let finalContent: string
-    let injectionDetected: boolean
-    let injectionPatterns: string[]
-    // false en META — ahí ni se calcula ni aplica (Mandamiento 2).
-    let esSimulacion = false
-    // REGISTRO DE MUTACIONES — cada capa que reescribe texto en sitio añade su
-    // entrada aquí. enforceCommandments (Mandamiento 8) lo usa para identificar
-    // la capa culpable de una violación y revertir en vez de adivinar.
-    const mutations: Mutation[] = []
-    // TELEMETRÍA G1b — `guardrail.bloqueado` es true cuando el grounding ELIMINÓ
-    // una frase entera por un monto inventado sin respaldo (a diferencia de una
-    // corrección en sitio, esa eliminación no dejaría rastro en `mutations`).
-    let guardrailBloqueado = false
-
-    if (carril === 'META') {
-      finalContent = rawContent
-      const inj = detectInjection(cleanMessage)
-      injectionDetected = inj.sospechoso
-      injectionPatterns = inj.patrones
-    } else {
-      // FINANCIERO y MIXTO: grounding de cifras. `texto_final` es la respuesta
-      // saneada (montos inventados corregidos/eliminados). best-effort: nunca lanza.
-      const guardrail = await runGuardrail(cleanMessage, rawContent, {
-        mode: 'mvp',
-        supabase: admin,
-        userId: userId,
-        // Grounding: valores exactos (c0) + conceptos semánticos (PIEZA 2).
-        cifrasCalculadas: { valores: verified.valores, conceptos: verified.conceptos },
-        // Fallo A: el cierre del guardarraíl en el idioma del usuario, no el del modelo.
-        idioma: userLang,
-        mutations,
-      })
-      finalContent = guardrail.texto_final
-      injectionDetected = guardrail.injection.detected
-      injectionPatterns = guardrail.injection.patterns
-      guardrailBloqueado = guardrail.bloqueado
-
-      // PIEZA 4 — simulación: la cuota simulada (TAE de referencia) nunca puede
-      // afirmar que "no incluye intereses" (sí los incluye) y siempre debe dejar
-      // claro que es una simulación, no la cifra real del banco.
-      esSimulacion = scenario.credito?.tae_es_referencia === true
-      const beforeSimulation = finalContent
-      finalContent = enforceSimulationHonesty(finalContent, { esSimulacion, lang: userLang })
-      if (finalContent !== beforeSimulation) {
-        console.warn('[chat] simulation_honesty_enforced', JSON.stringify({
-          user_id: userId,
-          conversation_id: convId,
-          carril,
-        }))
-      }
-    }
-
-    // M3 / Pieza 5b: la señal anti-inyección (incluido identity_probe) no
-    // bloquea; se registra para vigilancia.
-    if (injectionDetected) {
-      console.warn('[chat] injection_detected', JSON.stringify({
-        user_id: userId,
-        conversation_id: convId,
-        patterns: injectionPatterns,
-        carril,
-      }))
-    }
-
-    // ── Validador de política, sobre el texto ya saneado ───────────────────────
-    // Capas de seguridad (garantías, absolutos, branding, fuga de identidad de
-    // proveedor/modelo — Pieza 5c): se aplican en TODOS los carriles, META
-    // incluido. `validation.text` trae el branding corregido; `enforceOutputPolicy`
-    // hace cumplir los bloqueos (C1) eliminando la oración infractora.
-    const validation = validateConsigliereOutput(finalContent)
-    finalContent = validation.text
-    // REGISTRO DE MUTACIONES — cada reescritura de branding es una mutación de
-    // la capa "validator" (misma mecánica que la corrección de grounding).
-    for (const r of validation.brandingRewrites) {
-      mutations.push({ capa: 'validator', regla: 'branding', antes: r.from, despues: r.to })
-    }
-
-    const enforced = enforceOutputPolicy(finalContent, validation)
-    if (enforced !== finalContent) {
-      console.warn('[chat] output_enforced', JSON.stringify({
-        user_id: userId,
-        conversation_id: convId,
-        carril,
-        severity: validation.severity,
-        reasons: validation.reasons,
-        removed_sentences: validation.violatingSentences.length,
-      }))
-    } else if (validation.severity !== 'ok') {
-      console.warn('[chat] output-validator:', validation.severity, validation.reasons)
-    }
-    finalContent = enforced
-
-    // Producto específico sin disclaimer → adjuntar el disclaimer canónico.
-    // Solo si el producto SOBREVIVIÓ al enforcement: si su oración se eliminó, un
-    // disclaimer colgando al final no protege de nada y confunde.
-    if (
-      validation.suggestedDisclaimer &&
-      mentionsSpecificProduct(finalContent) &&
-      !finalContent.includes(validation.suggestedDisclaimer)
-    ) {
-      finalContent = `${finalContent}\n\n${validation.suggestedDisclaimer}`
-    }
-
-    // PIEZA 3 — fallback de sustancia: SOLO en FINANCIERO. Si el guardrail vació
-    // la respuesta a un esqueleto sin cifras, se sustituye por una petición segura
-    // del dato que falta (scenario.missing[0]) con promesa de cálculo. En META/MIXTO
-    // una respuesta sin cifras (charla trivial, o la parte no financiera de un
-    // turno mixto) es perfectamente válida — no hay esqueleto que rellenar.
-    if (carril === 'FINANCIERO') {
-      const beforeSubstance = finalContent
-      finalContent = ensureSubstance(finalContent, { lang: userLang, missing: scenario.missing })
-      if (finalContent !== beforeSubstance) {
-        console.warn('[chat] substance_fallback', JSON.stringify({
-          user_id: userId,
-          conversation_id: convId,
-          missing: scenario.missing,
-        }))
-      }
-    }
-
-    // PIEZA 3 — resolutor ÚNICO de cierre (arregla el doble cierre real: dos
-    // cierres canónicos propios seguidos porque rewriteDelegativeClosing y
-    // enforceMissingClosing no se coordinaban entre sí). Por carril:
-    // META → intacto; MIXTO → solo elimina delegación, nunca añade; FINANCIERO →
-    // el missing manda, garantizando UNA sola pregunta final.
-    const beforeClosing = finalContent
-    finalContent = resolveClosing(finalContent, { carril, missing: scenario.missing, lang: userLang })
-    if (finalContent !== beforeClosing) {
-      console.warn('[chat] closing_resolved', JSON.stringify({
-        user_id: userId,
-        conversation_id: convId,
-        carril,
-        missing: scenario.missing,
-      }))
-      mutations.push({ capa: 'resolveClosing', regla: 'cierre', antes: beforeClosing, despues: finalContent })
-    }
-
-    // THE COMMANDMENTS (ex assertOutputInvariants, AUDITORÍA AG01 H2+H5): ÚLTIMO
-    // paso del pipeline, en TODOS los carriles (PIPELINE_CONTRACT.md §4).
-    // Post-condición única: máx. 1 pregunta (M1), sin contradicción tasa/
-    // simulación (M2), sin concepto sin cálculo (M3, defensa en profundidad de
-    // H1), sin fuga de proveedor (M4), sin cierre delegativo (M5), valor de
-    // ejemplo siempre declarado (M6), idioma de entrada respetado (M7), ordinales
-    // nunca tratados como cifras (M8, revierte vía el registro de mutaciones). En
-    // META solo aplican M4/M5/M7 — el resto no tiene sentido sin contenido
-    // financiero (enforceCommandments lo gestiona internamente por carril).
-    const beforeCommandments = finalContent
-    const commandments = enforceCommandments(finalContent, {
+    // La cadena vive en `lib/guardrail/pipeline.ts` (un solo orden, un solo
+    // lugar) y registra TODA mutación — incluido el punto ciego del Caso A,
+    // donde una sustitución completa se logueaba con `mutations: []`.
+    const result = await applyEnforcement(rawContent, {
+      userMessage: cleanMessage,
       carril,
       lang: userLang,
       missing: scenario.missing,
+      valores: verified.valores,
       conceptos: verified.conceptos,
-      esSimulacion,
-      mutations,
+      // false en META — ahí ni se calcula ni aplica (Mandamiento 2).
+      esSimulacion: carril === 'META' ? false : scenario.credito?.tae_es_referencia === true,
+      enforcement: enforcementMode,
+      supabase: admin,
+      userId,
     })
-    finalContent = commandments.texto
-    if (commandments.violaciones.length > 0) {
+
+    // M3 / Pieza 5b: la señal anti-inyección (incluido identity_probe) no
+    // bloquea; se registra para vigilancia.
+    if (result.injection.detected) {
+      console.warn('[chat] injection_detected', JSON.stringify({
+        user_id: userId,
+        conversation_id: convId,
+        patterns: result.injection.patterns,
+        carril,
+      }))
+    }
+
+    if (result.mutations.length > 0) {
+      console.warn('[chat] mutations', JSON.stringify({
+        user_id: userId,
+        conversation_id: convId,
+        carril,
+        enforcement_mode: result.enforcement,
+        capas: result.mutations.map((m) => `${m.capa}:${m.regla}`),
+      }))
+    }
+
+    if (result.violaciones.length > 0) {
       console.warn('[chat] commandments', JSON.stringify({
         user_id: userId,
         conversation_id: convId,
         carril,
-        violaciones: commandments.violaciones,
-        changed: finalContent !== beforeCommandments,
+        violaciones: result.violaciones,
       }))
     }
 
-    return { finalContent, commandments, mutations, guardrailBloqueado }
+    // PIEZA 5 — INVARIANTE DE AUDITORÍA: si el texto cambió, tiene que haber
+    // quedado registrado. Un fallo aquí es un punto ciego nuevo: se avisa, no se
+    // bloquea la respuesta (la telemetría lo recogerá igualmente).
+    if (!auditarMutaciones(rawContent, result.texto, result.mutations)) {
+      console.error('[chat] mutation_audit_gap', JSON.stringify({
+        user_id: userId,
+        conversation_id: convId,
+        carril,
+        enforcement_mode: result.enforcement,
+      }))
+    }
+
+    return {
+      finalContent: result.texto,
+      commandments: { texto: result.texto, violaciones: result.violaciones },
+      mutations: result.mutations,
+      guardrailBloqueado: result.guardrailBloqueado,
+    }
   }
 
   // TELEMETRÍA G1b — capas de validación: guardrail + validator + Commandments.
@@ -631,7 +543,23 @@ export async function POST(request: Request) {
       responseRawForTelemetry = retry.content
     }
     if (finalContent.trim() === '') {
-      finalContent = ensureSubstance('', { lang: userLang, missing: scenario.missing })
+      const antes = finalContent
+      finalContent = ensureSubstance('', {
+        lang: userLang,
+        missing: scenario.missing,
+        // El último recurso tiene que producir ALGO aunque el modo sea minimal:
+        // una respuesta vacía no es "no sustituir lo bueno", es no responder.
+        enforcement: 'full',
+      })
+      // PIEZA 5 — también este último recurso queda registrado.
+      if (finalContent !== antes) {
+        safety.mutations.push({
+          capa: 'ensureSubstance',
+          regla: 'respuesta vacía tras el reintento acotado',
+          antes,
+          despues: finalContent,
+        })
+      }
     }
   }
 
@@ -702,6 +630,8 @@ export async function POST(request: Request) {
     commandmentViolations: safety.commandments.violaciones,
     guardrailIntervened:
       safety.mutations.length > 0 || safety.commandments.violaciones.length > 0 || safety.guardrailBloqueado,
+    // PIEZA 1 — qué capas estaban activas en este turno (comparación A/B).
+    enforcementMode,
   })
 
   return NextResponse.json({

@@ -11,6 +11,7 @@
 import { parseDigitAmount } from "../guardrail/numbers";
 import { parseExpenseList, classifyExpenses } from "./expenses";
 import type { Language } from "../language";
+import { tieneSenalFinanciera, type Carril } from "../guardrail/turn-classifier";
 
 export interface GastosDetalle {
   vitales: number;
@@ -107,6 +108,28 @@ export interface ScenarioState {
   propuesta_pendiente?: PropuestaPendiente;
   /** FIX C — el usuario confirmó: PB7 debe ENTREGAR el plan, no re-diagnosticar. */
   plan_confirmado?: boolean;
+  /**
+   * PIEZA 6 — la meta activa se CERRÓ (el usuario confirmó el plan). Solo con
+   * la meta cerrada puede iniciarse otra sin petición explícita.
+   */
+  meta_cerrada?: boolean;
+  /**
+   * PIEZA 6 — metas anteriores. Al abrir una meta nueva la anterior se ARCHIVA
+   * aquí; nunca se borra.
+   */
+  goals_cerradas?: MetaState[];
+  /**
+   * PIEZA 6 — señal DEL TURNO (no se persiste): el usuario pidió explícitamente
+   * cambiar, olvidar o sustituir la meta. Sin esta señal, ningún mensaje
+   * ambiguo puede sobrescribir la meta activa.
+   */
+  meta_cambio_explicito?: boolean;
+  /**
+   * PIEZA 7 — turnos META consecutivos habiendo meta activa. Al llegar al
+   * umbral se inyecta una nota de reconducción en el system prompt; cualquier
+   * turno FINANCIERO lo reinicia. Nunca se corta al usuario en seco.
+   */
+  digresiones_seguidas?: number;
   /** Qué falta para completar el playbook activo. Recalculado en cada merge. */
   missing: string[];
 }
@@ -139,6 +162,27 @@ const AMOUNT = /(\d[\d.,]*)/;
 
 // Meta.
 const META_CTX = /\b(meta|objetivo|quiero (?:comprar|llegar|ahorrar)|goal|target|juntar|reunir)\b/;
+
+// PIEZA 6 — PETICIÓN EXPLÍCITA de cambio de meta. Solo estas formas autorizan
+// tocar la meta activa: "cambia la meta", "olvida el carro", "ahora quiero una
+// casa". Una mención ambigua de otro objetivo NUNCA la sobrescribe.
+const CAMBIO_META_EXPLICITO = new RegExp(
+  "(" +
+    // ES
+    "cambia(?:r|me)?\\s+(?:la|mi|de)\\s+(?:meta|objetivo)|cambiar\\s+de\\s+(?:meta|objetivo)|" +
+    "quiero\\s+cambiar\\s+(?:la|mi|de)\\s+(?:meta|objetivo)|olvida(?:te)?\\s+(?:el|la|lo|los|las|mi)\\b|" +
+    "olvidemos|descarta\\s+(?:el|la|lo|mi)\\b|ya\\s+no\\s+quiero|ahora\\s+quiero|nueva\\s+meta|otra\\s+meta|mejor\\s+quiero|" +
+    // PT
+    "muda(?:r)?\\s+(?:a|de)\\s+(?:meta|objetivo)|esquece\\s+(?:o|a)\\b|ja\\s+nao\\s+quero|agora\\s+quero|nova\\s+meta|" +
+    // EN
+    "change\\s+(?:my|the)\\s+goal|forget\\s+(?:the|my)\\b|new\\s+goal|another\\s+goal|instead\\s+i\\s+want|i\\s+want\\s+to\\s+change" +
+  ")",
+);
+
+/** ¿El usuario PIDE explícitamente cambiar/olvidar la meta activa? (PIEZA 6) */
+export function pideCambioDeMeta(message: string): boolean {
+  return CAMBIO_META_EXPLICITO.test(norm(message));
+}
 
 // Objeto de compra de un crédito (BUG 3): qué se está financiando. Se captura
 // SOLO en el mensaje que crea el crédito (monto+plazo) para poder derivar una
@@ -262,6 +306,10 @@ export function extractScenarioDelta(
   }
 
   // ── Meta ───────────────────────────────────────────────────────────────────
+  // PIEZA 6 — la señal de cambio explícito viaja en el delta: es lo ÚNICO que
+  // autoriza a `mergeScenario` a tocar una meta activa del usuario.
+  if (pideCambioDeMeta(message)) delta.meta_cambio_explicito = true;
+
   if (META_CTX.test(n)) {
     const plazo = PLAZO.exec(n);
     const a = AMOUNT.exec(n.replace(PLAZO, " "));
@@ -307,6 +355,24 @@ export function mergeScenario(
   delta: Partial<ScenarioState>,
 ): ScenarioState {
   const base: ScenarioState = { missing: [], ...(prev ?? {}) };
+  // La señal de cambio de meta es DEL TURNO: nunca se arrastra al estado que se
+  // persiste (si lo hiciera, un turno viejo autorizaría cambios futuros).
+  delete base.meta_cambio_explicito;
+
+  // ── PIEZA 6 — TRANSICIÓN EXPLÍCITA ──────────────────────────────────────────
+  // "cambia la meta", "olvida el carro", "ahora quiero una casa": la meta activa
+  // se ARCHIVA (no se borra) y el estado que colgaba de ella se limpia — un
+  // crédito abierto pertenecía a la meta abandonada, dejarlo vivo re-derivaría
+  // la misma meta en el siguiente merge.
+  if (delta.meta_cambio_explicito && base.meta) {
+    archivarMeta(base);
+    base.meta = undefined;
+    base.meta_derivada = undefined;
+    base.meta_cerrada = undefined;
+    base.credito = undefined;
+    base.propuesta_pendiente = undefined;
+    base.plan_confirmado = undefined;
+  }
 
   if (delta.ingreso_mensual !== undefined) base.ingreso_mensual = delta.ingreso_mensual;
   if (delta.gastos_mensuales !== undefined) base.gastos_mensuales = delta.gastos_mensuales;
@@ -324,19 +390,54 @@ export function mergeScenario(
     );
   }
 
-  // Meta EXPLÍCITA del usuario: pisa cualquier meta derivada y apaga el flag
-  // para siempre (ver `meta_derivada` más abajo).
+  // ── PIEZA 6 — META ACTIVA ÚNICA ─────────────────────────────────────────────
+  // La meta activa es UNA. Un delta de meta solo puede:
+  //   · ABRIR una meta nueva si no hay ninguna activa del usuario, si la activa
+  //     es derivada del crédito, si ya está CERRADA (plan confirmado) o si el
+  //     usuario pidió el cambio explícitamente.
+  //   · COMPLETAR huecos de la meta activa (el usuario aporta el monto o el
+  //     plazo que faltaban).
+  // PROHIBIDO que un mensaje ambiguo ("también me vendría bien una casa")
+  // sobrescriba el monto o el plazo de una meta activa que el usuario ya fijó.
   if (delta.meta !== undefined) {
-    base.meta = { ...(base.meta ?? {}), ...delta.meta };
-    base.meta_derivada = false;
+    const activaProtegida =
+      base.meta !== undefined && !base.meta_derivada && !base.meta_cerrada && !delta.meta_cambio_explicito;
+
+    if (!activaProtegida) {
+      if (base.meta !== undefined && base.meta_cerrada) {
+        // Meta cerrada + meta nueva → la anterior se archiva y se arranca limpio.
+        archivarMeta(base);
+        base.meta = { ...delta.meta };
+        base.meta_cerrada = false;
+      } else {
+        base.meta = { ...(base.meta ?? {}), ...delta.meta };
+      }
+      base.meta_derivada = false;
+    } else {
+      // Solo se rellenan los huecos; nunca se pisa un valor ya fijado.
+      const completada: MetaState = { ...base.meta };
+      if (completada.titulo === undefined && delta.meta.titulo !== undefined) completada.titulo = delta.meta.titulo;
+      if (completada.monto === undefined && delta.meta.monto !== undefined) completada.monto = delta.meta.monto;
+      if (completada.plazo_meses === undefined && delta.meta.plazo_meses !== undefined) {
+        completada.plazo_meses = delta.meta.plazo_meses;
+      }
+      base.meta = completada;
+    }
   }
 
   // FIX C — confirmación corta ("sí") con propuesta pendiente → PB7 ejecuta.
   // Se limpia la pendiente: ya cumplió su propósito, y así una nueva propuesta
   // (route.ts, tras generar la respuesta) puede detectarse limpiamente.
+  //
+  // PIEZA 6 — confirmar el plan CIERRA la meta activa y la archiva: a partir de
+  // aquí (y solo a partir de aquí) puede iniciarse otra sin petición explícita.
   if (delta.plan_confirmado) {
     base.plan_confirmado = true;
     base.propuesta_pendiente = undefined;
+    if (base.meta) {
+      base.meta_cerrada = true;
+      archivarMeta(base);
+    }
   }
 
   if (delta.credito !== undefined) {
@@ -374,6 +475,82 @@ export function mergeScenario(
 
 function capitalize(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+/**
+ * PIEZA 6 — archiva la meta activa en `goals_cerradas`. Nunca se borra una meta:
+ * el historial de lo que el usuario persiguió es contexto, no ruido. Idempotente
+ * (una misma meta no se archiva dos veces).
+ */
+function archivarMeta(base: ScenarioState): void {
+  const meta = base.meta;
+  if (!meta) return;
+  const archivo = base.goals_cerradas ? [...base.goals_cerradas] : [];
+  const yaEsta = archivo.some(
+    (g) => g.titulo === meta.titulo && g.monto === meta.monto && g.plazo_meses === meta.plazo_meses,
+  );
+  if (!yaEsta) archivo.push({ ...meta });
+  base.goals_cerradas = archivo;
+}
+
+// ── PIEZA 7 — DIGRESIÓN CON RETORNO ──────────────────────────────────────────
+//
+// El usuario pregunta por el tiempo, por quién eres, por cualquier cosa. Eso NO
+// es un fallo: es una conversación. Se le responde con naturalidad y NO se le
+// fuerza cierre (el carril META ya garantiza el texto intacto). Solo cuando
+// acumula 3 turnos seguidos fuera de la meta activa se le reconduce — con una
+// nota al modelo, nunca cortándole en seco.
+
+/** Turnos consecutivos fuera de la meta antes de reconducir. */
+export const DIGRESIONES_UMBRAL = 3;
+
+/** ¿Hay una meta activa (existe y no está cerrada)? */
+export function tieneMetaActiva(s: Partial<ScenarioState> | undefined): boolean {
+  return !!s?.meta && s.meta_cerrada !== true;
+}
+
+/**
+ * Contador de digresiones tras clasificar el turno. Un turno con contenido
+ * financiero real lo reinicia; un turno fuera de la meta lo incrementa; MIXTO
+ * lo deja como estaba (el usuario sigue aportando datos, no está divagando).
+ *
+ * `message` es opcional pero IMPORTA: un mensaje sin señal financiera propia
+ * ("¿qué temperatura hace?") se clasifica FINANCIERO por CONTINUIDAD del
+ * escenario, y sin mirar el texto contaría como vuelta a la meta cuando en
+ * realidad es justo la digresión que esta pieza persigue (Caso B del
+ * diagnóstico). Sin `message`, se aplica la regla por carril a secas.
+ */
+export function actualizarDigresiones(
+  prev: Partial<ScenarioState> | undefined,
+  carril: Carril,
+  message?: string,
+): number {
+  const actual = prev?.digresiones_seguidas ?? 0;
+  const conContenidoFinanciero =
+    message === undefined ? carril === "FINANCIERO" : tieneSenalFinanciera(message);
+
+  if (carril === "MIXTO") return actual;                       // charla + datos: no es divagar
+  if (carril === "FINANCIERO" && conContenidoFinanciero) return 0;
+  if (!tieneMetaActiva(prev)) return actual;                   // sin meta no hay a dónde volver
+  return actual + 1;
+}
+
+/**
+ * Nota de reconducción para el system prompt, o null si aún no toca. Es una
+ * INSTRUCCIÓN al modelo, no una plantilla de respuesta: él decide las palabras.
+ */
+export function notaRetornoMeta(
+  s: Partial<ScenarioState> | undefined,
+  umbral: number = DIGRESIONES_UMBRAL,
+): string | null {
+  if (!s || !tieneMetaActiva(s)) return null;
+  const n = s.digresiones_seguidas ?? 0;
+  if (n < umbral) return null;
+  const titulo = s.meta?.titulo ?? "la meta activa";
+  return (
+    `El usuario lleva ${n} turnos fuera de la meta activa '${titulo}'. ` +
+    "Responde su pregunta y reconduce con naturalidad hacia el plan pendiente."
+  );
 }
 
 // FIX C — ¿la respuesta del asistente cierra PROPONIENDO un plan concreto
@@ -433,7 +610,15 @@ export function summarizeScenario(s: Partial<ScenarioState> | undefined): string
   }
   if (s.meta) {
     const partes = [s.meta.titulo, s.meta.monto ? `${s.meta.monto} €` : "", s.meta.plazo_meses ? `${s.meta.plazo_meses} meses` : ""].filter(Boolean);
-    if (partes.length) l.push(`meta: ${partes.join(", ")}`);
+    if (partes.length) {
+      // PIEZA 6 — la meta activa es UNA y el modelo tiene que saber si sigue
+      // abierta: mientras lo esté, no se abre otra.
+      l.push(`meta ${s.meta_cerrada ? "CERRADA" : "activa"} (única): ${partes.join(", ")}`);
+    }
+  }
+  if (s.goals_cerradas && s.goals_cerradas.length > 0) {
+    const titulos = s.goals_cerradas.map((g) => g.titulo ?? "sin título").join(", ");
+    l.push(`metas ya cerradas: ${titulos}`);
   }
   if (s.missing && s.missing.length) l.push(`falta por saber: ${s.missing.join(", ")}`);
   // FIX C — PB7 EJECUCIÓN: el modelo necesita saber esto YA en la primera

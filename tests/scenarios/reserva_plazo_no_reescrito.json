@@ -1,0 +1,23 @@
+{
+  "name": "reserva_plazo_no_reescrito",
+  "playbook": "PB3",
+  "language": "es",
+  "description": "CASO C del diagnóstico forense (21:02:58). Con un crédito activo a 36 meses, el modelo escribió 'Revisa tu Reserva de Imprevistos para asegurar que cubra al menos 3 meses de gastos' y NUESTRA capa de grounding lo reescribió a '48 meses' (el plazo del crédito), fabricando un absurdo financiero: la mutación quedó registrada como {capa:'grounding', regla:'posición de plazo pero no coincide con su valor verificado', antes:'3', despues:'48'}. PIEZA 3: la sustitución de plazo solo aplica si la MISMA frase habla de crédito (crédito/préstamo/financiar/cuota/…); un '<N> meses' sobre Reserva de Imprevistos, ahorro o cualquier otro tema NO se toca.",
+  "turns": [
+    {
+      "user": "Gano 2300 euros al mes y mis gastos son 1750. Quiero financiar un carro de 12000 a 36 meses.",
+      "fixtureResponse": "El crédito de 12000 € a 36 meses deja una cuota manejable contra tu sobrante de 550 €. ¿Qué TAE te ofrece tu banco?",
+      "expectBlocked": false,
+      "expectScenarioState": {
+        "credito": { "monto": 12000, "plazo_meses": 36 }
+      }
+    },
+    {
+      "user": "¿Y mi reserva de imprevistos cómo la dejo?",
+      "fixtureResponse": "Revisa tu Reserva de Imprevistos para asegurar que cubra al menos 3 meses de gastos.",
+      "expectBlocked": false,
+      "expectContains": ["3 meses de gastos"],
+      "expectNotContains": ["36 meses de gastos", "48 meses de gastos"]
+    }
+  ]
+}
