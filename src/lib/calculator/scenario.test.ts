@@ -3,7 +3,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { extractScenarioDelta, mergeScenario, registrarPropuestaPendiente, esConfirmacionCorta, esPropuestaDePlan, esRespuestaRepetida } from "./scenario";
+import {
+  extractScenarioDelta,
+  mergeScenario,
+  registrarPropuestaPendiente,
+  esConfirmacionCorta,
+  esPropuestaDePlan,
+  esRespuestaRepetida,
+  actualizarDigresiones,
+  notaRetornoMeta,
+} from "./scenario";
 
 test("merge: TAE 9% real sobre un crédito previo → recalcula tae_es_referencia", () => {
   const prev = mergeScenario(
@@ -299,4 +308,135 @@ test("esRespuestaRepetida: texto claramente distinto → false", () => {
 
 test("esRespuestaRepetida: sin respuesta anterior → false (nada que comparar)", () => {
   assert.equal(esRespuestaRepetida("Cualquier cosa.", undefined), false);
+});
+
+// ── PIEZA 6 — META ACTIVA ÚNICA CON TRANSICIÓN EXPLÍCITA ─────────────────────
+//
+// Diseño de Luis: la meta activa es UNA. Se cierra al confirmar el plan; se
+// modifica o elimina SOLO si el usuario lo pide explícitamente; ningún mensaje
+// ambiguo puede sobrescribirla; al abrir otra, la anterior se ARCHIVA.
+
+/** Estado con una meta EXPLÍCITA del usuario (no derivada de un crédito). */
+function conMetaActiva() {
+  return mergeScenario(
+    { ingreso_mensual: 2300, gastos_mensuales: 1750 },
+    { meta: { titulo: "Carro", monto: 30000, plazo_meses: 48 } },
+  );
+}
+
+test("PIEZA 6: confirmar el plan CIERRA la meta y la archiva", () => {
+  const activa = conMetaActiva();
+  const conPropuesta = registrarPropuestaPendiente(activa, "¿Confirmamos el plan?");
+  const cerrada = mergeScenario(conPropuesta, extractScenarioDelta("sí", "es", conPropuesta));
+
+  assert.equal(cerrada.plan_confirmado, true);
+  assert.equal(cerrada.meta_cerrada, true, "la meta queda cerrada");
+  assert.equal(cerrada.goals_cerradas?.length, 1, "y archivada");
+  assert.equal(cerrada.goals_cerradas?.[0].titulo, "Carro");
+});
+
+test("PIEZA 6: mención AMBIGUA de otro objetivo NO cambia la meta activa", () => {
+  const activa = conMetaActiva();
+  const delta = extractScenarioDelta("también me gustaría una meta de 200000 algún día");
+  const despues = mergeScenario(activa, delta);
+
+  assert.equal(despues.meta?.titulo, "Carro", "la meta activa sobrevive");
+  assert.equal(despues.meta?.monto, 30000, "PROHIBIDO que un mensaje ambiguo pise el monto");
+  assert.equal(despues.meta?.plazo_meses, 48);
+  assert.equal(despues.goals_cerradas, undefined, "no se archiva nada");
+});
+
+test("PIEZA 6: la mención ambigua sí COMPLETA un hueco de la meta activa", () => {
+  const parcial = mergeScenario({}, { meta: { titulo: "Piso" } });
+  const despues = mergeScenario(parcial, extractScenarioDelta("mi meta son 200000 en 120 meses"));
+
+  assert.equal(despues.meta?.titulo, "Piso", "el título no se pierde");
+  assert.equal(despues.meta?.monto, 200000, "el hueco se rellena");
+  assert.equal(despues.meta?.plazo_meses, 120);
+});
+
+test("PIEZA 6: petición EXPLÍCITA ('olvida el carro') archiva y limpia la meta", () => {
+  const activa = conMetaActiva();
+  const delta = extractScenarioDelta("olvida el carro");
+  assert.equal(delta.meta_cambio_explicito, true, "la señal viaja en el delta");
+
+  const despues = mergeScenario(activa, delta);
+  assert.equal(despues.meta, undefined, "la meta activa se retira");
+  assert.equal(despues.goals_cerradas?.[0].titulo, "Carro", "pero se archiva, nunca se borra");
+  assert.equal(despues.meta_cambio_explicito, undefined, "la señal no se persiste");
+});
+
+test("PIEZA 6: 'ahora quiero una casa de 200000 en 120 meses' sí cambia la meta", () => {
+  const activa = conMetaActiva();
+  const despues = mergeScenario(
+    activa,
+    extractScenarioDelta("ahora quiero una casa, mi meta son 200000 en 120 meses"),
+  );
+
+  assert.equal(despues.meta?.monto, 200000, "la meta nueva manda");
+  assert.equal(despues.meta?.plazo_meses, 120);
+  assert.equal(despues.goals_cerradas?.[0].monto, 30000, "la anterior queda archivada");
+});
+
+test("PIEZA 6: con la meta CERRADA, una meta nueva puede abrirse sin petición explícita", () => {
+  const activa = conMetaActiva();
+  const conPropuesta = registrarPropuestaPendiente(activa, "¿Confirmamos el plan?");
+  const cerrada = mergeScenario(conPropuesta, extractScenarioDelta("sí", "es", conPropuesta));
+
+  const nueva = mergeScenario(cerrada, { meta: { titulo: "Piso", monto: 200000, plazo_meses: 120 } });
+  assert.equal(nueva.meta?.titulo, "Piso");
+  assert.equal(nueva.meta_cerrada, false, "la meta nueva nace abierta");
+  assert.equal(nueva.goals_cerradas?.length, 1, "la anterior sigue archivada una sola vez");
+});
+
+// ── PIEZA 7 — DIGRESIÓN CON RETORNO ──────────────────────────────────────────
+
+test("PIEZA 7: un turno META con meta activa suma digresión; FINANCIERO la reinicia", () => {
+  const activa = conMetaActiva();
+  let n = actualizarDigresiones(activa, "META");
+  assert.equal(n, 1);
+  n = actualizarDigresiones({ ...activa, digresiones_seguidas: n }, "META");
+  assert.equal(n, 2);
+  n = actualizarDigresiones({ ...activa, digresiones_seguidas: n }, "FINANCIERO");
+  assert.equal(n, 0, "cualquier turno financiero reinicia el contador");
+});
+
+test("PIEZA 7: sin meta activa no se cuentan digresiones", () => {
+  assert.equal(actualizarDigresiones({ missing: [] }, "META"), 0);
+});
+
+test("PIEZA 7: MIXTO deja el contador como estaba (el usuario sigue aportando datos)", () => {
+  const activa = { ...conMetaActiva(), digresiones_seguidas: 2 };
+  assert.equal(actualizarDigresiones(activa, "MIXTO"), 2);
+});
+
+test("PIEZA 7: la nota de reconducción aparece al 3.º turno fuera, no antes", () => {
+  const activa = conMetaActiva();
+  assert.equal(notaRetornoMeta({ ...activa, digresiones_seguidas: 2 }), null);
+
+  const nota = notaRetornoMeta({ ...activa, digresiones_seguidas: 3 });
+  assert.ok(nota, "al tercero se reconduce");
+  assert.match(nota!, /3 turnos fuera de la meta activa 'Carro'/);
+  assert.match(nota!, /reconduce con naturalidad/);
+});
+
+test("PIEZA 7: con la meta cerrada no hay nada a lo que reconducir", () => {
+  const cerrada = { ...conMetaActiva(), meta_cerrada: true, digresiones_seguidas: 5 };
+  assert.equal(notaRetornoMeta(cerrada), null);
+});
+
+test("PIEZA 7 · CASO B: una digresión sin señal financiera cuenta aunque el carril sea FINANCIERO por continuidad", () => {
+  // "¿qué temperatura hace?" no trae cifra ni keyword financiera: classifyTurn
+  // lo manda a FINANCIERO por CONTINUIDAD del escenario, pero el usuario está
+  // fuera de la meta. Sin mirar el mensaje, el contador se reiniciaría siempre.
+  const activa = conMetaActiva();
+  const n = actualizarDigresiones(activa, "FINANCIERO", "¿qué temperatura hace?");
+  assert.equal(n, 1);
+
+  const vuelta = actualizarDigresiones(
+    { ...activa, digresiones_seguidas: n },
+    "FINANCIERO",
+    "mis gastos ahora son 1800",
+  );
+  assert.equal(vuelta, 0, "un turno con contenido financiero real sí reinicia");
 });

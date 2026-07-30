@@ -9,7 +9,7 @@
 // bloquear ni degradar la respuesta al usuario.
 
 import type { SupabaseClient } from '@supabase/supabase-js'
-import type { Mutation, CommandmentViolation, Carril } from '@/lib/guardrail'
+import type { Mutation, CommandmentViolation, Carril, EnforcementMode } from '@/lib/guardrail'
 
 export interface ResponseTelemetryPayload {
   userId: string
@@ -29,6 +29,12 @@ export interface ResponseTelemetryPayload {
   mutations: Mutation[] | null
   commandmentViolations: CommandmentViolation[] | null
   guardrailIntervened: boolean | null
+  /**
+   * PIEZA 1 — modo de enforcement aplicado a ESTE turno ('full' | 'minimal').
+   * Sin este campo no hay forma de comparar A/B: dos turnos con la misma
+   * intervención no son comparables si no se sabe qué capas estaban activas.
+   */
+  enforcementMode: EnforcementMode | null
 }
 
 /**
@@ -66,6 +72,7 @@ export async function logResponseTelemetry(
       mutations: payload.mutations,
       commandment_violations: payload.commandmentViolations,
       guardrail_intervened: payload.guardrailIntervened,
+      enforcement_mode: payload.enforcementMode,
     })
     if (error) throw new Error(error.message)
   } catch (err) {

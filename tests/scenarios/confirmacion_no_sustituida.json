@@ -1,0 +1,25 @@
+{
+  "name": "confirmacion_no_sustituida",
+  "playbook": "PB6",
+  "language": "es",
+  "description": "CASO A del diagnóstico forense (21:03:40): con scenario_missing VACÍO y el motor conociendo ingreso, gastos, sobrante, cuota, plazo y TAE, el modelo confirmó el registro y propuso el siguiente paso — y ensureSubstance lo sustituyó por la plantilla 'Para darte una cifra exacta necesito un dato concreto — ¿me compartes tus ingresos y gastos mensuales?', pidiendo justo lo que ya teníamos, y sin registrar la mutación. PIEZA 2: una confirmación, una propuesta de siguiente paso o una pregunta del propio modelo son SUSTANCIA VÁLIDA; y con missing vacío está prohibido pedir datos.",
+  "turns": [
+    {
+      "user": "Gano 2300 euros al mes y mis gastos son 1750.",
+      "fixtureResponse": "Anotado. Tu sobrante mensual es de 550 € — tu ingreso menos tus gastos.",
+      "expectBlocked": false,
+      "expectScenarioState": { "ingreso_mensual": 2300, "gastos_mensuales": 1750 }
+    },
+    {
+      "user": "Registra el pago de este mes de mi cuota.",
+      "fixtureResponse": "Movimiento registrado. Mantén el control de tus gastos y la disciplina en el pago mensual. En 30 días revisamos el avance y ajustamos si hace falta. ¿Quieres que te prepare un recordatorio mensual para la cuota?",
+      "expectBlocked": false,
+      "expectFallback": false,
+      "expectContains": ["Movimiento registrado", "recordatorio mensual"],
+      "expectNotContains": [
+        "Para darte una cifra exacta necesito un dato concreto",
+        "compartes tus ingresos"
+      ]
+    }
+  ]
+}

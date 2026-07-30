@@ -2,7 +2,7 @@
   "name": "fallback_sustancia",
   "playbook": "PB1",
   "language": "es",
-  "description": "Fixture sin sustancia: la única oración es una garantía prohibida y no lleva cifras, así que el guardarraíl no la toca. El validador la elimina y no queda nada; ensureSubstance (AG08) cierra con la petición segura del dato que falta, en el idioma del usuario.",
+  "description": "Fixture sin sustancia: la única oración es una garantía prohibida y no lleva cifras, así que el guardarraíl no la toca. El validador la elimina y entrega su respuesta segura ('No puedo prometerte resultados de inversión…'). PIEZA 2 (contrato nuevo): con missing VACÍO —el motor ya conoce ingreso y gastos— ensureSubstance tiene PROHIBIDO pedir datos, así que ya NO sustituye esa respuesta segura por la plantilla genérica ('Para darte una cifra exacta necesito un dato concreto…'). Es el Caso A del diagnóstico forense: pedir lo que ya sabemos es una contradicción del propio sistema.",
   "turns": [
     {
       "user": "Gano 2500 euros al mes y mis gastos son 1500. ¿Debería invertir?",
@@ -15,8 +15,11 @@
       "fixtureResponse": "Rentabilidad garantizada.",
       "expectFallback": true,
       "expectBlocked": false,
-      "expectContains": ["Para darte una cifra exacta necesito un dato concreto"],
-      "expectNotContains": ["Rentabilidad garantizada"]
+      "expectContains": ["No puedo prometerte resultados de inversión"],
+      "expectNotContains": [
+        "Rentabilidad garantizada",
+        "Para darte una cifra exacta necesito un dato concreto"
+      ]
     }
   ]
 }

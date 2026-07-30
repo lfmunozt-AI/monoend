@@ -66,7 +66,9 @@ import {
   resolveClosing,
   enforceSimulationHonesty,
   classifyTurn,
+  parseEnforcementMode,
   type Carril,
+  type EnforcementMode,
 } from '../src/lib/guardrail'
 import {
   validateConsigliereOutput,
@@ -366,6 +368,7 @@ async function runTurn(
   live: boolean,
   history: Array<{ role: 'user' | 'assistant'; content: string }>,
   profile: Assignment | undefined,
+  enforcement: EnforcementMode,
 ): Promise<TurnOutcome> {
   const userLang = detectLanguage(turn.user)
 
@@ -392,6 +395,7 @@ async function runTurn(
       mode: 'mvp',
       cifrasCalculadas: { valores: verified.valores, conceptos: verified.conceptos },
       idioma: userLang,
+      enforcement,
     })
     finalText = guardrail.texto_final
     blocked = guardrail.bloqueado
@@ -416,11 +420,11 @@ async function runTurn(
 
   // 11 · sustancia: SOLO FINANCIERO. En META/MIXTO una respuesta sin cifras es válida.
   if (carril === 'FINANCIERO') {
-    finalText = ensureSubstance(finalText, { lang: userLang, missing: state.missing })
+    finalText = ensureSubstance(finalText, { lang: userLang, missing: state.missing, enforcement })
   }
 
   // 12 · resolutor ÚNICO de cierre, por carril (Pieza 3: fix del doble cierre)
-  finalText = resolveClosing(finalText, { carril, missing: state.missing, lang: userLang })
+  finalText = resolveClosing(finalText, { carril, missing: state.missing, lang: userLang, enforcement })
 
   return {
     finalText,
@@ -500,6 +504,14 @@ async function main() {
   const filterArg = argv.find((a) => a.startsWith('--filter='))
   const filter = filterArg ? filterArg.slice('--filter='.length) : undefined
 
+  // PIEZA 1 (AG08) — pasada en modo `minimal`: solo BLOQUEO, sin sustituciones.
+  // Las expectativas de los escenarios describen el contrato de `full`, así que
+  // en minimal se espera MENOS intervención: `--report-only` reporta qué
+  // escenarios cambian de resultado sin marcar la pasada como fallida.
+  const modeArg = argv.find((a) => a.startsWith('--enforcement='))
+  const enforcement = parseEnforcementMode(modeArg?.slice('--enforcement='.length))
+  const reportOnly = argv.includes('--report-only')
+
   if (live) {
     // El prompt de la tanda nombra LLM_API_KEY; llm.ts lee OPENAI_API_KEY.
     if (!process.env.OPENAI_API_KEY && process.env.LLM_API_KEY) {
@@ -523,6 +535,7 @@ async function main() {
 
   console.log(`${BOLD}Harness de regresión conversacional — AG07${RESET}`)
   console.log(`  modo:      ${live ? 'LIVE (LLM real)' : 'FIXTURE (sin LLM, determinista)'}`)
+  console.log(`  enforce:   ${enforcement}${reportOnly ? ' (report-only: los cambios no marcan fallo)' : ''}`)
   console.log(`  escenario: src/lib/calculator/scenario.ts + orchestrator.ts (AG08)`)
   console.log(`  ficheros:  ${files.length}\n`)
 
@@ -543,7 +556,7 @@ async function main() {
     let scenarioFailed = false
 
     for (const [i, turn] of scenario.turns.entries()) {
-      const out = await runTurn(scenario, turn, state, live, history, profile)
+      const out = await runTurn(scenario, turn, state, live, history, profile, enforcement)
       state = out.state
       history.push({ role: 'user', content: turn.user }, { role: 'assistant', content: out.finalText })
 
@@ -575,11 +588,17 @@ async function main() {
   const total = okTurns + failTurns
   console.log('─'.repeat(72))
   if (failTurns === 0) {
-    console.log(`${GREEN}${BOLD}✅ ${okTurns}/${total} turnos OK${RESET} · ${files.length} escenarios`)
+    console.log(`${GREEN}${BOLD}✅ ${okTurns}/${total} turnos OK${RESET} · ${files.length} escenarios · enforcement=${enforcement}`)
+  } else if (reportOnly) {
+    console.log(
+      `${YELLOW}${BOLD}⚠ ${failTurns}/${total} turnos CAMBIAN de resultado en enforcement=${enforcement}${RESET}` +
+      ` · escenarios: ${failedScenarios.join(', ')}`,
+    )
+    console.log(`${DIM}  Esperado: menos intervención que en 'full'. Lo que NUNCA debe aparecer es una cifra falsa.${RESET}`)
   } else {
     console.log(`${RED}${BOLD}❌ ${failTurns}/${total} turnos fallaron${RESET} · escenarios: ${failedScenarios.join(', ')}`)
   }
-  process.exit(failTurns === 0 ? 0 : 1)
+  process.exit(failTurns === 0 || reportOnly ? 0 : 1)
 }
 
 main().catch((err) => {

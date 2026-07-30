@@ -23,9 +23,17 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { BlockedFigure, GroundingResult } from "./validate";
 import { detectLanguage, DEFAULT_LANGUAGE, type Language } from "../language";
-import { segmentSentences, splitSentences, isPercent, isTimeUnit, hasReferenceMarker } from "./context";
+import {
+  segmentSentences,
+  splitSentences,
+  isPercent,
+  isTimeUnit,
+  hasReferenceMarker,
+  conceptsInSentence,
+} from "./context";
 import { findNumberMentions } from "./numbers";
 import type { Carril } from "./turn-classifier";
+import { DEFAULT_ENFORCEMENT_MODE, type EnforcementMode } from "./enforcement";
 
 export type PolicyMode = "mvp" | "passthrough";
 
@@ -54,8 +62,18 @@ export interface PolicyOptions {
   dataHint?: string;
   /** Idioma del cierre. Si no se da, se infiere de la respuesta del modelo. */
   idioma?: Language;
-  /** Si se da, cada corrección en sitio (monto/plazo) se registra aquí. */
+  /**
+   * REGISTRO DE MUTACIONES (PIEZA 5) — toda operación que modifique el texto se
+   * anota aquí: correcciones en sitio Y eliminaciones de frase. El punto ciego
+   * del Caso A (texto sustituido con `mutations: []`) impedía que The
+   * Commandments detectara ni revirtiera nada.
+   */
   mutations?: Mutation[];
+  /**
+   * PIEZA 1 — en `minimal` NUNCA se reescribe una cifra: la frase se ELIMINA
+   * (bloquear lo falso sí; sustituirlo por una cifra nuestra, no).
+   */
+  enforcement?: EnforcementMode;
 }
 
 /** Entrada de log: SOLO metadatos. Nunca el texto del usuario ni la respuesta. */
@@ -434,39 +452,68 @@ export interface ResolveClosingOptions {
   carril: Carril;
   missing: string[];
   lang?: Language;
+  /** PIEZA 1 — en `minimal` el cierre NUNCA se añade ni se sustituye. */
+  enforcement?: EnforcementMode;
 }
 
 /**
  * Decide el cierre de la respuesta según el carril del turno (Pieza 1).
+ *
+ * PIEZA 4 (esta tanda) — EL CIERRE SOLO AÑADE, NUNCA PISA. Antes, con `missing`
+ * no vacío, `enforceMissingClosing` SUSTITUÍA el cierre del modelo aunque fuera
+ * una pregunta legítima ("¿Quieres que te prepare un recordatorio mensual para
+ * la cuota?" → "¿Qué TAE te ofrece tu banco?"). Eso es reemplazar prosa buena
+ * por plantilla: prohibido. La prioridad del `missing` sigue viva donde no hace
+ * daño — cuando el modelo NO cerró con nada, ahí sí se añade la petición.
  *
  * 1. META → texto intacto: no hay grounding de cifras ni cierre forzado en
  *    charla trivial, identidad o agradecimientos.
  * 2. MIXTO → solo elimina un cierre delegativo (o colapsa un duplicado);
  *    NUNCA añade nada — el turno mezcla charla y datos, no se le impone guion.
  * 3. FINANCIERO:
- *    a) `missing` no vacío → el cierre DEBE pedir `missing[0]`. Se limpia la
- *       delegación primero (sin añadir su propio cierre) y se enforza el
- *       campo exacto — así nunca compiten dos cierres canónicos.
- *    b) `missing` vacío y el cierre es delegativo → petición canónica de insumo.
- *    c) resto → intacto.
+ *    a) cierre DELEGATIVO (pide análisis al usuario, viola el ADN) → se elimina
+ *       y se sustituye por la petición canónica. Es la ÚNICA sustitución que
+ *       sobrevive a esta tanda: lo delegativo no es "prosa buena".
+ *    b) la respuesta YA termina en pregunta o propuesta del modelo → INTACTA,
+ *       aunque no coincida con `missing[0]`.
+ *    c) sin ningún cierre y con `missing` → se AÑADE la petición canónica.
+ *    d) sin cierre y sin `missing` → intacta (no hay nada que pedir).
  *
- * GARANTÍA: exactamente UNA pregunta al cierre. Si hubiera dos candidatas, la
- * de mayor prioridad (missing) es la que sobrevive, porque es la única que
- * llega a ejecutarse en la rama (a).
+ * GARANTÍA: como mucho UNA pregunta añadida por esta capa; The Commandments
+ * (M1) sigue siendo la red de seguridad si el propio modelo escribió dos.
  */
 export function resolveClosing(text: string, opts: ResolveClosingOptions): string {
   const { carril, missing } = opts;
   const lang = opts.lang ?? detectLanguage(text) ?? DEFAULT_LANGUAGE;
+  const enforcement = opts.enforcement ?? DEFAULT_ENFORCEMENT_MODE;
 
   if (carril === "META") return text;
 
   if (carril === "MIXTO") return stripDelegativeClosing(text);
 
   // FINANCIERO
-  if (missing && missing.length > 0) {
-    return enforceMissingClosing(stripDelegativeClosing(text), missing, lang);
+  const eraDelegativo = isDelegativeClosing(text);
+  const limpio = eraDelegativo ? stripDelegativeClosing(text) : text;
+
+  // MINIMAL: eliminar la delegación es BLOQUEO (legítimo); añadir o sustituir
+  // un cierre es reescritura (desactivada).
+  if (enforcement === "minimal") return limpio;
+
+  // (a) el cierre delegativo se sustituye por la petición canónica.
+  if (eraDelegativo) {
+    return missing && missing.length > 0
+      ? enforceMissingClosing(limpio, missing, lang)
+      : rewriteDelegativeClosing(text, lang);
   }
-  return rewriteDelegativeClosing(text, lang);
+
+  // (b) el modelo YA cerró con su propia pregunta o propuesta → intacto.
+  if (endsWithRequestOrProposal(limpio)) return limpio;
+
+  // (c) no hay cierre: se AÑADE el canónico del dato que falta.
+  if (missing && missing.length > 0) return enforceMissingClosing(limpio, missing, lang);
+
+  // (d) nada que pedir y nada que arreglar.
+  return limpio;
 }
 
 // ── PIEZA 4 — simulación: prohibir la afirmación falsa ───────────────────────
@@ -624,27 +671,137 @@ const SAFE_GENERIC: Record<Language, string> = {
   en: "To give you an exact figure I need one concrete data point — can you share your monthly income and expenses?",
 };
 
+/**
+ * Última red cuando la respuesta llega LITERALMENTE vacía y el motor no tiene
+ * nada que pedir (`missing` vacío). No cita cifras, no pide datos y no
+ * contradice el estado: es lo mínimo entregable, no una plantilla de guion.
+ */
+const SAFE_EMPTY: Record<Language, string> = {
+  es: "Tomo nota. Seguimos con tu plan.",
+  pt: "Tomo nota. Seguimos com o teu plano.",
+  en: "Noted. We continue with your plan.",
+};
+
 function safeAsk(missing: string | undefined, lang: Language): string {
   const key = missing === "meta_monto" ? "meta" : missing;
   const table = key ? SAFE_ASK[key] : undefined;
   return (table ?? SAFE_GENERIC)[lang];
 }
 
+// ── PIEZA 2 — ¿la respuesta está REALMENTE vacía? ────────────────────────────
+//
+// CAUSA RAÍZ del Caso B del diagnóstico: `ensureSubstance` juzgaba "esqueleto"
+// TODA respuesta sin cifras y <220 caracteres. Un turno conversacional natural
+// (confirmar un registro, proponer el siguiente paso, redirigir una digresión)
+// no lleva cifras y es corto → se destruía SIEMPRE. Ahora solo actúa cuando no
+// queda nada que entregar.
+
+// Formas verbales frecuentes (ES/PT/EN), sobre texto normalizado sin acentos.
+const VERB_FORMS_RE = new RegExp(
+  "\\b(" +
+    // ES — copulativos, auxiliares y modales
+    "soy|eres|es|somos|sois|son|era|eran|fue|fui|sera|seran|sere|seria|" +
+    "estoy|estas|esta|estamos|estan|estaba|estuve|" +
+    "hay|he|has|ha|hemos|han|habia|hubo|" +
+    "tengo|tienes|tiene|tenemos|tienen|tenia|" +
+    "voy|vas|va|vamos|van|" +
+    "puedo|puedes|puede|podemos|pueden|" +
+    "quiero|quieres|quiere|debo|debes|debe|" +
+    "hago|haces|hace|hare|" +
+    // ES — imperativos cortos frecuentes en respuestas del Consigliere
+    "di|dime|dame|mira|revisa|manda|envia|pasa|sigue|ve|" +
+    // PT
+    "sou|somos|sao|estou|estao|tem|temos|tenho|vou|vais|pode|podes|quero|queres|faco|faz|" +
+    // EN
+    "is|are|am|was|were|be|been|being|have|has|had|do|does|did|" +
+    "can|could|will|would|should|need|needs|let|share|tell|send" +
+    ")\\b",
+);
+
+// Morfología verbal productiva: infinitivos, gerundios, participios y las
+// terminaciones conjugadas más comunes. DELIBERADAMENTE AMPLIO: un falso
+// positivo significa NO tocar el texto (dirección segura); un falso negativo
+// significaría destruir prosa buena (dirección prohibida).
+const VERB_SUFFIX_RE =
+  /\b[a-zñç]{3,}(?:ar|er|ir|amos|emos|imos|aste|aron|ando|endo|indo|ados?|adas?|idos?|idas?|aba|aban|ia|ian|aria|eria|iria|are|eras|aremos)\b/i;
+
+/** ¿Hay al menos una frase con verbo? (heurística amplia por diseño) */
+export function tieneVerbo(text: string): boolean {
+  const n = norm(text);
+  return VERB_FORMS_RE.test(n) || VERB_SUFFIX_RE.test(n);
+}
+
+// Confirmación de registro / acuse de recibo: sustancia conversacional válida.
+const CONFIRMACION_RE = new RegExp(
+  "\\b(" +
+    "registrado|registrada|anotado|anotada|apuntado|guardado|actualizado|fijado|" +
+    "hecho|listo|perfecto|entendido|confirmado|de acuerdo|tomo nota|queda claro|" +
+    "registado|feito|pronto|anotei|combinado|" +
+    "noted|logged|recorded|done|got it|understood|all set" +
+    ")\\b",
+);
+
 /**
- * Garantiza que la respuesta tenga sustancia. Si NO contiene ninguna cifra real
- * Y es corta (<220) o solo relleno genérico, la sustituye por una petición segura
- * del dato que falta. Si ya trae una cifra real, la deja intacta. Puro.
+ * ¿El texto tiene SUSTANCIA CONVERSACIONAL? Cuenta como sustancia válida —y por
+ * tanto NO se toca— cualquiera de estas: confirmación, propuesta de siguiente
+ * paso, pregunta del propio modelo, mención a un concepto del estado, o una
+ * explicación con verbo de longitud normal (incluida la redirección de una
+ * digresión, que es exactamente eso).
+ */
+export function tieneSustanciaConversacional(text: string): boolean {
+  const t = text.trim();
+  if (!t) return false;
+  const n = norm(t);
+  if (CONFIRMACION_RE.test(n)) return true;              // confirmación
+  if (PROPOSAL_RE.test(n)) return true;                  // propuesta / siguiente paso
+  if (t.includes("?")) return true;                      // pregunta del propio modelo
+  if (conceptsInSentence(t).length > 0) return true;     // menciona un concepto del estado
+  return t.length >= 30 && tieneVerbo(t);                // explicación normal
+}
+
+/**
+ * ¿Es puro relleno genérico ("necesito más información para ayudarte mejor")?
+ * No es prosa buena que proteger: no confirma, no propone y no explica nada.
+ * Solo cuenta como relleno si NO trae ninguna otra sustancia.
+ */
+function esRellenoGenerico(text: string): boolean {
+  if (!GENERIC_SKELETON.test(text)) return false;
+  if (hasValidSubstance(text)) return false;
+  if (conceptsInSentence(text).length > 0) return false;
+  return text.trim().length < 220;
+}
+
+/**
+ * ÚLTIMO RECURSO (PIEZA 2). Actúa SOLO si la respuesta está realmente vacía:
+ * menos de 30 caracteres, o sin ninguna frase con verbo, o puro relleno
+ * genérico. Cualquier otra cosa —confirmación, propuesta, redirección de
+ * digresión, explicación sin cifras, pregunta del modelo, mención a un concepto
+ * del estado— se entrega INTACTA.
+ *
+ * REGLA DEL CASO A: si `missing` está vacío, está PROHIBIDO pedir datos. El
+ * motor ya los tiene; una plantilla pidiéndolos es una contradicción del propio
+ * sistema ("Para darte una cifra exacta necesito tus ingresos y gastos" con
+ * ingreso 2300, gastos 1750 y cuota ya calculada). Mejor un hueco que una
+ * mentira.
+ *
+ * En modo `minimal` no actúa nunca. Puro.
  */
 export function ensureSubstance(
   text: string,
-  opts: { lang?: Language; missing?: string[] } = {},
+  opts: { lang?: Language; missing?: string[]; enforcement?: EnforcementMode } = {},
 ): string {
+  if ((opts.enforcement ?? DEFAULT_ENFORCEMENT_MODE) === "minimal") return text;
+
   const lang = opts.lang ?? detectLanguage(text);
-  if (hasValidSubstance(text)) return text; // cifra real o referencia % etiquetada
-  const esCorto = text.trim().length < 220;
-  const esGenerico = GENERIC_SKELETON.test(text);
-  if (!esCorto && !esGenerico) return text; // largo y con contenido: se respeta
-  return safeAsk(opts.missing?.[0], lang);
+  const missing0 = opts.missing?.[0];
+
+  const vacia = !hasValidSubstance(text) && !tieneSustanciaConversacional(text);
+  if (!vacia && !esRellenoGenerico(text)) return text;
+
+  // Caso A — prohibido pedir lo que el motor ya tiene.
+  if (!missing0) return text.trim() ? text : SAFE_EMPTY[lang];
+
+  return safeAsk(missing0, lang);
 }
 
 // ── Limpieza ───────────────────────────────────────────────────────────────
@@ -675,14 +832,20 @@ function esNum(n: number): string {
  * Procesa las cifras bloqueadas frase a frase:
  *   · con `correccion` (mismatch de un concepto que el motor SÍ conoce) → la
  *     cifra se corrige EN SU SITIO y la frase se conserva. El motor sabe el valor
- *     bueno, así que lo pone en vez de borrar información útil.
+ *     bueno, así que lo pone en vez de borrar información útil. En modo `minimal`
+ *     esta corrección NO se aplica: la frase se elimina (PIEZA 1).
  *   · sin `correccion` (monto inventado sin respaldo) → se elimina la frase entera.
  * Cuenta `eliminadas` (frases borradas) y `corregidas` (cifras sustituidas).
+ *
+ * PIEZA 5 — TODA operación queda registrada en `mutations`: la corrección en
+ * sitio (antes/después de la cifra) y también la ELIMINACIÓN (después = ""),
+ * que hasta ahora no dejaba rastro alguno.
  */
 function removeBlockedSentences(
   text: string,
   blocked: BlockedFigure[],
   mutations?: Mutation[],
+  enforcement: EnforcementMode = DEFAULT_ENFORCEMENT_MODE,
 ): { texto: string; eliminadas: number; corregidas: number } {
   const segments = segmentSentences(text);
   const kept: string[] = [];
@@ -691,10 +854,22 @@ function removeBlockedSentences(
 
   for (const seg of segments) {
     const enFrase = blocked.filter((b) => b.start >= seg.start && b.start < seg.end);
-    const aEliminar = enFrase.some((b) => b.correccion === undefined);
+    // MINIMAL: se ignora `correccion` — nunca se reescribe una cifra, se elimina
+    // la frase que la contiene.
+    const aEliminar = enFrase.some(
+      (b) => b.correccion === undefined || enforcement === "minimal",
+    );
 
     if (aEliminar) {
       eliminadas++;
+      for (const b of enFrase) {
+        mutations?.push({
+          capa: "grounding",
+          regla: b.motivo,
+          antes: seg.text.trim(),
+          despues: "",
+        });
+      }
       continue;
     }
     if (enFrase.length === 0) {
@@ -760,7 +935,12 @@ export function applyPolicy(
   // MODO MVP (v2): corrige las cifras de concepto conocido en su sitio y elimina
   // las frases con montos inventados. El cierre (si falta tras eliminar) lo
   // decide la capa 8, nunca esta.
-  const { texto, eliminadas, corregidas } = removeBlockedSentences(modelResponse, blocked, options.mutations);
+  const { texto, eliminadas, corregidas } = removeBlockedSentences(
+    modelResponse,
+    blocked,
+    options.mutations,
+    options.enforcement ?? DEFAULT_ENFORCEMENT_MODE,
+  );
 
   const texto_final = eliminadas === 0
     ? (corregidas > 0 ? texto : modelResponse)

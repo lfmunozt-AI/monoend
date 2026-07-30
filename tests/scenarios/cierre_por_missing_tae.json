@@ -2,13 +2,22 @@
   "name": "cierre_por_missing_tae",
   "playbook": "PB3",
   "language": "es",
-  "description": "Bug de cierre validado en QA real (estado de Supabase confirmado: crédito 30000 a 84 meses, tae_es_referencia=true, missing=['tae'], ingreso 10000, gastos 9500). La cuota (452,78 €) es correcta y la simulación está bien verbalizada, PERO el modelo cerraba con '¿Te gustaría proceder con esta compra?' en vez de pedir la TAE que el motor marcó como faltante. rewriteDelegativeClosing no lo caza porque no es una frase delegativa — es un cierre lícito de prioridad equivocada. enforceMissingClosing lo sustituye por la petición canónica del campo missing[0].",
+  "description": "Cierre por missing con el CONTRATO NUEVO (PIEZA 4 — 'los guardarraíles bloquean lo falso, nunca sustituyen lo bueno'). Estado real de QA: crédito 30000 a 84 meses, tae_es_referencia=true, missing=['tae'], ingreso 10000, gastos 9500. T1: el modelo cierra con su propia pregunta lícita ('¿Te gustaría proceder con esta compra?'); ANTES se sustituía por la petición canónica de TAE — ahora se respeta INTACTA aunque no coincida con missing[0], porque reemplazar prosa buena del modelo por una plantilla nuestra está prohibido. T2: el modelo NO cierra con nada, y ahí sí se AÑADE la petición canónica del dato que falta. La prioridad del missing sigue viva donde no destruye nada.",
   "turns": [
     {
       "user": "Gano 10000 euros al mes y mis gastos son 9500. Quiero financiar un carro de 30000 a 84 meses.",
       "fixtureResponse": "Calculando con una TAE de referencia del 7% —tu banco te dará la real—, la cuota sería de 452,78 €/mes, sobre un sobrante de 500 €. ¿Te gustaría proceder con esta compra?",
       "expectBlocked": false,
-      "expectNotContains": ["proceder con esta compra"],
+      "expectContains": ["452,78", "proceder con esta compra"],
+      "expectNotContains": ["¿Qué TAE te ofrece tu banco?"],
+      "expectScenarioState": {
+        "credito": { "monto": 30000, "plazo_meses": 84, "tae_es_referencia": true }
+      }
+    },
+    {
+      "user": "¿Y esa cuota cómo queda contra mi sobrante?",
+      "fixtureResponse": "La cuota de 452,78 €/mes cabe en tu sobrante de 500 €, pero deja un margen mínimo.",
+      "expectBlocked": false,
       "expectContains": ["452,78", "¿Qué TAE te ofrece tu banco?"],
       "expectScenarioState": {
         "credito": { "monto": 30000, "plazo_meses": 84, "tae_es_referencia": true }
