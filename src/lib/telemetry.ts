@@ -44,17 +44,25 @@ export interface ResponseTelemetryPayload {
   extraccionIncompleta: boolean | null
   numerosHuerfanos: number[] | null
   discrepanciaGastos: boolean | null
+  /**
+   * PIEZA 2 (6ª tanda) — "si scenario_state falla, se registra como error
+   * crítico en la telemetría": sin este campo el fallo solo quedaba en los
+   * logs del servidor, invisible para la revisión nocturna (G1b).
+   */
+  scenarioPersistFailed: boolean | null
 }
 
 /**
  * Inserta una fila de telemetría de respuesta. Nunca lanza: si falla, solo
  * hace console.warn — la conversación ya se persistió y no debe verse
- * afectada por esto.
+ * afectada por esto. Devuelve `true`/`false` (éxito/fallo) para que
+ * `persistTurn` (PIEZA 2, 6ª tanda) pueda contarlo entre sus escrituras — el
+ * contrato "nunca lanza" se mantiene, solo se hace observable el resultado.
  */
 export async function logResponseTelemetry(
   admin: SupabaseClient,
   payload: ResponseTelemetryPayload,
-): Promise<void> {
+): Promise<boolean> {
   try {
     const { error } = await admin.from('response_telemetry').insert({
       user_id: payload.userId,
@@ -85,9 +93,16 @@ export async function logResponseTelemetry(
       extraccion_incompleta: payload.extraccionIncompleta,
       numeros_huerfanos: payload.numerosHuerfanos,
       discrepancia_gastos: payload.discrepanciaGastos,
+      scenario_persist_failed: payload.scenarioPersistFailed,
     })
     if (error) throw new Error(error.message)
+    return true
   } catch (err) {
-    console.warn('[telemetry] logResponseTelemetry falló (no bloquea el chat):', err)
+    console.error('[telemetry] logResponseTelemetry falló (no bloquea el chat, pero la fila no se escribió):', JSON.stringify({
+      user_id: payload.userId,
+      conversation_id: payload.conversationId,
+      error: err instanceof Error ? err.message : String(err),
+    }))
+    return false
   }
 }

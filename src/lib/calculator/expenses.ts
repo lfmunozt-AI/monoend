@@ -137,6 +137,18 @@ export function classifyExpenses(items: ExpenseItem[]): ExpenseClassification {
 const NO_ES_GASTO =
   /\b(ingreso|ingresos|sueldo|salario|gano|gana|gasto|gastos|meta|objetivo|plazo|prestamo|credito|financiar|ahorro|ahorros|deuda)\b/;
 
+// BUG BLOQUEANTE (6ª tanda, testdev5) — "...dudo entre 200000, 300000 o
+// 150000" (candidatas de precio de una meta sin decidir, mencionadas en el
+// MISMO mensaje que los gastos) se colaba como DOS ítems de gasto: {"dudo
+// entre": 200000} y {"o": 150000}. El regex de arriba no exige que el
+// "nombre" capturado SEA un nombre de gasto — solo que sean letras y
+// espacios antes del número. Un nombre que TERMINA en un conector
+// (preposición/artículo/conjunción) nunca es un gasto real ("luz", "netflix",
+// "arriendo" no terminan en "entre"/"o"/"de"): es el resto de una frase que
+// solo ENVUELVE al número, no lo nombra.
+const TERMINA_EN_CONECTOR_RE =
+  /\b(?:entre|de|del|a|al|con|sin|para|por|o|u|y|el|la|los|las|un|una|unos|unas|que|es|son)$/i;
+
 /**
  * Extrae una lista de gastos ("netflix 100, luz 50, …") del mensaje. Segmenta por
  * comas, saltos y puntos, y en cada segmento busca un nombre corto seguido de un
@@ -154,7 +166,7 @@ function parseExpenseListNameFirst(message: string): ExpenseItem[] {
     const m = re.exec(seg.trim());
     if (!m) continue;
     const name = m[1].trim();
-    if (!name || NO_ES_GASTO.test(norm(name))) continue;
+    if (!name || NO_ES_GASTO.test(norm(name)) || TERMINA_EN_CONECTOR_RE.test(norm(name))) continue;
     const amount = parseDigitAmount(m[2]);
     if (!Number.isFinite(amount) || amount <= 0) continue;
     items.push({ name, amount });

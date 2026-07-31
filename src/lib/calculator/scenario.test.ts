@@ -16,8 +16,11 @@ import {
   detectarNumerosHuerfanos,
   detectarDiscrepanciaGastos,
   notaExtraccionAmbigua,
-  deltaSeguro,
+  deltaSinGastosPorDiscrepancia,
   renderDatosRecienEntendidos,
+  pideRecorte,
+  notaFaltaDesglose,
+  detectarEventosICA,
 } from "./scenario";
 
 test("merge: TAE 9% real sobre un crédito previo → recalcula tae_es_referencia", () => {
@@ -527,7 +530,7 @@ test("escenario 4 · 'gano entre 2000 y 2500' → huérfano (rango, no asigna)",
   const huerfanos = detectarNumerosHuerfanos(msg, delta);
   assert.equal(huerfanos.extraccionIncompleta, true, `debería quedar ambiguo: ${JSON.stringify({ delta, huerfanos })}`);
   const nota = notaExtraccionAmbigua(huerfanos, detectarDiscrepanciaGastos(delta));
-  assert.match(nota!, /EXTRACCIÓN INCOMPLETA/);
+  assert.match(nota!, /NÚMEROS SIN ASIGNAR/);
 });
 
 test("escenario 5 · 'gano 27600 al año' → no asume mensual (huérfano, no 27600 como ingreso mensual)", () => {
@@ -572,7 +575,18 @@ test("detectarDiscrepanciaGastos: sin agregado+detalle simultáneos → sin disc
   );
 });
 
-test("deltaSeguro: despoja los campos financieros, conserva señales no numéricas", () => {
+test("deltaSinGastosPorDiscrepancia: SIN discrepancia → no-op, devuelve el delta intacto", () => {
+  const delta = {
+    ingreso_mensual: 2300,
+    gastos_mensuales: 1850,
+    credito: { monto: 30000, plazo_meses: 36, tae_es_referencia: true },
+    meta: { titulo: "carro" },
+  };
+  const out = deltaSinGastosPorDiscrepancia(delta, { discrepancia: false });
+  assert.deepEqual(out, delta);
+});
+
+test("deltaSinGastosPorDiscrepancia: CON discrepancia → despoja SOLO los 3 campos de gastos, conserva el resto", () => {
   const delta = {
     ingreso_mensual: 2300,
     gastos_mensuales: 1000,
@@ -582,14 +596,109 @@ test("deltaSeguro: despoja los campos financieros, conserva señales no numéric
     meta: { titulo: "carro" },
     meta_cambio_explicito: true,
   };
-  const seguro = deltaSeguro(delta);
-  assert.equal(seguro.ingreso_mensual, undefined);
-  assert.equal(seguro.gastos_mensuales, undefined);
-  assert.equal(seguro.gastos_detalle, undefined);
-  assert.equal(seguro.gastos_es_detalle, undefined);
-  assert.equal(seguro.credito, undefined);
-  assert.equal(seguro.meta, undefined);
-  assert.equal(seguro.meta_cambio_explicito, true, "señal no numérica sobrevive");
+  const sinGastos = deltaSinGastosPorDiscrepancia(delta, { discrepancia: true, agregado: 1000, suma: 1000 });
+  assert.equal(sinGastos.gastos_mensuales, undefined);
+  assert.equal(sinGastos.gastos_detalle, undefined);
+  assert.equal(sinGastos.gastos_es_detalle, undefined);
+  // TODO lo demás sobrevive — a diferencia de la vieja deltaSeguro (bug testdev5).
+  assert.equal(sinGastos.ingreso_mensual, 2300);
+  assert.deepEqual(sinGastos.credito, delta.credito);
+  assert.deepEqual(sinGastos.meta, delta.meta);
+  assert.equal(sinGastos.meta_cambio_explicito, true);
+});
+
+// ── PIEZA 1 (6ª tanda) — BUG BLOQUEANTE testdev5: huérfanos NUNCA descartan ──
+// El mensaje real traía ingreso y gastos limpios MÁS un par de cifras de una
+// meta sin decidir (candidatas de precio de casa). La versión anterior
+// (deltaSeguro) descartaba TODO el delta ante cualquier huérfano — ingreso y
+// gastos se perdían para siempre. Ahora los huérfanos son solo una pregunta;
+// lo demás se persiste con normalidad.
+
+test("testdev5 · ingreso y gastos limpios (extraídos por extractScenarioDelta) sobreviven a huérfanos de una meta sin decidir", () => {
+  // "gano 2300 y gasto 2000 al mes" es el fragmento REAL que fija ingreso y
+  // gastos (extraído por el mismo extractScenarioDelta que usa producción);
+  // los huérfanos (200000/300000/150000, candidatas de precio de una casa que
+  // el usuario aún no decide) se simulan aparte para no depender de la
+  // fragilidad del parser de listas de gastos ante números sueltos sin
+  // contexto — eso es harina de otro costal, no de esta pieza.
+  const fragmentoLimpio = "gano 2300 y gasto 2000 al mes";
+  const delta = extractScenarioDelta(fragmentoLimpio);
+  assert.equal(delta.ingreso_mensual, 2300, "el ingreso se extrae con confianza");
+  assert.equal(delta.gastos_mensuales, 2000, "los gastos se extraen con confianza");
+
+  const msgConHuerfanos = fragmentoLimpio + ". Para la casa todavía dudo entre 200000, 300000 y 150000.";
+  const huerfanos = detectarNumerosHuerfanos(msgConHuerfanos, delta);
+  const discrepancia = detectarDiscrepanciaGastos(delta);
+  assert.ok(huerfanos.extraccionIncompleta, "las cifras de la casa sin decidir SÍ deben quedar huérfanas");
+  assert.deepEqual(huerfanos.numerosHuerfanos.sort((a, b) => a - b), [150000, 200000, 300000]);
+
+  const deltaAPersistir = deltaSinGastosPorDiscrepancia(delta, discrepancia);
+  const s = mergeScenario({}, deltaAPersistir);
+  assert.equal(s.ingreso_mensual, 2300, "BUG testdev5: el ingreso NO debe perderse por los huérfanos");
+  assert.equal(s.gastos_mensuales, 2000, "BUG testdev5: los gastos NO deben perderse por los huérfanos");
+  assert.ok(!s.missing.includes("ingreso"));
+  assert.ok(!s.missing.includes("gastos"));
+});
+
+test("rango a nivel de CAMPO: 'gano entre 2000 y 2500' no asigna ninguno de los dos (baja confianza)", () => {
+  const msg = "gano entre 2000 y 2500";
+  const delta = extractScenarioDelta(msg);
+  assert.equal(delta.ingreso_mensual, undefined, "un rango no es una cifra: ningún valor se asigna a ciegas");
+  const huerfanos = detectarNumerosHuerfanos(msg, delta);
+  assert.deepEqual(huerfanos.numerosHuerfanos.sort((a, b) => a - b), [2000, 2500]);
+});
+
+// ── PIEZA 5 (6ª tanda) — INVARIANTE: ingreso/gastos conocidos NUNCA en missing ─
+
+test("invariante: con ingreso_mensual y gastos_mensuales presentes, 'ingreso'/'gastos' nunca están en missing", () => {
+  const s = mergeScenario({}, { ingreso_mensual: 2300, gastos_mensuales: 2000 });
+  assert.ok(!s.missing.includes("ingreso"));
+  assert.ok(!s.missing.includes("gastos"));
+});
+
+// ── PIEZA 7 (6ª tanda) — AGREGADO BASTA PARA CALCULAR, DETALLE PARA RECORTAR ──
+
+test("tiene_agregado_gastos / tiene_detalle_gastos: solo agregado", () => {
+  const s = mergeScenario({}, { gastos_mensuales: 2000 });
+  assert.equal(s.tiene_agregado_gastos, true);
+  assert.equal(s.tiene_detalle_gastos, false);
+});
+
+test("tiene_agregado_gastos / tiene_detalle_gastos: agregado + detalle (lista desglosada)", () => {
+  const s = mergeScenario({}, extractScenarioDelta("netflix 15, luz 80, agua 30"));
+  assert.equal(s.tiene_agregado_gastos, true, "el detalle SIEMPRE recalcula el agregado (BUG 1)");
+  assert.equal(s.tiene_detalle_gastos, true);
+});
+
+test("pideRecorte: detecta la petición de un plan de recorte (ES/PT/EN)", () => {
+  assert.equal(pideRecorte("¿qué puedo recortar?"), true);
+  assert.equal(pideRecorte("quiero reducir mis gastos"), true);
+  assert.equal(pideRecorte("onde posso cortar despesas?"), true);
+  assert.equal(pideRecorte("where can I cut expenses?"), true);
+  assert.equal(pideRecorte("¿cuánto puedo ahorrar al año?"), false);
+});
+
+test("notaFaltaDesglose: agregado sin detalle + petición de recorte → pide el desglose citando el total", () => {
+  const s = mergeScenario({}, { gastos_mensuales: 2000 });
+  const nota = notaFaltaDesglose(s, "¿qué puedo recortar?");
+  assert.ok(nota);
+  assert.match(nota!, /2000/);
+  assert.match(nota!, /PROHIBIDO volver a preguntar/);
+  assert.match(nota!, /DESGLOSE/);
+});
+
+test("notaFaltaDesglose: sin petición de recorte → null (no se fuerza la pregunta)", () => {
+  const s = mergeScenario({}, { gastos_mensuales: 2000 });
+  assert.equal(notaFaltaDesglose(s, "¿cuánto puedo ahorrar al año?"), null);
+});
+
+test("notaFaltaDesglose: ya hay detalle → null (nada que pedir)", () => {
+  const s = mergeScenario({}, extractScenarioDelta("netflix 15, luz 80, agua 30"));
+  assert.equal(notaFaltaDesglose(s, "¿qué puedo recortar?"), null);
+});
+
+test("notaFaltaDesglose: sin agregado siquiera → null (lo cubre el missing genérico de 'gastos')", () => {
+  assert.equal(notaFaltaDesglose(mergeScenario({}, {}), "¿qué puedo recortar?"), null);
 });
 
 test("renderDatosRecienEntendidos: null si el delta no trae nada", () => {
@@ -605,4 +714,63 @@ test("renderDatosRecienEntendidos: caso real → ingreso, gastos y desglose", ()
   assert.match(nota!, /gastos mensuales: 1850/);
   assert.match(nota!, /arriendo 1000/);
   assert.match(nota!, /DATOS RECIÉN ENTENDIDOS/);
+});
+
+// ── PIEZA 4 (6ª tanda) — EL ICA MIDE CONOCIMIENTO, NO CHARLA ─────────────────
+
+test("detectarEventosICA: turno sin datos nuevos → []", () => {
+  const s = mergeScenario({}, { ingreso_mensual: 2300 });
+  assert.deepEqual(detectarEventosICA(s, mergeScenario(s, {})), []);
+});
+
+test("detectarEventosICA: primer ingreso y gastos → dato_ingreso + dato_gastos", () => {
+  const antes = mergeScenario({}, {});
+  const despues = mergeScenario(antes, { ingreso_mensual: 2300, gastos_mensuales: 2000 });
+  const eventos = detectarEventosICA(antes, despues);
+  assert.ok(eventos.includes("dato_ingreso"));
+  assert.ok(eventos.includes("dato_gastos"));
+});
+
+test("detectarEventosICA: repetir el MISMO ingreso en un turno posterior → NO vuelve a disparar dato_ingreso", () => {
+  const antes = mergeScenario({}, { ingreso_mensual: 2300 });
+  const despues = mergeScenario(antes, { ingreso_mensual: 2300 });
+  assert.ok(!detectarEventosICA(antes, despues).includes("dato_ingreso"));
+});
+
+test("detectarEventosICA: cambiar el ingreso (ya conocido → otro valor) NO cuenta como dato nuevo", () => {
+  const antes = mergeScenario({}, { ingreso_mensual: 2300 });
+  const despues = mergeScenario(antes, { ingreso_mensual: 2500 });
+  assert.ok(!detectarEventosICA(antes, despues).includes("dato_ingreso"), "actualizar no es 'aprender por primera vez'");
+});
+
+test("detectarEventosICA: desglose nuevo → detalle_gastos", () => {
+  const antes = mergeScenario({}, { gastos_mensuales: 2000 });
+  const despues = mergeScenario(antes, extractScenarioDelta("netflix 15, luz 80, agua 30"));
+  assert.ok(detectarEventosICA(antes, despues).includes("detalle_gastos"));
+});
+
+test("detectarEventosICA: meta derivada de un crédito NO cuenta como meta_declarada", () => {
+  const antes = mergeScenario({}, {});
+  const despues = mergeScenario(antes, extractScenarioDelta("quiero financiar un carro de 30000 a 36 meses"));
+  assert.ok(despues.meta_derivada, "precondición: la meta quedó derivada");
+  assert.ok(!detectarEventosICA(antes, despues).includes("meta_declarada"));
+  assert.ok(detectarEventosICA(antes, despues).includes("credito_declarado"));
+  assert.ok(detectarEventosICA(antes, despues).includes("plazo_declarado"));
+});
+
+test("detectarEventosICA: meta declarada explícitamente por el usuario → meta_declarada", () => {
+  const antes = mergeScenario({}, {});
+  const despues = mergeScenario(antes, { meta: { titulo: "casa", monto: 150000 } });
+  assert.ok(detectarEventosICA(antes, despues).includes("meta_declarada"));
+});
+
+test("detectarEventosICA: TAE real nueva (antes de referencia) → tae_declarada", () => {
+  const antes = mergeScenario({}, extractScenarioDelta("quiero financiar un carro de 30000 a 36 meses"));
+  const despues = mergeScenario(antes, extractScenarioDelta("el banco me ofrece un 9%"));
+  assert.ok(detectarEventosICA(antes, despues).includes("tae_declarada"));
+});
+
+test("detectarEventosICA: antes undefined (primer turno de la conversación) no rompe", () => {
+  const despues = mergeScenario({}, { ingreso_mensual: 2300 });
+  assert.deepEqual(detectarEventosICA(undefined, despues), ["dato_ingreso"]);
 });

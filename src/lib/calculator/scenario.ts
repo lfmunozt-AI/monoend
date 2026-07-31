@@ -130,6 +130,19 @@ export interface ScenarioState {
    * turno FINANCIERO lo reinicia. Nunca se corta al usuario en seco.
    */
   digresiones_seguidas?: number;
+  /**
+   * PIEZA 7 (6ª tanda) — ¿hay un agregado de gastos conocido? Derivado de
+   * `gastos_mensuales !== undefined`, expuesto explícito para que el prompt no
+   * tenga que inferirlo. El agregado BASTA para sobrante/capacidad/brecha —
+   * nunca se vuelve a pedir el total si esto es true.
+   */
+  tiene_agregado_gastos?: boolean;
+  /**
+   * PIEZA 7 (6ª tanda) — ¿hay un desglose por partida conocido? Derivado de
+   * `gastos_detalle !== undefined`. Solo hace falta para proponer un plan de
+   * RECORTE (qué partida bajar y cuánto) — nunca para calcular viabilidad.
+   */
+  tiene_detalle_gastos?: boolean;
   /** Qué falta para completar el playbook activo. Recalculado en cada merge. */
   missing: string[];
 }
@@ -180,6 +193,23 @@ function esCifraAnual(n: string, ctxRe: RegExp, matchAmount: RegExpExecArray): b
   const base = n.search(ctxRe);
   const after = n.slice(base + matchAmount.index + matchAmount[0].length, base + matchAmount.index + matchAmount[0].length + 20);
   return MARCADOR_ANUAL_RE.test(after);
+}
+
+// PIEZA 1 (6ª tanda) — RANGO. "gano entre 2000 y 2500" no tiene una cifra:
+// tiene DOS candidatas. Elegir la primera que capture AMOUNT (2000) es
+// justamente la suposición de baja confianza que el principio prohíbe — así
+// se originó el bug de la tanda anterior (un campo "confiado" que en
+// realidad era una adivinanza). Si el número capturado trae pegado un
+// conector de rango ("y"/"a"/"o"/"-"/"hasta") seguido de OTRO número, NINGUNO
+// de los dos se asigna: ambos quedan como huérfanos genuinos para que el
+// detector (más abajo) pida cuál es el correcto.
+const RANGO_AFTER_RE = /^\s*(?:-|y|o|a|to|or|hasta)\s*\d/;
+
+/** ¿El número capturado es la primera mitad de un rango ("X y/a/o/- Y")? */
+function esRango(n: string, ctxRe: RegExp, matchAmount: RegExpExecArray): boolean {
+  const base = n.search(ctxRe);
+  const after = n.slice(base + matchAmount.index + matchAmount[0].length, base + matchAmount.index + matchAmount[0].length + 20);
+  return RANGO_AFTER_RE.test(after);
 }
 
 // Meta.
@@ -302,8 +332,9 @@ export function extractScenarioDelta(
   if (INGRESO_CTX.test(n)) {
     const a = AMOUNT.exec(n.slice(n.search(INGRESO_CTX)));
     // PIEZA 1 — "27600 al año" NO se asigna como si fuera mensual: el número
-    // queda huérfano a propósito (ver MARCADOR_ANUAL_RE arriba).
-    if (a && !esCifraAnual(n, INGRESO_CTX, a)) {
+    // queda huérfano a propósito (ver MARCADOR_ANUAL_RE arriba). "entre 2000 y
+    // 2500" tampoco se asigna: es un rango, no una cifra (ver esRango arriba).
+    if (a && !esCifraAnual(n, INGRESO_CTX, a) && !esRango(n, INGRESO_CTX, a)) {
       const v = parseDigitAmount(a[1]);
       if (Number.isFinite(v) && v > 0) delta.ingreso_mensual = v;
     }
@@ -345,7 +376,7 @@ export function extractScenarioDelta(
   } else if (GASTO_CTX.test(n)) {
     // Agregado en una sola cifra ("mis gastos son 1500").
     const a = AMOUNT.exec(n.slice(n.search(GASTO_CTX)));
-    if (a && !esCifraAnual(n, GASTO_CTX, a)) {
+    if (a && !esCifraAnual(n, GASTO_CTX, a) && !esRango(n, GASTO_CTX, a)) {
       const v = parseDigitAmount(a[1]);
       if (Number.isFinite(v) && v > 0) delta.gastos_mensuales = v;
     }
@@ -520,10 +551,26 @@ export function detectarDiscrepanciaGastos(delta: Partial<ScenarioState>): Discr
 
 /**
  * Nota de aclaración para el system prompt cuando la extracción es ambigua
- * (PIEZA 1/2 · orquestador). PRIORIDAD: una discrepancia aritmética es más
- * concreta que un huérfano genérico — si hay ambas, se pregunta por la
- * discrepancia primero (el huérfano probablemente sea el mismo número).
- * `null` si nada es ambiguo.
+ * (PIEZA 1/2 · orquestador).
+ *
+ * BUG BLOQUEANTE (6ª tanda, testdev5) — la versión anterior de esta pieza
+ * hacía que un huérfano DESCARTARA el delta completo (`deltaSeguro`
+ * eliminaba ingreso_mensual/gastos_mensuales/credito/meta aunque esos campos
+ * se hubieran extraído con confianza). Un mensaje real con ingreso y gastos
+ * limpios más un par de cifras de una meta sin decidir aún (p. ej. "casa de
+ * 200000 o 300000, quizá 150000") perdía el ingreso y los gastos para
+ * SIEMPRE — nada se persistía. Corregido: los huérfanos son SOLO una
+ * pregunta de aclaración; NUNCA tocan campos ya extraídos con confianza. Por
+ * eso esta nota ya NO dice "cero cifras derivadas" para huérfanos — lo que
+ * SÍ se sabe se calcula igual; solo se pide aclarar los números sueltos.
+ *
+ * La discrepancia de gastos sigue siendo distinta: agregado y desglose son
+ * DOS lecturas del MISMO campo que se contradicen, así que ese campo (y solo
+ * ese) no se usa hasta reconciliar — ver `deltaSinGastosPorDiscrepancia`.
+ *
+ * PRIORIDAD: una discrepancia aritmética es más concreta que un huérfano
+ * genérico — si hay ambas, se pregunta por la discrepancia primero (el
+ * huérfano probablemente sea el mismo número). `null` si nada es ambiguo.
  */
 export function notaExtraccionAmbigua(
   huerfanos: ExtraccionIncompletaResult,
@@ -531,37 +578,48 @@ export function notaExtraccionAmbigua(
 ): string | null {
   if (discrepancia.discrepancia) {
     return (
-      `DISCREPANCIA ARITMÉTICA: el usuario declaró un total de ${discrepancia.agregado} € pero el ` +
-      `detalle suma ${discrepancia.suma} €. Pregunta cuál es el correcto antes de calcular nada. ` +
-      "Cero cifras derivadas en este turno."
+      `DISCREPANCIA ARITMÉTICA: el usuario declaró un total de gastos de ${discrepancia.agregado} € pero ` +
+      `el detalle suma ${discrepancia.suma} €. Pregunta cuál es el correcto antes de dar una cifra de ` +
+      "gastos o cualquier derivada que dependa de ellos (sobrante, capacidad, viabilidad de una cuota). " +
+      "El resto de los datos que ya tienes (ingreso, meta, crédito…) SÍ los puedes usar con normalidad."
     );
   }
   if (huerfanos.extraccionIncompleta) {
     return (
-      `EXTRACCIÓN INCOMPLETA: el usuario mencionó los números ${huerfanos.numerosHuerfanos.join(", ")} ` +
-      "que no he podido asignar. Pregunta a qué corresponden ANTES de calcular nada. " +
-      "Cero cifras derivadas en este turno."
+      `NÚMEROS SIN ASIGNAR: el usuario mencionó ${huerfanos.numerosHuerfanos.join(", ")} y no quedó claro a ` +
+      "qué corresponden. Pregúntale a qué se refieren — con calidez, no como un interrogatorio — pero eso " +
+      "NO te impide seguir usando con normalidad los datos que SÍ tienes claros de este mismo mensaje " +
+      "(ingreso, gastos, meta, crédito…): calcula con esos igual, y añade la pregunta de los números " +
+      "sueltos aparte."
     );
   }
   return null;
 }
 
 /**
- * Copia del delta SIN los campos financieros — se usa cuando la extracción es
- * ambigua: "ningún dato entra al estado sin que el usuario lo vea" es literal,
- * así que nada de esto se persiste hasta que el usuario aclare. Las señales no
- * numéricas (cambio de meta, confirmación de plan) sobreviven: no son parte de
- * la ambigüedad detectada.
+ * Copia del delta sin los campos DE GASTOS — se usa SOLO cuando hay
+ * discrepancia aritmética (agregado ≠ suma del desglose, el mismo campo
+ * contándose a sí mismo dos veces de forma contradictoria). El resto del
+ * delta (ingreso, crédito, meta, señales no numéricas…) se persiste igual:
+ * "ningún dato entra sin que el usuario lo vea" se aplica al campo ambiguo,
+ * NUNCA al mensaje entero.
+ *
+ * BUG BLOQUEANTE (6ª tanda) — esta función reemplaza a la antigua
+ * `deltaSeguro`, que despojaba TODO campo financiero (ingreso, crédito, meta
+ * incluidos) ante CUALQUIER huérfano en el mensaje, aunque esos campos se
+ * hubieran extraído con confianza y no tuvieran nada que ver con la
+ * ambigüedad. Un huérfano YA NO despoja nada — ver `notaExtraccionAmbigua`.
  */
-export function deltaSeguro(delta: Partial<ScenarioState>): Partial<ScenarioState> {
-  const seguro = { ...delta };
-  delete seguro.ingreso_mensual;
-  delete seguro.gastos_mensuales;
-  delete seguro.gastos_detalle;
-  delete seguro.gastos_es_detalle;
-  delete seguro.credito;
-  delete seguro.meta;
-  return seguro;
+export function deltaSinGastosPorDiscrepancia(
+  delta: Partial<ScenarioState>,
+  discrepancia: DiscrepanciaGastosResult,
+): Partial<ScenarioState> {
+  if (!discrepancia.discrepancia) return delta;
+  const sinGastos = { ...delta };
+  delete sinGastos.gastos_mensuales;
+  delete sinGastos.gastos_detalle;
+  delete sinGastos.gastos_es_detalle;
+  return sinGastos;
 }
 
 // ── PIEZA 3 (5ª tanda) — ECO DE CONFIRMACIÓN ─────────────────────────────────
@@ -746,6 +804,12 @@ export function mergeScenario(
     base.meta_derivada = true;
   }
 
+  // PIEZA 7 (6ª tanda) — expone explícito lo que antes había que inferir del
+  // estado: agregado y desglose son necesidades DISTINTAS (calcular vs.
+  // recortar), y el prompt no debe adivinar cuál de las dos tiene.
+  base.tiene_agregado_gastos = base.gastos_mensuales !== undefined;
+  base.tiene_detalle_gastos = base.gastos_detalle !== undefined;
+
   base.missing = computeMissing(base);
   return base;
 }
@@ -865,6 +929,57 @@ export function notaSinCifrasDePlan(s: Partial<ScenarioState> | undefined): stri
   return `NO propongas cifras de plan en este turno: falta ${campo}. Pídelo con calidez.`;
 }
 
+// ── PIEZA 7 (6ª tanda) — AGREGADO BASTA PARA CALCULAR, DETALLE PARA RECORTAR ──
+//
+// El agregado de gastos (gastos_mensuales) es SUFICIENTE para sobrante,
+// capacidad, brecha y viabilidad de una cuota — con eso NUNCA se vuelve a
+// preguntar por ingreso ni gastos. El desglose (gastos_detalle) solo hace
+// falta para proponer QUÉ partida recortar y cuánto. Pedir el desglose
+// cuando nadie pidió un plan de recorte sería el mismo error que este
+// principio corrige en otra forma: forzar una pregunta que el turno no
+// necesita. Por eso esta nota SOLO se activa cuando el mensaje del usuario
+// pide, explícitamente, un plan de recorte.
+const RECORTE_REQUEST_RE = new RegExp(
+  "\\b(" +
+    // ES
+    "recortar|recorte|que puedo recortar|donde recorto|reducir (?:mis )?gastos|" +
+    "bajar (?:mis )?gastos|plan de ahorro|que puedo cortar|ajustar (?:mis )?gastos|" +
+    // PT
+    "cortar (?:as )?despesas|reduzir (?:as )?despesas|onde posso cortar|plano de poupanca|" +
+    // EN
+    "cut (?:my )?expenses|reduce (?:my )?expenses|where can i cut|savings plan|" +
+    "trim (?:my )?spending" +
+  ")\\b",
+);
+
+/** ¿El mensaje pide, explícitamente, un plan de recorte de gastos? */
+export function pideRecorte(message: string): boolean {
+  return RECORTE_REQUEST_RE.test(norm(message));
+}
+
+/**
+ * Nota de refuerzo (PIEZA 7) para el system prompt: el usuario pide un plan
+ * de recorte, el motor tiene el AGREGADO pero no el DESGLOSE. El código dice
+ * QUÉ pedir (el desglose, citando lo ya sabido); el modelo decide CÓMO
+ * decirlo. `null` si no aplica — ni cuando no se pidió recorte, ni cuando ya
+ * hay desglose, ni cuando ni siquiera hay agregado (ahí manda el `missing`
+ * genérico de 'gastos', no esta pieza).
+ */
+export function notaFaltaDesglose(
+  s: Partial<ScenarioState> | undefined,
+  message: string,
+): string | null {
+  if (!s) return null;
+  if (!s.tiene_agregado_gastos || s.tiene_detalle_gastos) return null;
+  if (!pideRecorte(message)) return null;
+  return (
+    `El usuario pide un plan de recorte. Ya sabes que gasta ${s.gastos_mensuales} € al mes en total — ` +
+    "PROHIBIDO volver a preguntar el ingreso o el total de gastos, ya están en DATOS VERIFICADOS. " +
+    "Pide el DESGLOSE por partida (vivienda, comida, transporte, ocio…) citando el total que ya sabes, " +
+    "para poder decir exactamente qué recortar."
+  );
+}
+
 // FIX C — ¿la respuesta del asistente cierra PROPONIENDO un plan concreto
 // ("¿quieres que te proyecte el plan?", "¿Confirmamos ese plan?", "¿Arrancamos
 // con esto?")? Deliberadamente más estrecho que "termina en pregunta": una
@@ -970,4 +1085,66 @@ function computeMissing(s: ScenarioState): string[] {
 
   // Sin duplicados, preservando orden de prioridad.
   return [...new Set(missing)];
+}
+
+// ── PIEZA 4 (6ª tanda) — EL ICA MIDE CONOCIMIENTO, NO CHARLA ─────────────────
+//
+// Antes, cada turno sumaba +2 al ICA por el simple hecho de escribir
+// ('chat_consulta'): un usuario con 13 mensajes y CERO datos aportados
+// llegaba al 26%. Esta función compara el estado ANTES y DESPUÉS del merge
+// de este turno y devuelve solo los eventos de conocimiento REALMENTE
+// nuevos — el evento se dispara la PRIMERA vez que el campo pasa de
+// desconocido a conocido, nunca al repetirlo o actualizarlo después (eso ya
+// se sabía, no es conocimiento nuevo). `chat_consulta` NO vive aquí: es una
+// traza de actividad aparte, no un evento de conocimiento (ver route.ts).
+
+/** ¿Hay una TAE REAL (no de referencia) en `credito`? */
+function tieneTaeReal(credito: CreditoState | undefined): boolean {
+  return !!credito && credito.tae_pct !== undefined && credito.tae_es_referencia === false;
+}
+
+/**
+ * Eventos de conocimiento nuevo entre `antes` (estado previo al turno) y
+ * `despues` (estado tras el merge de este turno). Puro, determinista — no
+ * decide puntos ni toca la BD, solo QUÉ pasó a saberse por primera vez.
+ */
+export function detectarEventosICA(
+  antes: Partial<ScenarioState> | undefined,
+  despues: ScenarioState,
+): string[] {
+  const eventos: string[] = [];
+
+  if (antes?.ingreso_mensual === undefined && despues.ingreso_mensual !== undefined) {
+    eventos.push("dato_ingreso");
+  }
+  if (antes?.gastos_mensuales === undefined && despues.gastos_mensuales !== undefined) {
+    eventos.push("dato_gastos");
+  }
+  if (!antes?.tiene_detalle_gastos && despues.tiene_detalle_gastos) {
+    eventos.push("detalle_gastos");
+  }
+
+  // Meta DECLARADA por el usuario (no derivada de un crédito): la primera vez
+  // que pasa de "nada" o "derivada" a una meta propia.
+  const metaAntesPropia = !!antes?.meta && !antes.meta_derivada;
+  const metaDespuesPropia = !!despues.meta && !despues.meta_derivada;
+  if (!metaAntesPropia && metaDespuesPropia) {
+    eventos.push("meta_declarada");
+  }
+
+  if (!antes?.credito && despues.credito) {
+    eventos.push("credito_declarado");
+  }
+
+  const plazoAntes = antes?.credito?.plazo_meses ?? antes?.meta?.plazo_meses;
+  const plazoDespues = despues.credito?.plazo_meses ?? despues.meta?.plazo_meses;
+  if (plazoAntes === undefined && plazoDespues !== undefined) {
+    eventos.push("plazo_declarado");
+  }
+
+  if (!tieneTaeReal(antes?.credito) && tieneTaeReal(despues.credito)) {
+    eventos.push("tae_declarada");
+  }
+
+  return eventos;
 }

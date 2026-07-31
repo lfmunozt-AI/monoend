@@ -374,29 +374,31 @@ export interface ScenarioContext {
  * - lista de gastos en el mensaje → clasificación + recorte del 50%.
  * `conceptos` alimenta el grounding semántico; `valores` es el superset numérico.
  *
- * PIEZA 1 (5ª tanda) — `opts.extraccionAmbigua`: si la extracción de ESTE
- * turno quedó incompleta (números huérfanos) o el detalle de gastos no
- * reconcilia con el agregado declarado, PROHIBIDO calcular sobrante,
- * capacidad, cuota o cualquier derivada con esos datos — el orquestador NO
- * emite ninguna línea de TU REALIDAD/REFERENCIAS; devuelve el bloque vacío
- * ("" — igual que cuando no hay hechos) y dejamos que el aviso de ambigüedad
- * (`notaExtraccionAmbigua`, scenario.ts) sea lo único que llegue al prompt.
+ * BUG BLOQUEANTE (6ª tanda) — hasta la tanda anterior, `opts.extraccionAmbigua`
+ * hacía que el orquestador devolviera el bloque VACÍO entero (bloque="",
+ * conceptos={}, valores=[]) ante CUALQUIER ambigüedad, aunque el estado
+ * tuviera ingreso y gastos perfectamente confiables. Eso apagaba el cálculo
+ * de un turno entero por un par de números sueltos sin relación con lo ya
+ * extraído — la causa raíz del incidente testdev5. Corregido: esta función ya
+ * NO conoce el concepto "ambigüedad" — computa SIEMPRE a partir de lo que el
+ * estado (`scenario`) realmente tiene. La supresión de una derivada concreta
+ * (p. ej. sobrante cuando los gastos están en discrepancia) es ahora un
+ * efecto NATURAL de que ese campo simplemente no llegó a `scenario` — ver
+ * `deltaSinGastosPorDiscrepancia` en scenario.ts, que se aplica ANTES del
+ * merge, no aquí.
  *
- * `opts.valoresAmbiguos` — los números CRUDOS de la ambigüedad misma (los
- * huérfanos, o el agregado y la suma que no reconcilian): el modelo necesita
- * poder CITARLOS para preguntar ("dijiste 1.000 € pero el detalle suma
- * 850 €") sin que el guardarraíl de cifras los bloquee por no estar en
- * `cifrasCalculadas` — no son una cifra derivada, son el eco de lo que el
- * propio usuario dijo.
+ * `opts.valoresExtra` — números adicionales a autorizar para el guardarraíl
+ * de cifras más allá de lo calculado (p. ej. los huérfanos de un mensaje
+ * ambiguo, o el agregado/suma de una discrepancia): el modelo necesita poder
+ * CITARLOS al preguntar ("dijiste 1.000 € pero el detalle suma 850 €") sin
+ * que se bloqueen por no ser una cifra derivada — son el eco de lo que el
+ * propio usuario escribió, no una cifra inventada.
  */
 export function buildScenarioContext(
   scenario: ScenarioState,
   userMessage: string,
-  opts?: { extraccionAmbigua?: boolean; valoresAmbiguos?: number[] },
+  opts?: { valoresExtra?: number[] },
 ): ScenarioContext {
-  if (opts?.extraccionAmbigua) {
-    return { bloque: "", conceptos: {}, valores: opts.valoresAmbiguos ?? [], missing: scenario.missing ?? [] };
-  }
 
   const realidad: Linea[] = [];
   const referencias: string[] = [];
@@ -604,7 +606,7 @@ export function buildScenarioContext(
     );
   }
 
-  const valores = [...realidad.map((l) => l.valor), ...extraValores];
+  const valores = [...realidad.map((l) => l.valor), ...extraValores, ...(opts?.valoresExtra ?? [])];
   return { bloque: secciones.join("\n"), conceptos, valores, missing: scenario.missing ?? [] };
 }
 
