@@ -113,6 +113,28 @@ function addMonthsISO(months: number): string {
 }
 
 /**
+ * FIX 7 (7ª tanda, testdev6) — BUG BLOQUEANTE: `err instanceof Error ?
+ * err.message : String(err)` serializaba un `PostgrestError` (lanzado con
+ * `throw error` más abajo) como "[object Object]" — PostgrestError es un
+ * objeto plano `{message, code, details, hint}`, NO una instancia de `Error`,
+ * así que el chequeo `instanceof` siempre fallaba y el log quedaba sin
+ * información útil para depurar un fallo real de escritura. Duck-typing en
+ * vez de `instanceof`: cualquier objeto con `.message` (Error nativo o
+ * PostgrestError) se desglosa en sus campos reales.
+ */
+export function serializarError(err: unknown): { message: string; code?: string; details?: string } {
+  if (err && typeof err === 'object') {
+    const e = err as { message?: unknown; code?: unknown; details?: unknown }
+    return {
+      message: typeof e.message === 'string' ? e.message : String(err),
+      ...(typeof e.code === 'string' ? { code: e.code } : {}),
+      ...(typeof e.details === 'string' ? { details: e.details } : {}),
+    }
+  }
+  return { message: String(err) }
+}
+
+/**
  * PIEZA 3 — la meta declarada crea (o actualiza) una fila en `goals`. Una
  * sola meta ACTIVA por usuario: si la meta de este turno tiene un título
  * distinto de la(s) activa(s) en BD, esas se ARCHIVAN (status='paused', NUNCA
@@ -167,7 +189,7 @@ async function persistGoal(
     console.error('[persistTurn] goals FALLÓ:', JSON.stringify({
       user_id: userId,
       goal,
-      error: err instanceof Error ? err.message : String(err),
+      error: serializarError(err),
     }))
     return false
   }
@@ -195,7 +217,7 @@ async function persistIcaEventos(
       console.error('[persistTurn] ica_history FALLÓ:', JSON.stringify({
         user_id: userId,
         evento,
-        error: err instanceof Error ? err.message : String(err),
+        error: serializarError(err),
       }))
     }
   }

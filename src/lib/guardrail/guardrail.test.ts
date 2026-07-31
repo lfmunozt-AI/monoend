@@ -117,18 +117,20 @@ const CIF_INGRESO_GASTOS = {
   conceptos: { ingreso: 10000, gastos: 9500, sobrante: 500 },
 };
 
-test("HUECO QA: 'tus ingresos son de 500 €' (real 10000) → BLOQUEADA, SIN corrección (FIX A: se elimina)", () => {
+test("HUECO QA / FIX 3 (7ª tanda): 'tus ingresos son de 500 €' (real 10000) → BLOQUEADA y CORREGIDA a 10000", () => {
+  // FIX 3 (7ª tanda, testdev6): "ingreso" es un DATO DECLARADO — un mismatch
+  // se corrige en sitio (desfase de un turno), ya no se elimina la frase.
   const r = validateGrounding("Tus ingresos son de 500 €.", [], CIF_INGRESO_GASTOS);
   const bloq = r.cifras_bloqueadas.find((c) => c.valor === 500);
   assert.ok(bloq, "500 en posición de ingreso se bloquea aunque esté en valores como sobrante");
-  assert.equal(bloq?.correccion, undefined, "FIX A: ya no se sustituye por el valor de otro concepto");
+  assert.equal(bloq?.correccion, 10000, "FIX 3: dato declarado → se corrige al valor verificado");
 });
 
-test("HUECO QA: 'tus gastos son de 500 €' (real 9500) → BLOQUEADA, SIN corrección (FIX A: se elimina)", () => {
+test("HUECO QA / FIX 3 (7ª tanda): 'tus gastos son de 500 €' (real 9500) → BLOQUEADA y CORREGIDA a 9500", () => {
   const r = validateGrounding("Tus gastos son de 500 €.", [], CIF_INGRESO_GASTOS);
   const bloq = r.cifras_bloqueadas.find((c) => c.valor === 500);
   assert.ok(bloq, "500 en posición de gastos se bloquea aunque esté en valores como sobrante");
-  assert.equal(bloq?.correccion, undefined, "FIX A: ya no se sustituye por el valor de otro concepto");
+  assert.equal(bloq?.correccion, 9500, "FIX 3: dato declarado → se corrige al valor verificado");
 });
 
 test("HUECO QA: 'lo que te deja un sobrante de 500 €' → APROBADA (el concepto sí es 500)", () => {
@@ -143,18 +145,18 @@ test("HUECO QA: 'tus ingresos son de 10.000 €' (correcto) → intacta, sin blo
   assert.ok(r.cifras_aprobadas.some((c) => c.valor === 10000));
 });
 
-test("HUECO QA EN: 'your income is 500' (real 10000) → BLOQUEADA, SIN corrección", () => {
+test("HUECO QA / FIX 3 (7ª tanda) EN: 'your income is 500' (real 10000) → BLOQUEADA y CORREGIDA a 10000", () => {
   const r = validateGrounding("Your income is 500 this month.", [], CIF_INGRESO_GASTOS);
   const bloq = r.cifras_bloqueadas.find((c) => c.valor === 500);
   assert.ok(bloq, "500 en posición de income se bloquea");
-  assert.equal(bloq?.correccion, undefined);
+  assert.equal(bloq?.correccion, 10000, "FIX 3: dato declarado → se corrige al valor verificado");
 });
 
 // La frase REAL del QA: los tres conceptos en UNA sola frase (sin punto entre
 // cláusulas). No basta con "algún concepto de la frase coincide" — el sobrante
 // (500, correcto) aprobaría también los otros dos 500 solo por compartir
 // frase. Cada cifra debe cotejarse contra el concepto que la PRECEDE de verdad.
-test("HUECO QA: la frase combinada real (los 3 conceptos en una frase) → solo el sobrante sobrevive", () => {
+test("HUECO QA: la frase combinada real (los 3 conceptos en una frase) → sobrante aprobado, ingreso/gastos corregidos (FIX 3)", () => {
   const r = validateGrounding(
     "Tus ingresos son de 500 € y tus gastos son de 500 €, lo que te deja un sobrante de 500 €.",
     [],
@@ -163,9 +165,13 @@ test("HUECO QA: la frase combinada real (los 3 conceptos en una frase) → solo 
   assert.equal(r.cifras_aprobadas.length, 1, "solo el sobrante (500, correcto) se aprueba");
   assert.equal(r.cifras_bloqueadas.length, 2, "ingreso y gastos, ambos citados como 500, se bloquean");
   assert.ok(r.cifras_bloqueadas.every((c) => c.valor === 500));
-  // FIX A: ninguna se corrige en sitio (ingreso/gastos no son patrón posicional
-  // monto/plazo) — ambas frases se eliminan en vez de fabricar una cifra ajena.
-  assert.ok(r.cifras_bloqueadas.every((c) => c.correccion === undefined));
+  // FIX 3 (7ª tanda): ingreso/gastos SON datos declarados — ambas se corrigen
+  // en sitio a su valor real (10000 y 9500 respectivamente), ya no se elimina
+  // la frase entera.
+  const ing = r.cifras_bloqueadas.find((c) => c.motivo.includes("ingreso"));
+  const gas = r.cifras_bloqueadas.find((c) => c.motivo.includes("gastos"));
+  assert.equal(ing?.correccion, 10000);
+  assert.equal(gas?.correccion, 9500);
 });
 
 // ── AUDITORÍA AG01 (H1) — concepto DERIVADO afirmado sin cálculo ("déficit
@@ -240,17 +246,22 @@ test("FIX A.2: un número que NO está al inicio de línea sigue siendo una cifr
   assert.ok(r.cifras_aprobadas.some((c) => c.valor === 1000), "cifra en medio de frase se procesa normalmente");
 });
 
-test("FIX A.1: cifra sin concepto que la respalde → la frase se ELIMINA, nunca se sustituye por otro concepto", () => {
+test("FIX A.1 / FIX 3 (7ª tanda): un DELTA sobre ingreso/gastos NUNCA se corrige al valor base — se elimina", () => {
   // Caso real QA ('liberar al menos 10000 €', brecha real ~247 € reescrita al
-  // ingreso): un concepto SÍ nombrado en la frase ("ingreso") con una cifra que
-  // NO coincide con su valor Y que tampoco está en `valores` (para que no cuele
-  // por c0). Antes: se sustituía por 10000 (el ingreso). Ahora: se elimina.
+  // ingreso). FIX 3 (7ª tanda) SÍ corrige un dato declarado mal citado
+  // ("gastas 2.100€" con gastos=2.200 → "gastas 2.200€"), pero esta frase NO
+  // es una restatement del ingreso: es un DELTA ("aumentar... en 300€", el
+  // GAP, no el ingreso completo). Corregir a 10000 fabricaría "aumenta tus
+  // ingresos en 10000€" — un absurdo peor que el original (el ingreso YA es
+  // 10000). `esEncuadreDeDelta` (validate.ts) detecta el verbo de encuadre
+  // ("aumentar"/"recortar"/"necesitas...") y desactiva la corrección para
+  // ingreso/gastos en esa frase — cae al borrado conservador de siempre.
   const cif = { valores: [10000, 9500, 500], conceptos: { ingreso: 10000, gastos: 9500, sobrante: 500 } };
   const texto = "Necesitas aumentar tus ingresos en 300 € para que el plan cuadre. ¿Seguimos?";
   const r = validateGrounding(texto, [], cif);
   const bloq = r.cifras_bloqueadas.find((c) => c.valor === 300);
   assert.ok(bloq, "300 no coincide con el ingreso real (10000) ni está en valores");
-  assert.equal(bloq?.correccion, undefined, "FIX A: ya no se sustituye por el valor de otro concepto");
+  assert.equal(bloq?.correccion, undefined, "encuadre de delta → NUNCA se corrige al valor base");
 
   const p = applyPolicy(texto, r, "h");
   assert.ok(!p.texto_final.includes("300"), "la frase con la cifra sin respaldo desaparece");
@@ -1090,4 +1101,54 @@ test("runGuardrail end-to-end: cálculo válido pasa intacto", async () => {
   );
   assert.equal(out.bloqueado, false);
   assert.equal(out.texto_final, "Te recomiendo ahorrar 2000 (el 20%).");
+});
+
+// ── FIX 3 (7ª tanda, testdev6) — DESFASE DE UN TURNO: CORREGIR, NO BORRAR ─────
+// Caso literal del protocolo de entrega: "gastas 2.100 €" con gastos=2200
+// reales (un desfase típico de un turno: el modelo citó el valor anterior) se
+// corrige en sitio a "gastas 2.200 €" — la frase sobrevive con el resto de
+// sus cifras, en vez de desaparecer entera.
+test("FIX 3: 'gastas 2.100 €' con gastos=2.200 → se CORRIGE a 'gastas 2.200 €', la frase sobrevive", () => {
+  const cif = { valores: [2300, 2200, 100], conceptos: { ingreso: 2300, gastos: 2200, sobrante: 100 } };
+  const texto = "Este mes gastas 2.100 €, bastante ajustado. ¿Seguimos con el plan?";
+  const r = validateGrounding(texto, [], cif);
+  const bloq = r.cifras_bloqueadas.find((c) => c.valor === 2100);
+  assert.ok(bloq, `2100 debe bloquearse por no coincidir con gastos=2200: ${JSON.stringify(r.cifras_bloqueadas)}`);
+  assert.equal(bloq?.correccion, 2200, "se corrige al valor verificado, no se borra");
+
+  const p = applyPolicy(texto, r, "h");
+  assert.ok(p.texto_final.includes("2200"), `la cifra corregida debe aparecer: ${p.texto_final}`);
+  assert.ok(p.texto_final.includes("bastante ajustado"), "el resto de la frase sobrevive intacto");
+  assert.ok(p.texto_final.includes("¿Seguimos con el plan?"), "el cierre original sobrevive");
+});
+
+// ── FIX 4 (7ª tanda, testdev6) — FACTIBILIDAD SOLO SOBRE PROPUESTAS ──────────
+// Caso real: "Ingresas 2.300 € y gastas 2.100 €, te sobra 200 € al mes para
+// destinar a…" es un ENUNCIADO factual (estado de cuentas), no una propuesta
+// de acción — la regla de factibilidad (ahorro/destino no puede superar el
+// sobrante) buscaba el verbo en TODA la frase y bloqueaba ingreso/gastos/
+// sobrante solo porque "destinar" aparecía al final, sin cifra propia.
+test("FIX 4: enunciado factual con 'destinar' al final NUNCA se bloquea por factibilidad", () => {
+  const cif = { valores: [2300, 2100, 200], conceptos: { ingreso: 2300, gastos: 2100, sobrante: 200 } };
+  const texto = "Ingresas 2.300 € y gastas 2.100 €, te sobra 200 € al mes para destinar a tu meta.";
+  const r = validateGrounding(texto, [], cif);
+  assert.equal(r.cifras_bloqueadas.length, 0, `enunciado factual, nada debe bloquearse: ${JSON.stringify(r.cifras_bloqueadas)}`);
+  const p = applyPolicy(texto, r, "h");
+  assert.equal(p.texto_final, texto, "la frase sobrevive exactamente igual");
+});
+
+test("FIX 4: la propuesta imperativa real ('ahorra X€' sobre el sobrante) SIGUE bloqueando (sin regresión)", () => {
+  const cif = { valores: [2500, 2050, 450], conceptos: { ingreso: 2500, gastos: 2050, sobrante: 450 } };
+  const r = validateGrounding("Podrías ahorrar 746,55 € este mes.", [], cif);
+  const bloq = r.cifras_bloqueadas.find((c) => c.valor === 746.55);
+  assert.ok(bloq, "746,55 supera el sobrante real (450) — debe seguir bloqueándose");
+  assert.match(bloq!.motivo, /supera el sobrante real/);
+});
+
+test("FIX 4: propuesta de recorte que SÍ excede el gasto real sigue bloqueando (sin regresión)", () => {
+  const cif = { valores: [2500, 1200, 1300], conceptos: { ingreso: 2500, gastos: 1200, sobrante: 1300 } };
+  const r = validateGrounding("Te recomiendo recortar 5000 € de tus gastos este mes.", [], cif);
+  const bloq = r.cifras_bloqueadas.find((c) => c.valor === 5000);
+  assert.ok(bloq, "5000 supera el gasto real (1200) — debe seguir bloqueándose");
+  assert.match(bloq!.motivo, /supera el gasto real/);
 });

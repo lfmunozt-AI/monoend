@@ -21,6 +21,7 @@ import {
   esTextoCanonico,
   renumberLists,
   MISSING_KEYWORDS,
+  maxOneClosingQuestion,
   type Mutation,
 } from "./policy";
 import { DERIVED_CONCEPTS, isListEnumerator } from "./validate";
@@ -104,43 +105,6 @@ function coordinateTaeMention(text: string, lang: Language): { texto: string; co
   const short = SHORT_SIMULATION_CLAUSE[lang] ?? SHORT_SIMULATION_CLAUSE[DEFAULT_LANGUAGE];
   const texto = cleanup(text.replace(SIMULATION_CLAUSE_RE, short));
   return { texto, corregido: texto !== text };
-}
-
-// ── Mandamiento 1 — máx. 1 pregunta final ────────────────────────────────────
-// Bloque de cierre: frases finales que son pregunta/propuesta, recolectadas
-// desde el final mientras lo sean (mismo criterio que `enforceMissingClosing`).
-function maxOneClosingQuestion(
-  text: string,
-  missing: string[],
-): { texto: string; corregido: boolean } {
-  const sentences = splitSentences(text);
-  if (sentences.length === 0) return { texto: text, corregido: false };
-
-  let start = sentences.length;
-  while (start > 0 && endsWithRequestOrProposal(sentences.slice(0, start).join(" "))) {
-    // endsWithRequestOrProposal opera sobre la ÚLTIMA frase del texto que se le
-    // pase: reconstruimos el prefijo para evaluar cada candidata desde el final.
-    start--;
-  }
-  const closingIdxs: number[] = [];
-  for (let i = sentences.length - 1; i >= start; i--) closingIdxs.unshift(i);
-
-  const questionIdxs = closingIdxs.filter((i) => sentences[i].trim().endsWith("?"));
-  if (questionIdxs.length <= 1) return { texto: text, corregido: false };
-
-  // Prioridad: la pregunta que menciona missing[0] gana; si ninguna lo hace, la
-  // ÚLTIMA (la más reciente en la respuesta) gana.
-  const field = missing[0] === "meta_monto" ? "meta" : missing[0];
-  const keywordRe = field ? MISSING_KEYWORDS[field] : undefined;
-  let keepIdx = questionIdxs[questionIdxs.length - 1];
-  if (keywordRe) {
-    const withKeyword = questionIdxs.find((i) => keywordRe.test(norm(sentences[i])));
-    if (withKeyword !== undefined) keepIdx = withKeyword;
-  }
-
-  const drop = new Set(questionIdxs.filter((i) => i !== keepIdx));
-  const texto = cleanup(sentences.filter((_, i) => !drop.has(i)).join(" "));
-  return { texto, corregido: true };
 }
 
 // ── Mandamiento 3 — concepto DERIVADO afirmado sin cálculo ───────────────────

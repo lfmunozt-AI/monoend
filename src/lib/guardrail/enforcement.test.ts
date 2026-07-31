@@ -349,3 +349,30 @@ test("PIEZA 5a: turno emocional en carril MIXTO también se desactiva (no solo F
   });
   assert.equal(r.texto, texto);
 });
+
+// ── FIX 5 (7ª tanda, testdev6) — resolveClosing NUNCA deja un segundo cierre ──
+// "Si la respuesta YA termina en pregunta, no se añade nada. Sin excepciones."
+// Antes la garantía de "una sola pregunta final" solo vivía en Commandments
+// (Mandamiento 1), corriendo DESPUÉS de resolveClosing en la cadena —
+// `resolveClosing` ahora la aplica a SU PROPIA salida en cada uno de sus
+// caminos de retorno.
+
+test("FIX 5: el modelo cierra con DOS preguntas seguidas → resolveClosing colapsa a una sola", () => {
+  const texto = "Con 2.400 € de monto, vamos avanzando. ¿Confirmas que esos son tus gastos completos? ¿A cuántos meses quieres financiar esos 2.400 €?";
+  const out = resolveClosing(texto, { carril: "FINANCIERO", missing: ["plazo"], lang: "es" });
+  assert.equal((out.match(/\?/g) ?? []).length, 1, `debe quedar UNA sola pregunta: ${out}`);
+  assert.match(out, /cuantos meses|A cuántos meses/i);
+  assert.ok(!out.includes("¿Confirmas que esos son tus gastos completos?"), "la pregunta que no apunta a missing[0] se descarta");
+});
+
+test("FIX 5: el modelo YA cierra con la pregunta correcta (una sola) → intacta, sin añadidos", () => {
+  const texto = "Con 2.400 € de monto, ¿a cuántos meses quieres financiarlo?";
+  const out = resolveClosing(texto, { carril: "FINANCIERO", missing: ["plazo"], lang: "es" });
+  assert.equal(out, texto, "una sola pregunta ya presente: nunca se añade nada más");
+});
+
+test("FIX 5: cierre delegativo sustituido — el resultado sigue siendo UNA sola pregunta", () => {
+  const texto = "Tu sobrante es 500 €. ¿Confirmas que esos son tus gastos completos? ¿Qué gastos podrías reducir?";
+  const out = resolveClosing(texto, { carril: "FINANCIERO", missing: ["plazo"], lang: "es" });
+  assert.equal((out.match(/\?/g) ?? []).length, 1, `debe quedar UNA sola pregunta: ${out}`);
+});

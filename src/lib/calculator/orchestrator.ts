@@ -451,21 +451,40 @@ export function buildScenarioContext(
   }
 
   // ── Crédito desde el estado ────────────────────────────────────────────────
-  if (scenario.credito && scenario.credito.monto > 0 && scenario.credito.plazo_meses > 0) {
+  // FIX 2 (7ª tanda, testdev6) — LOS DATOS DECLARADOS SIEMPRE ESTÁN EN
+  // CONCEPTOS, con independencia de que la CUOTA (una derivada) se pueda
+  // calcular. Antes, exponer el monto exigía TAMBIÉN tener el plazo — con
+  // solo el monto (o solo la TAE) declarados, monto_credito quedaba
+  // invisible para el guardarraíl: "¿A cuántos meses financias esos 2.400€?"
+  // citaba una cifra "sin respaldo" y se borraba — la propia pregunta que
+  // iba a conseguir el plazo, bloqueo circular. Un dato que el usuario
+  // declaró es verdad verificada por definición; solo las DERIVADAS (cuota,
+  // brecha, esfuerzo total) se omiten cuando falta un insumo.
+  if (scenario.credito) {
     const c = scenario.credito;
     const usarReferencia = c.tae_es_referencia || c.tae_pct === undefined;
-    const tae = usarReferencia ? TAE_REFERENCIA : (c.tae_pct as number);
 
-    // FIX 1 — monto, plazo y TAE son DATOS DE PRIMERA CLASE: van a TU REALIDAD y
-    // de ahí `deriveConceptos` los promueve a `conceptos` (ver más abajo), antes
-    // que la cuota. Así el 30000 tiene su hueco (y entra a `valores`), y el
-    // grounding puede distinguir monto de cuota en vez de que el modelo cite una
-    // como la otra.
-    realidad.push({ etiqueta: "monto_credito", valor: c.monto, formula: "dato que aportaste" });
-    realidad.push({ etiqueta: "plazo_credito_meses", valor: c.plazo_meses, formula: "dato que aportaste", unidad: "meses" });
-    if (!usarReferencia) {
-      realidad.push({ etiqueta: "tae_credito_pct", valor: tae, formula: "TAE real de tu banco", unidad: "%" });
+    if (c.monto !== undefined && c.monto > 0) {
+      realidad.push({ etiqueta: "monto_credito", valor: c.monto, formula: "dato que aportaste" });
     }
+    if (c.plazo_meses !== undefined && c.plazo_meses > 0) {
+      realidad.push({ etiqueta: "plazo_credito_meses", valor: c.plazo_meses, formula: "dato que aportaste", unidad: "meses" });
+    }
+    if (c.tae_pct !== undefined && !usarReferencia) {
+      realidad.push({ etiqueta: "tae_credito_pct", valor: c.tae_pct, formula: "TAE real de tu banco", unidad: "%" });
+    }
+  }
+
+  // La CUOTA (y todo lo que depende de ella) es una DERIVADA: exige AMBOS
+  // insumos — nunca se inventa un plazo o un monto que falte.
+  if (
+    scenario.credito &&
+    scenario.credito.monto !== undefined && scenario.credito.monto > 0 &&
+    scenario.credito.plazo_meses !== undefined && scenario.credito.plazo_meses > 0
+  ) {
+    const c = scenario.credito as { monto: number; plazo_meses: number; tae_pct?: number; tae_es_referencia: boolean };
+    const usarReferencia = c.tae_es_referencia || c.tae_pct === undefined;
+    const tae = usarReferencia ? TAE_REFERENCIA : (c.tae_pct as number);
 
     const cuota = loanPayment({ principal: c.monto, months: c.plazo_meses, annualRatePct: tae });
     if (cuota.ok) {

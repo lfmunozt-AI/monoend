@@ -2,7 +2,7 @@
   "name": "hueco_ingreso_gastos",
   "playbook": "PB6",
   "language": "es",
-  "description": "Caso real QA: ingreso 10000, gastos 9500, sobrante 500. En el turno 3 (pregunta sin números nuevos) el modelo aluciona 'Tus ingresos son de 500 € y tus gastos son de 500 €, lo que te deja un sobrante de 500 €' — las dos primeras cláusulas pasaban el guardarraíl porque ni ingreso ni gastos tenían concepto (caían a la heurística genérica y 500 coincidía como sobrante). Con el concepto de ingreso/gastos (FIX 2) y el grounding posicional multi-concepto por frase (HUECO QA) se bloquean. FIX A (QA real, esta tanda): sustituir por el valor de OTRO concepto fabrica mentiras con apariencia verificada, así que ya NO se corrige en sitio — al ser las tres cláusulas UNA sola frase (sin punto), la frase entera (incluida la cláusula correcta del sobrante) se elimina. PIEZA 2 (contrato nuevo): lo que queda ('¿Confirmamos el plan?') es sustancia conversacional válida y missing está VACÍO, así que ensureSubstance ya NO cae al pedido genérico — se acepta una respuesta más corta antes que una plantilla pidiendo datos que el motor ya tiene.",
+  "description": "Caso real QA: ingreso 10000, gastos 9500, sobrante 500. En el turno 3 (pregunta sin números nuevos) el modelo aluciona 'Tus ingresos son de 500 € y tus gastos son de 500 €, lo que te deja un sobrante de 500 €' — las dos primeras cláusulas pasaban el guardarraíl porque ni ingreso ni gastos tenían concepto (caían a la heurística genérica y 500 coincidía como sobrante). Con el concepto de ingreso/gastos (FIX 2) y el grounding posicional multi-concepto por frase (HUECO QA) se bloquean. FIX 3 (7ª tanda, testdev6) — DESFASE DE UN TURNO: CORREGIR, NO BORRAR: ingreso y gastos son DATOS DECLARADOS, así que cada cláusula se corrige EN SITIO a su valor verificado en vez de eliminar la frase entera — 'ingresos son de 500' → 'ingresos son de 10000', 'gastos son de 500' → 'gastos son de 9500'; 'sobrante de 500' ya era correcto y sobrevive intacto. El usuario VE el resumen completo y correcto, en vez de perder toda la respuesta.",
   "turns": [
     {
       "user": "Gano 10000 euros al mes y mis gastos son 9500.",
@@ -24,11 +24,9 @@
       "expectNotContains": [
         "ingresos son de 500",
         "gastos son de 500",
-        "10000",
-        "9500",
         "Para darte una cifra exacta necesito un dato concreto"
       ],
-      "expectContains": ["¿Confirmamos el plan?"],
+      "expectContains": ["10000", "9500", "sobrante de 500", "¿Confirmamos el plan?"],
       "expectFallback": false
     }
   ]
