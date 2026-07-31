@@ -1,0 +1,17 @@
+{
+  "name": "extraccion_discrepancia_aritmetica",
+  "playbook": "PB1",
+  "language": "es",
+  "description": "PIEZA 2 (5ª tanda): 'gasto 1000: 500 arriendo 250 carro 100 ropa' declara un agregado explícito (1000, marcado con ':') que NO reconcilia con la suma de su propio desglose (850). Nunca se elige uno en silencio: la respuesta de este turno es SOLO la pregunta de aclaración, cero cifras derivadas (sobrante/capacidad/cuota prohibidos).",
+  "turns": [
+    {
+      "user": "gasto 1000: 500 arriendo 250 carro 100 ropa",
+      "fixtureResponse": "Antes de seguir necesito aclarar un número: dijiste que gastas 1.000 €, pero arriendo, carro y ropa suman 850 €. ¿Cuál es el total correcto?",
+      "expectCarril": "FINANCIERO",
+      "expectExtraccionAmbigua": true,
+      "expectEmocional": false,
+      "expectContains": ["1.000", "850"],
+      "expectNotContains": ["sobrante", "capacidad de ahorro", "cuota sería"]
+    }
+  ]
+}

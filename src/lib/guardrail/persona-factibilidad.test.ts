@@ -18,20 +18,26 @@ import { systemPromptConsigliere } from "../prompts/consigliere";
 
 // ── FIX 1 — verificación estática del prompt (persona cálida) ───────────────
 
-test("FIX 1: las 4 frases hostiles reales están explícitamente PROHIBIDAS en el prompt", () => {
-  assert.match(systemPromptConsigliere, /Saludo registrado/);
-  assert.match(systemPromptConsigliere, /No es relevante cómo estoy/);
-  assert.match(systemPromptConsigliere, /No busco ser grosero/);
-  assert.match(systemPromptConsigliere, /"No\." como frase inicial/);
-});
-
-test("FIX 1: el prompt ya NO describe al Consigliere como 'frío'", () => {
+// PIEZA 6 (complemento, 5ª tanda) — "la calidez es del modelo, no de las
+// capas": el bloque TONO pasó de una lista de frases PROHIBIDAS a un MANDATO
+// de autoridad ("tienes autoridad total sobre el tono"). Las 4 frases
+// hostiles reales del diagnóstico original ya no viven como prohibición
+// literal — quedan cubiertas por el mandato anti-molde y el registro por
+// situación (ver más abajo).
+test("PIEZA 6: el prompt ya NO describe al Consigliere como 'frío'", () => {
   assert.ok(!/estratega financiero frío/.test(systemPromptConsigliere), "IDENTIDAD reescrita a 'cercano'");
 });
 
-test("FIX 1: el bloque TONO exige calidez explícita", () => {
-  assert.match(systemPromptConsigliere, /TONO — CÁLIDO ANTES QUE EFICIENTE/);
-  assert.match(systemPromptConsigliere, /Nunca corrijas al usuario en seco/);
+test("PIEZA 6: el bloque de tono es un MANDATO de autoridad, no una lista de prohibiciones", () => {
+  assert.match(systemPromptConsigliere, /MANDATO DE TONO/);
+  assert.match(systemPromptConsigliere, /autoridad total sobre el tono/);
+  assert.match(systemPromptConsigliere, /Anti-molde/);
+});
+
+test("PIEZA 6: el mandato cubre los registros de frustración/vergüenza, sin empleo y anti-molde", () => {
+  assert.match(systemPromptConsigliere, /PROHIBIDO moralizar/);
+  assert.match(systemPromptConsigliere, /Sin empleo o sin ingresos/);
+  assert.match(systemPromptConsigliere, /nunca empieces dos turnos seguidos con la misma construcción/);
 });
 
 // ── FIX 2a — verificación estática del bloque de auto-chequeo ───────────────

@@ -13,6 +13,11 @@ import {
   actualizarDigresiones,
   notaRetornoMeta,
   notaSinCifrasDePlan,
+  detectarNumerosHuerfanos,
+  detectarDiscrepanciaGastos,
+  notaExtraccionAmbigua,
+  deltaSeguro,
+  renderDatosRecienEntendidos,
 } from "./scenario";
 
 test("merge: TAE 9% real sobre un crédito previo → recalcula tae_es_referencia", () => {
@@ -474,4 +479,130 @@ test("FIX 2b: meta activa sin monto → nota pide el campo que falta", () => {
 
 test("FIX 2b: undefined → sin nota (compatibilidad)", () => {
   assert.equal(notaSinCifrasDePlan(undefined), null);
+});
+
+// ── PIEZA 1/2/3 (5ª tanda) — CIERRE DE LA CLASE DE EXTRACCIÓN ─────────────────
+// CASO REAL (testdev4, 31/07 09:19): "gano 2300 y gasto= 1000 arriendo 500
+// servicios 250 carro 100 ropa" se extrajo como gastos=1000 (el primer número
+// tras "gasto"). Real: gastos 1850 (la suma del desglose). Los 5 escenarios
+// requeridos por el protocolo de entrega, más un caso limpio de control.
+
+test("escenario 1 · mensaje real: sin huérfanos, gastos = 1850 (suma del desglose)", () => {
+  const msg = "peinso que mi ahorro es una desastre, gano 2300 y gasto= 1000 arriendo 500 servicios 250 carro 100 ropa";
+  const delta = extractScenarioDelta(msg);
+  const huerfanos = detectarNumerosHuerfanos(msg, delta);
+  const discrepancia = detectarDiscrepanciaGastos(delta);
+  assert.equal(huerfanos.extraccionIncompleta, false, `no debería haber huérfanos: ${JSON.stringify(huerfanos)}`);
+  assert.equal(discrepancia.discrepancia, false);
+  assert.equal(delta.ingreso_mensual, 2300);
+  const s = mergeScenario({}, delta);
+  assert.equal(s.gastos_mensuales, 1850, "1000 arriendo + 500 servicios + 250 carro + 100 ropa");
+});
+
+test("escenario 2 · '1000 arriendo 500 servicios 250 carro 100 ropa' (sin 'gano') → mismo comportamiento", () => {
+  const msg = "1000 arriendo 500 servicios 250 carro 100 ropa";
+  const delta = extractScenarioDelta(msg);
+  const huerfanos = detectarNumerosHuerfanos(msg, delta);
+  assert.equal(huerfanos.extraccionIncompleta, false, `no debería haber huérfanos: ${JSON.stringify(huerfanos)}`);
+  const s = mergeScenario({}, delta);
+  assert.equal(s.gastos_mensuales, 1850);
+});
+
+test("escenario 3 · 'gasto 1000: 500 arriendo 250 carro 100 ropa' → discrepancia (850 ≠ 1000)", () => {
+  const msg = "gasto 1000: 500 arriendo 250 carro 100 ropa";
+  const delta = extractScenarioDelta(msg);
+  const discrepancia = detectarDiscrepanciaGastos(delta);
+  assert.equal(discrepancia.discrepancia, true, `debería reconciliar mal: ${JSON.stringify(delta)}`);
+  assert.equal(discrepancia.agregado, 1000);
+  assert.equal(discrepancia.suma, 850);
+  const nota = notaExtraccionAmbigua(detectarNumerosHuerfanos(msg, delta), discrepancia);
+  assert.match(nota!, /DISCREPANCIA ARITMÉTICA/);
+  assert.match(nota!, /1000/);
+  assert.match(nota!, /850/);
+});
+
+test("escenario 4 · 'gano entre 2000 y 2500' → huérfano (rango, no asigna)", () => {
+  const msg = "gano entre 2000 y 2500";
+  const delta = extractScenarioDelta(msg);
+  const huerfanos = detectarNumerosHuerfanos(msg, delta);
+  assert.equal(huerfanos.extraccionIncompleta, true, `debería quedar ambiguo: ${JSON.stringify({ delta, huerfanos })}`);
+  const nota = notaExtraccionAmbigua(huerfanos, detectarDiscrepanciaGastos(delta));
+  assert.match(nota!, /EXTRACCIÓN INCOMPLETA/);
+});
+
+test("escenario 5 · 'gano 27600 al año' → no asume mensual (huérfano, no 27600 como ingreso mensual)", () => {
+  const msg = "gano 27600 al año";
+  const delta = extractScenarioDelta(msg);
+  assert.notEqual(delta.ingreso_mensual, 27600, "27600 NO debe asignarse tal cual como ingreso mensual");
+  const huerfanos = detectarNumerosHuerfanos(msg, delta);
+  assert.equal(huerfanos.extraccionIncompleta, true, `27600 debe quedar huérfano si no se asignó: ${JSON.stringify({ delta, huerfanos })}`);
+});
+
+test("escenario 5b · una extracción que SÍ normaliza explícitamente 27600/año a 2300/mes no se marca huérfana", () => {
+  // Vía tool-call (LLM): el delta ya trae el valor MENSUAL normalizado.
+  const delta = { ingreso_mensual: 2300 };
+  const huerfanos = detectarNumerosHuerfanos("gano 27600 al año", delta);
+  assert.equal(huerfanos.extraccionIncompleta, false, "la conversión año→mes con tolerancia debe reconocer 27600/12 ≈ 2300");
+});
+
+test("escenario 6 · 'gano 2300 y gasto 1850' → limpio, sin huérfanos, calcula normal", () => {
+  const msg = "gano 2300 y gasto 1850";
+  const delta = extractScenarioDelta(msg);
+  const huerfanos = detectarNumerosHuerfanos(msg, delta);
+  const discrepancia = detectarDiscrepanciaGastos(delta);
+  assert.equal(huerfanos.extraccionIncompleta, false);
+  assert.equal(discrepancia.discrepancia, false);
+  assert.equal(delta.ingreso_mensual, 2300);
+  assert.equal(delta.gastos_mensuales, 1850);
+  assert.equal(notaExtraccionAmbigua(huerfanos, discrepancia), null);
+});
+
+test("detectarNumerosHuerfanos: '3 hijos' no cuenta el 3 como huérfano (sustantivo no monetario)", () => {
+  const msg = "tengo 3 hijos y gano 2000";
+  const delta = extractScenarioDelta(msg);
+  const huerfanos = detectarNumerosHuerfanos(msg, delta);
+  assert.equal(huerfanos.extraccionIncompleta, false, `3 no debería contar: ${JSON.stringify(huerfanos)}`);
+});
+
+test("detectarDiscrepanciaGastos: sin agregado+detalle simultáneos → sin discrepancia", () => {
+  assert.deepEqual(detectarDiscrepanciaGastos({}), { discrepancia: false });
+  assert.deepEqual(
+    detectarDiscrepanciaGastos({ gastos_mensuales: 1000 }),
+    { discrepancia: false },
+  );
+});
+
+test("deltaSeguro: despoja los campos financieros, conserva señales no numéricas", () => {
+  const delta = {
+    ingreso_mensual: 2300,
+    gastos_mensuales: 1000,
+    gastos_detalle: { vitales: 500, noVitales: 300, desconocidos: 200 },
+    gastos_es_detalle: true,
+    credito: { monto: 30000, plazo_meses: 36, tae_es_referencia: true },
+    meta: { titulo: "carro" },
+    meta_cambio_explicito: true,
+  };
+  const seguro = deltaSeguro(delta);
+  assert.equal(seguro.ingreso_mensual, undefined);
+  assert.equal(seguro.gastos_mensuales, undefined);
+  assert.equal(seguro.gastos_detalle, undefined);
+  assert.equal(seguro.gastos_es_detalle, undefined);
+  assert.equal(seguro.credito, undefined);
+  assert.equal(seguro.meta, undefined);
+  assert.equal(seguro.meta_cambio_explicito, true, "señal no numérica sobrevive");
+});
+
+test("renderDatosRecienEntendidos: null si el delta no trae nada", () => {
+  assert.equal(renderDatosRecienEntendidos({}, "hola"), null);
+});
+
+test("renderDatosRecienEntendidos: caso real → ingreso, gastos y desglose", () => {
+  const msg = "peinso que mi ahorro es una desastre, gano 2300 y gasto= 1000 arriendo 500 servicios 250 carro 100 ropa";
+  const delta = extractScenarioDelta(msg);
+  const nota = renderDatosRecienEntendidos(delta, msg);
+  assert.ok(nota);
+  assert.match(nota!, /ingreso mensual: 2300/);
+  assert.match(nota!, /gastos mensuales: 1850/);
+  assert.match(nota!, /arriendo 1000/);
+  assert.match(nota!, /DATOS RECIÉN ENTENDIDOS/);
 });

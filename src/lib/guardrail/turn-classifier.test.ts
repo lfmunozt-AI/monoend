@@ -4,7 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { classifyTurn } from "./turn-classifier";
+import { classifyTurn, esTonoEmocional } from "./turn-classifier";
 
 test("META: '¿qué modelo eres?' → META", () => {
   assert.equal(classifyTurn("¿qué modelo eres?", undefined), "META");
@@ -90,4 +90,34 @@ test("FINANCIERO: 'quiero financiar un carro de 30000 a 36 meses' → FINANCIERO
 
 test("META: saludo + pregunta de identidad (dos señales META, cero financieras) → META", () => {
   assert.equal(classifyTurn("hola, ¿qué modelo eres?", undefined), "META");
+});
+
+// ── PIEZA 5c (complemento, 5ª tanda) — TONO EMOCIONAL ────────────────────────
+
+test("esTonoEmocional: 'estoy frustrado, no consigo trabajo' → true", () => {
+  assert.equal(esTonoEmocional("estoy frustrado, no consigo trabajo pero quiero ahorrar"), true);
+});
+
+test("esTonoEmocional: 'me da vergüenza lo mal que llevo mis cuentas' → true", () => {
+  assert.equal(esTonoEmocional("me da vergüenza lo mal que llevo mis cuentas"), true);
+});
+
+test("esTonoEmocional: 'me despidieron' / 'tengo miedo' → true", () => {
+  assert.equal(esTonoEmocional("me despidieron ayer, tengo miedo de no llegar a fin de mes"), true);
+});
+
+test("esTonoEmocional: '¿qué tiempo hace?' → false", () => {
+  assert.equal(esTonoEmocional("¿qué tiempo hace?"), false);
+});
+
+test("esTonoEmocional: 'gano 2300 y gasto 1850' → false", () => {
+  assert.equal(esTonoEmocional("gano 2300 y gasto 1850"), false);
+});
+
+test("esTonoEmocional PT: 'estou sem emprego, tenho medo' → true", () => {
+  assert.equal(esTonoEmocional("estou sem emprego, tenho medo do que vem"), true);
+});
+
+test("esTonoEmocional EN: 'I got fired, I'm scared' → true", () => {
+  assert.equal(esTonoEmocional("I got fired last week, I'm scared about money"), true);
 });

@@ -8,7 +8,7 @@
 // Extracción CONSERVADORA: solo señales de alta confianza. Lo ambiguo NO se
 // extrae — mejor no tocar el estado que corromperlo. Código PURO, edge-safe.
 
-import { parseDigitAmount } from "../guardrail/numbers";
+import { parseDigitAmount, findNumberMentions, dedupeOverlaps, type NumberMention } from "../guardrail/numbers";
 import { parseExpenseList, classifyExpenses } from "./expenses";
 import type { Language } from "../language";
 import { tieneSenalFinanciera, type Carril } from "../guardrail/turn-classifier";
@@ -157,8 +157,30 @@ const PLAZO = /(\d[\d.,]*)\s*(a[ñn]os?|anos?|years?|meses|mes|months?)\b/;
 // Monto con contexto de ingreso / gasto / precio.
 const INGRESO_CTX = /\b(gano|ingreso|ingresos|sueldo|salario|cobro|rendimento|income|earn|salary)\b/;
 const GASTO_CTX = /\b(gasto|gastos|gasta|despesas?|spend|expenses?)\b/;
+// PIEZA 2 — total agregado seguido de ":" y un desglose ("gasto 1000: 500
+// arriendo..."). El ":" es el marcador INEQUÍVOCO que distingue "aquí va un
+// total, y luego el detalle" de "gasto= 1000 arriendo..." (sin ":", que es
+// directamente el primer ítem del detalle, sin agregado propio — caso A).
+const GASTO_AGREGADO_DETALLE_RE = /\b(?:gastos?|despesas?|expenses?)\b\s*[:=]?\s*(\d[\d.,]*)\s*:/;
 const PRECIO_CTX = /\b(precio|cuesta|vale|financiar|credito|prestamo|emprestimo|loan|financ|carro|coche|auto|casa|piso|vivienda)\b/;
 const AMOUNT = /(\d[\d.,]*)/;
+
+// PIEZA 1 (5ª tanda) — MARCADOR ANUAL. "gano 27600 al año" NO es "gano 27600
+// al mes": asumir mensual sin más es exactamente el tipo de suposición que el
+// principio nuevo prohíbe ("ante ambigüedad se PREGUNTA, nunca se asume"). Si
+// el número que INGRESO_CTX/GASTO_CTX capturarían trae este marcador
+// PEGADO detrás, NO se asigna — queda sin asignar, y el detector de huérfanos
+// (más abajo) lo atrapa para que el sistema pregunte en vez de dividir por 12
+// en silencio.
+const MARCADOR_ANUAL_RE =
+  /^\s*(?:€\s*)?(?:al\s+a[ñn]o|anual(?:es)?|por\s+a[ñn]o|\/\s*a[ñn]o|per\s+year|\/\s*year|annually|yearly|ao\s+ano|por\s+ano|\/\s*ano)\b/;
+
+/** ¿El número que empieza en `desdeIdx` (dentro de `n`) trae un marcador anual pegado? */
+function esCifraAnual(n: string, ctxRe: RegExp, matchAmount: RegExpExecArray): boolean {
+  const base = n.search(ctxRe);
+  const after = n.slice(base + matchAmount.index + matchAmount[0].length, base + matchAmount.index + matchAmount[0].length + 20);
+  return MARCADOR_ANUAL_RE.test(after);
+}
 
 // Meta.
 const META_CTX = /\b(meta|objetivo|quiero (?:comprar|llegar|ahorrar)|goal|target|juntar|reunir)\b/;
@@ -279,14 +301,38 @@ export function extractScenarioDelta(
   // ── Ingreso — anclado a su keyword ─────────────────────────────────────────
   if (INGRESO_CTX.test(n)) {
     const a = AMOUNT.exec(n.slice(n.search(INGRESO_CTX)));
-    if (a) {
+    // PIEZA 1 — "27600 al año" NO se asigna como si fuera mensual: el número
+    // queda huérfano a propósito (ver MARCADOR_ANUAL_RE arriba).
+    if (a && !esCifraAnual(n, INGRESO_CTX, a)) {
       const v = parseDigitAmount(a[1]);
       if (Number.isFinite(v) && v > 0) delta.ingreso_mensual = v;
     }
   }
 
   // ── Gastos ──────────────────────────────────────────────────────────────────
-  if (esLista) {
+  // PIEZA 2 (5ª tanda) — el usuario declara un TOTAL EXPLÍCITO (marcado con
+  // ":") seguido de un desglose: "gasto 1000: 500 arriendo 250 carro 100
+  // ropa". Se extraen AMBOS — agregado Y detalle — sin elegir uno en
+  // silencio; la reconciliación (detectarDiscrepanciaGastos, más abajo) decide
+  // si coinciden. Tiene PRIORIDAD sobre `esLista`: sin ella, el fallback
+  // monto-primero de `parseExpenseList` ya habría troceado el mensaje entero
+  // en detalle y el agregado nunca habría quedado registrado aparte.
+  const aggMatch = GASTO_AGREGADO_DETALLE_RE.exec(n);
+  if (aggMatch) {
+    const agregado = parseDigitAmount(aggMatch[1]);
+    if (Number.isFinite(agregado) && agregado > 0) delta.gastos_mensuales = agregado;
+    const restoDesdeColon = message.slice(aggMatch.index + aggMatch[0].length);
+    const detailItems = parseExpenseList(restoDesdeColon);
+    if (detailItems.length >= 2) {
+      const cls = classifyExpenses(detailItems);
+      delta.gastos_detalle = {
+        vitales: cls.vitales.total,
+        noVitales: cls.noVitales.total,
+        desconocidos: cls.desconocidos.total,
+      };
+      delta.gastos_es_detalle = true;
+    }
+  } else if (esLista) {
     // Lista desglosada: gastos_detalle con totales por grupo. NO se toca
     // gastos_mensuales (el merge conserva el agregado previo — defecto B).
     const cls = classifyExpenses(listItems);
@@ -299,7 +345,7 @@ export function extractScenarioDelta(
   } else if (GASTO_CTX.test(n)) {
     // Agregado en una sola cifra ("mis gastos son 1500").
     const a = AMOUNT.exec(n.slice(n.search(GASTO_CTX)));
-    if (a) {
+    if (a && !esCifraAnual(n, GASTO_CTX, a)) {
       const v = parseDigitAmount(a[1]);
       if (Number.isFinite(v) && v > 0) delta.gastos_mensuales = v;
     }
@@ -331,6 +377,237 @@ export function extractScenarioDelta(
   }
 
   return delta;
+}
+
+// ── PIEZA 1 (5ª tanda) — DETECTOR DE NÚMEROS HUÉRFANOS ───────────────────────
+//
+// CASO REAL: "gano 2300 y gasto= 1000 arriendo 500 servicios 250 carro 100
+// ropa" — el sistema publicó gastos=1000 (el primer número tras "gasto") con
+// gasto real de 1850 (la suma del desglose). La calculadora computó BIEN
+// sobre un insumo FALSO: el hueco está en la entrada, no en el cálculo.
+//
+// PRINCIPIO: "Ningún dato entra al estado sin que el usuario lo vea. Ante
+// ambigüedad de extracción se PREGUNTA, nunca se asume." Tras extraer el
+// delta (tool call o fallback regex), se cuenta:
+//   N = números en el mensaje que PARECEN financieros.
+//   M = de esos, cuántos aterrizaron en algún campo del delta.
+// N − M ≥ 1 ⇒ extraccion_incompleta = true.
+
+// Sustantivos NO monetarios que, pegados a un número, lo excluyen del conteo
+// ("3 hijos", "2 personas"). "años"/"meses" YA quedan fuera vía duración
+// (unidad de tiempo, ver TIEMPO_AFTER_RE) — ni un plazo de crédito ni una edad
+// son dinero.
+const SUSTANTIVO_NO_MONETARIO_AFTER_RE =
+  /^\s*(?:hijos?|hijas?|filhos?|filhas?|kids?|child(?:ren)?|ni[ñn]os?|personas?|people|veces|times)\b/;
+const TIEMPO_AFTER_RE =
+  /^\s*(?:a[ñn]os?|anos?|years?|meses|mes|months?|d[ií]as?|days?|semanas?|weeks?)\b/;
+
+/** ¿`m` es un enumerador de lista ("1. Ajustar…")? Mismo criterio que validate.ts. */
+function esEnumeradorDeLista(text: string, m: NumberMention): boolean {
+  const lineStart = text.lastIndexOf("\n", m.start - 1) + 1;
+  const prefix = text.slice(lineStart, m.start);
+  if (!/^[ \t]*$/.test(prefix)) return false;
+  return /^ ?[.)-]/.test(text.slice(m.end, m.end + 3));
+}
+
+/** ¿`m` es una cifra CANDIDATA a financiera? (no enumerador, no duración, no sustantivo no-monetario). */
+function esCandidataFinanciera(text: string, m: NumberMention): boolean {
+  if (esEnumeradorDeLista(text, m)) return false;
+  const after = text.slice(m.end, m.end + 20);
+  if (TIEMPO_AFTER_RE.test(after)) return false;
+  if (SUSTANTIVO_NO_MONETARIO_AFTER_RE.test(after)) return false;
+  return true;
+}
+
+/**
+ * Números candidatos a financieros del mensaje (N del detector). Exportada
+ * también para el llamante (route.ts/harness): cuando la extracción es
+ * ambigua, el modelo necesita poder CITAR cualquiera de estos números al
+ * preguntar ("¿tu ingreso ronda los 2.000 € o los 2.500 €?") sin que el
+ * guardarraíl de cifras los bloquee por no ser una derivada verificada — son
+ * el eco de lo que el propio usuario escribió, no una cifra inventada.
+ */
+export function numerosCandidatos(message: string): number[] {
+  return dedupeOverlaps(findNumberMentions(message))
+    .filter((m) => esCandidataFinanciera(message, m))
+    .map((m) => m.value);
+}
+
+/**
+ * ¿`v` coincide con algún valor ya asignado en el delta? Tolera la conversión
+ * año↔mes (÷12 / ×12, ±1 de redondeo): un extractor más listo (tool call) que
+ * SÍ divide 27.600 €/año entre 12 y guarda 2.300 €/mes no debe marcarse como
+ * huérfano — "normaliza explícitamente" es una salida tan válida como preguntar.
+ */
+function coincideConAsignado(v: number, asignados: number[]): boolean {
+  return asignados.some(
+    (a) => Math.abs(a - v) <= 1 || Math.abs(a - v / 12) <= 1 || Math.abs(a - v * 12) <= 1,
+  );
+}
+
+/**
+ * Valores numéricos que ATERRIZARON en algún campo del delta (M del
+ * detector), incluyendo cada ítem individual de `gastos_detalle` — los
+ * totales por grupo no coincidirían nunca con un número suelto del mensaje,
+ * así que se RE-DERIVAN los ítems con el mismo parser que usó la extracción
+ * (determinista, sin efectos secundarios).
+ */
+function valoresAsignadosEnDelta(message: string, delta: Partial<ScenarioState>): number[] {
+  const vals: number[] = [];
+  if (delta.ingreso_mensual !== undefined) vals.push(delta.ingreso_mensual);
+  if (delta.gastos_mensuales !== undefined) vals.push(delta.gastos_mensuales);
+  if (delta.gastos_es_detalle) {
+    for (const item of parseExpenseList(message)) vals.push(item.amount);
+  }
+  if (delta.credito) {
+    if (delta.credito.monto) vals.push(delta.credito.monto);
+    if (delta.credito.plazo_meses) vals.push(delta.credito.plazo_meses);
+    if (delta.credito.tae_pct !== undefined) vals.push(delta.credito.tae_pct);
+  }
+  if (delta.meta) {
+    if (delta.meta.monto !== undefined) vals.push(delta.meta.monto);
+    if (delta.meta.plazo_meses !== undefined) vals.push(delta.meta.plazo_meses);
+  }
+  return vals;
+}
+
+export interface ExtraccionIncompletaResult {
+  extraccionIncompleta: boolean;
+  numerosHuerfanos: number[];
+}
+
+/**
+ * Detector de números huérfanos (PIEZA 1). Puro; corre TRAS extraer el delta,
+ * sea por tool call o por fallback regex — ambos producen un
+ * `Partial<ScenarioState>`, así que el detector es agnóstico a la vía.
+ */
+export function detectarNumerosHuerfanos(
+  message: string,
+  delta: Partial<ScenarioState>,
+): ExtraccionIncompletaResult {
+  const candidatos = numerosCandidatos(message);
+  const asignados = valoresAsignadosEnDelta(message, delta);
+  const numerosHuerfanos = candidatos.filter((v) => !coincideConAsignado(v, asignados));
+  return { extraccionIncompleta: numerosHuerfanos.length > 0, numerosHuerfanos };
+}
+
+// ── PIEZA 2 (5ª tanda) — RECONCILIACIÓN ARITMÉTICA ───────────────────────────
+//
+// CASO REAL (variante): "gasto 1000: 500 arriendo 250 carro 100 ropa" — el
+// agregado declarado (1000) NO coincide con la suma del detalle (850). No se
+// elige uno en silencio: se pregunta cuál es el correcto.
+export interface DiscrepanciaGastosResult {
+  discrepancia: boolean;
+  agregado?: number;
+  suma?: number;
+}
+
+/**
+ * ¿El agregado declarado (`gastos_mensuales`) y la suma del desglose
+ * (`gastos_detalle`) se contradicen? Solo aplica cuando AMBOS llegaron en el
+ * MISMO delta (ver `GASTO_AGREGADO_DETALLE_RE` en `extractScenarioDelta`) —
+ * el caso normal (solo detalle, sin agregado propio) nunca dispara esto.
+ */
+export function detectarDiscrepanciaGastos(delta: Partial<ScenarioState>): DiscrepanciaGastosResult {
+  if (delta.gastos_mensuales === undefined || !delta.gastos_detalle) return { discrepancia: false };
+  const suma = round2(
+    delta.gastos_detalle.vitales + delta.gastos_detalle.noVitales + delta.gastos_detalle.desconocidos,
+  );
+  const agregado = delta.gastos_mensuales;
+  if (Math.abs(suma - agregado) <= 1) return { discrepancia: false };
+  return { discrepancia: true, agregado, suma };
+}
+
+/**
+ * Nota de aclaración para el system prompt cuando la extracción es ambigua
+ * (PIEZA 1/2 · orquestador). PRIORIDAD: una discrepancia aritmética es más
+ * concreta que un huérfano genérico — si hay ambas, se pregunta por la
+ * discrepancia primero (el huérfano probablemente sea el mismo número).
+ * `null` si nada es ambiguo.
+ */
+export function notaExtraccionAmbigua(
+  huerfanos: ExtraccionIncompletaResult,
+  discrepancia: DiscrepanciaGastosResult,
+): string | null {
+  if (discrepancia.discrepancia) {
+    return (
+      `DISCREPANCIA ARITMÉTICA: el usuario declaró un total de ${discrepancia.agregado} € pero el ` +
+      `detalle suma ${discrepancia.suma} €. Pregunta cuál es el correcto antes de calcular nada. ` +
+      "Cero cifras derivadas en este turno."
+    );
+  }
+  if (huerfanos.extraccionIncompleta) {
+    return (
+      `EXTRACCIÓN INCOMPLETA: el usuario mencionó los números ${huerfanos.numerosHuerfanos.join(", ")} ` +
+      "que no he podido asignar. Pregunta a qué corresponden ANTES de calcular nada. " +
+      "Cero cifras derivadas en este turno."
+    );
+  }
+  return null;
+}
+
+/**
+ * Copia del delta SIN los campos financieros — se usa cuando la extracción es
+ * ambigua: "ningún dato entra al estado sin que el usuario lo vea" es literal,
+ * así que nada de esto se persiste hasta que el usuario aclare. Las señales no
+ * numéricas (cambio de meta, confirmación de plan) sobreviven: no son parte de
+ * la ambigüedad detectada.
+ */
+export function deltaSeguro(delta: Partial<ScenarioState>): Partial<ScenarioState> {
+  const seguro = { ...delta };
+  delete seguro.ingreso_mensual;
+  delete seguro.gastos_mensuales;
+  delete seguro.gastos_detalle;
+  delete seguro.gastos_es_detalle;
+  delete seguro.credito;
+  delete seguro.meta;
+  return seguro;
+}
+
+// ── PIEZA 3 (5ª tanda) — ECO DE CONFIRMACIÓN ─────────────────────────────────
+//
+// El mecanismo GENERAL, no solo para este caso: cuando el turno SÍ extrajo
+// datos limpios (sin huérfanos ni discrepancia), la primera línea de la
+// respuesta DEBE devolver lo entendido antes de usarlo — así el usuario ve el
+// dato y puede corregirlo si está mal, en vez de descubrirlo tres cifras
+// derivadas más tarde. Esta función expone los HECHOS de lo que el delta trae;
+// la REDACCIÓN (voz, calidez) es del modelo — ver consigliere.ts.
+export function renderDatosRecienEntendidos(
+  delta: Partial<ScenarioState>,
+  message: string,
+): string | null {
+  const partes: string[] = [];
+  if (delta.ingreso_mensual !== undefined) partes.push(`ingreso mensual: ${delta.ingreso_mensual} €`);
+  if (delta.gastos_es_detalle && delta.gastos_detalle) {
+    // `gastos_mensuales` puede no venir en el delta (el caso normal: solo
+    // detalle, sin agregado propio — `mergeScenario` lo recalcula al fusionar).
+    // El total a mostrar en el eco es la suma del propio desglose.
+    const total = delta.gastos_mensuales ?? round2(
+      delta.gastos_detalle.vitales + delta.gastos_detalle.noVitales + delta.gastos_detalle.desconocidos,
+    );
+    const items = parseExpenseList(message);
+    const desglose = items.length > 0 ? ` (${items.map((i) => `${i.name} ${i.amount}`).join(", ")})` : "";
+    partes.push(`gastos mensuales: ${total} €${desglose}`);
+  } else if (delta.gastos_mensuales !== undefined) {
+    partes.push(`gastos mensuales: ${delta.gastos_mensuales} €`);
+  }
+  if (delta.credito) {
+    if (delta.credito.monto) partes.push(`monto del crédito: ${delta.credito.monto} €`);
+    if (delta.credito.plazo_meses) partes.push(`plazo: ${delta.credito.plazo_meses} meses`);
+    if (delta.credito.tae_pct !== undefined) partes.push(`TAE: ${delta.credito.tae_pct}%`);
+  }
+  if (delta.meta) {
+    if (delta.meta.titulo) partes.push(`meta: ${delta.meta.titulo}`);
+    if (delta.meta.monto !== undefined) partes.push(`monto de la meta: ${delta.meta.monto} €`);
+    if (delta.meta.plazo_meses !== undefined) partes.push(`plazo de la meta: ${delta.meta.plazo_meses} meses`);
+  }
+  if (partes.length === 0) return null;
+  return (
+    `DATOS RECIÉN ENTENDIDOS (este turno): ${partes.join("; ")}. ` +
+    "Tu PRIMERA línea devuelve esto de forma compacta y natural (con tu propia voz, no copies este " +
+    "formato) antes de usar estas cifras — ver la regla de ECO del prompt. Si el usuario corrige un " +
+    "dato, el dato corregido manda. No repitas el eco si ya lo hiciste con los mismos datos."
+  );
 }
 
 function round2(n: number): number {

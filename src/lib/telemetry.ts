@@ -35,6 +35,15 @@ export interface ResponseTelemetryPayload {
    * intervención no son comparables si no se sabe qué capas estaban activas.
    */
   enforcementMode: EnforcementMode | null
+  /**
+   * PIEZA 4 (5ª tanda) — telemetría de ambigüedad de extracción, para que la
+   * revisión nocturna (AG07) pueda medir la tasa real de "el usuario dijo un
+   * número que el sistema no supo dónde poner" sobre tráfico real, no solo en
+   * los escenarios de QA.
+   */
+  extraccionIncompleta: boolean | null
+  numerosHuerfanos: number[] | null
+  discrepanciaGastos: boolean | null
 }
 
 /**
@@ -73,6 +82,9 @@ export async function logResponseTelemetry(
       commandment_violations: payload.commandmentViolations,
       guardrail_intervened: payload.guardrailIntervened,
       enforcement_mode: payload.enforcementMode,
+      extraccion_incompleta: payload.extraccionIncompleta,
+      numeros_huerfanos: payload.numerosHuerfanos,
+      discrepancia_gastos: payload.discrepanciaGastos,
     })
     if (error) throw new Error(error.message)
   } catch (err) {

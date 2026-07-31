@@ -7,6 +7,7 @@ import {
   auditarMutaciones,
   ensureSubstance,
   classifyTurn,
+  esTonoEmocional,
   getEnforcementMode,
 } from '@/lib/guardrail'
 import { buildScenarioContext } from '@/lib/calculator/orchestrator'
@@ -19,6 +20,12 @@ import {
   actualizarDigresiones,
   notaRetornoMeta,
   notaSinCifrasDePlan,
+  detectarNumerosHuerfanos,
+  detectarDiscrepanciaGastos,
+  notaExtraccionAmbigua,
+  deltaSeguro,
+  renderDatosRecienEntendidos,
+  numerosCandidatos,
   type ScenarioState,
 } from '@/lib/calculator/scenario'
 import { registrarDatosFinancieros, resolveDelta, buildToolResult } from '@/lib/calculator/tools'
@@ -260,6 +267,16 @@ export async function POST(request: Request) {
   // ninguna ("ninguno", "ok").
   const carril = classifyTurn(cleanMessage, seed, userLang)
 
+  // PIEZA 5c (complemento, 5ª tanda) — TONO EMOCIONAL. Señal ORTOGONAL al
+  // carril: reduce la autoridad del enforcement (pipeline.ts) y se expone al
+  // prompt para que el modelo consuele primero — nunca cambia el cálculo.
+  const esEmocional = esTonoEmocional(cleanMessage)
+  const notaTonoEmocional = esEmocional
+    ? 'TONO EMOCIONAL detectado en este turno (frustración, vergüenza, miedo, pérdida de empleo…). ' +
+      'PROHIBIDO pedir datos financieros o forzar un cierre en esta respuesta: consuela primero y ofrece ' +
+      'una alternativa concreta, según el MANDATO DE TONO. El eco de datos recién entendidos, si lo hay, espera al turno siguiente.'
+    : null
+
   // PIEZA 1 — modo de enforcement del turno ('full' por defecto). Se resuelve
   // UNA vez y baja por toda la cadena; se registra en telemetría para el A/B.
   const enforcementMode = getEnforcementMode()
@@ -322,6 +339,7 @@ export async function POST(request: Request) {
     `ESTADO ACTUAL CONOCIDO (lo que ya sabemos del usuario):\n${summarizeScenario(seed)}`,
     notaDigresion,
     notaSinCifras,
+    notaTonoEmocional,
     idiomaObligatorio,
   ].filter(Boolean).join('\n\n')
 
@@ -353,9 +371,55 @@ export async function POST(request: Request) {
   console.log(`[chat] ${usedTool ? 'toolCall usado' : 'fallback-regex'}`,
     JSON.stringify({ conversation_id: convId, keys: Object.keys(delta), carril }))
 
+  // PIEZA 1/2 (5ª tanda) — CIERRE DE LA CLASE DE EXTRACCIÓN. "Ningún dato entra
+  // al estado sin que el usuario lo vea. Ante ambigüedad de extracción se
+  // PREGUNTA, nunca se asume." Se cuenta tras extraer el delta (tool call o
+  // fallback regex, ambas vías convergen en el mismo Partial<ScenarioState>):
+  // números que parecen financieros y no aterrizaron en ningún campo
+  // (huérfanos), o un agregado declarado que no reconcilia con su propio
+  // desglose (discrepancia). Cualquiera de las dos prohíbe calcular derivadas
+  // este turno.
+  const huerfanos = detectarNumerosHuerfanos(cleanMessage, delta)
+  const discrepancia = detectarDiscrepanciaGastos(delta)
+  const extraccionAmbigua = huerfanos.extraccionIncompleta || discrepancia.discrepancia
+  const notaAmbigua = extraccionAmbigua ? notaExtraccionAmbigua(huerfanos, discrepancia) : null
+
+  if (extraccionAmbigua) {
+    console.warn('[chat] extraccion_ambigua', JSON.stringify({
+      user_id: user.id,
+      conversation_id: convId,
+      carril,
+      numeros_huerfanos: huerfanos.numerosHuerfanos,
+      discrepancia_gastos: discrepancia.discrepancia,
+    }))
+  }
+
   // Paso 4: estado completo → paquete verificado (código calcula y marca).
-  const scenario = mergeScenario(seed, delta)
-  const verified = buildScenarioContext(scenario, cleanMessage)
+  // PIEZA 1 — con extracción ambigua, el delta financiero NUNCA se persiste
+  // (deltaSeguro lo despoja de sus campos numéricos) y el motor no calcula
+  // ninguna derivada sobre un insumo sin confirmar (buildScenarioContext
+  // devuelve bloque vacío vía `extraccionAmbigua`).
+  const scenario = mergeScenario(seed, extraccionAmbigua ? deltaSeguro(delta) : delta)
+  // Todo número candidato del mensaje (no solo los huérfanos) queda autorizado
+  // para el guardarraíl de cifras: el modelo necesita poder citar cualquiera
+  // de ellos al preguntar ("¿tu ingreso ronda los 2.000 € o los 2.500 €?",
+  // "dijiste 1.000 € pero el detalle suma 850 €") sin que se bloqueen por no
+  // ser una cifra derivada verificada — es el eco de lo que el usuario
+  // escribió, no una cifra inventada. `discrepancia.suma` se añade aparte
+  // porque es COMPUTADA (no un token literal del mensaje).
+  const valoresAmbiguos = [
+    ...numerosCandidatos(cleanMessage),
+    ...(discrepancia.suma !== undefined ? [discrepancia.suma] : []),
+  ]
+  const verified = buildScenarioContext(scenario, cleanMessage, { extraccionAmbigua, valoresAmbiguos })
+
+  // PIEZA 3 — ECO DE CONFIRMACIÓN: con datos limpios (sin ambigüedad) y turno
+  // no emocional (PIEZA 7: el eco espera al turno siguiente si la persona está
+  // en un momento emocional), la primera línea de la respuesta debe devolver lo
+  // entendido antes de usarlo.
+  const notaEco = !extraccionAmbigua && !esEmocional
+    ? renderDatosRecienEntendidos(delta, cleanMessage)
+    : null
 
   // Paso 5-6: si hubo tool_call, LLAMADA 2 con el paquete verificado como
   // tool_result; si no, se usa el content de la LLAMADA 1 (ahorra latencia).
@@ -366,7 +430,10 @@ export async function POST(request: Request) {
   let respondingMessages: Parameters<typeof callLLMWithTools>[0]
   if (usedTool && toolCall) {
     const toolResult = JSON.stringify(buildToolResult(scenario, verified))
-    const systemPrompt2 = [basePrompt, notaDigresion, notaSinCifras, idiomaObligatorio].filter(Boolean).join('\n\n')
+    // PIEZA 1/3 — la nota de ambigüedad y el eco de confirmación van en ESTA
+    // llamada (aún no se ha generado nada con el delta de este turno).
+    const systemPrompt2 = [basePrompt, notaDigresion, notaSinCifras, notaAmbigua, notaEco, notaTonoEmocional, idiomaObligatorio]
+      .filter(Boolean).join('\n\n')
     const messages2 = [
       ...allMessages,
       { role: 'assistant' as const, content: call1.content, toolCalls: [toolCall] },
@@ -381,6 +448,26 @@ export async function POST(request: Request) {
     llmResult = { content: call2.content, tokensUsed: call1.tokensUsed + call2.tokensUsed, model: call2.model }
     respondingSystemPrompt = systemPrompt2
     respondingMessages = messages2
+  } else if (notaAmbigua || notaEco) {
+    // PIEZA 1/3 (sin tool_call) — el contenido de la LLAMADA 1 se generó ANTES
+    // de conocer la ambigüedad o el eco (ambos dependen del delta, resuelto
+    // después). Se regenera UNA vez con la nota inyectada — mismo patrón que el
+    // REINTENTO ÚNICO ACOTADO de las derivadas de decisión, más abajo.
+    const systemPromptRegen = [basePrompt, `ESTADO ACTUAL CONOCIDO (lo que ya sabemos del usuario):\n${summarizeScenario(seed)}`, notaDigresion, notaSinCifras, notaAmbigua, notaEco, notaTonoEmocional, idiomaObligatorio]
+      .filter(Boolean).join('\n\n')
+    const regen = await callLLMWithTools(
+      allMessages,
+      systemPromptRegen,
+      [registrarDatosFinancieros],
+      { maxTokens: 500, toolChoice: 'none' },
+    )
+    llmResult = {
+      content: regen.content || call1.content || 'El Consigliere no está disponible en este momento. Intenta en unos minutos.',
+      tokensUsed: call1.tokensUsed + regen.tokensUsed,
+      model: regen.model,
+    }
+    respondingSystemPrompt = systemPromptRegen
+    respondingMessages = allMessages
   } else {
     // Sin datos nuevos: la respuesta de la LLAMADA 1 (con el ESTADO CONOCIDO) vale.
     // Si el modelo no está disponible, el guardrail/ensureSubstance da el cierre seguro.
@@ -449,6 +536,9 @@ export async function POST(request: Request) {
       conceptos: verified.conceptos,
       // false en META — ahí ni se calcula ni aplica (Mandamiento 2).
       esSimulacion: carril === 'META' ? false : scenario.credito?.tae_es_referencia === true,
+      // PIEZA 5a (complemento, 5ª tanda) — frontera de autoridad reducida en
+      // turnos emocionales: el enforcement no toca tono, solo cifras.
+      esEmocional,
       enforcement: enforcementMode,
       supabase: admin,
       userId,
@@ -639,6 +729,10 @@ export async function POST(request: Request) {
       safety.mutations.length > 0 || safety.commandments.violaciones.length > 0 || safety.guardrailBloqueado,
     // PIEZA 1 — qué capas estaban activas en este turno (comparación A/B).
     enforcementMode,
+    // PIEZA 4 (5ª tanda) — tasa de ambigüedad de extracción para la revisión nocturna.
+    extraccionIncompleta: huerfanos.extraccionIncompleta,
+    numerosHuerfanos: huerfanos.numerosHuerfanos,
+    discrepanciaGastos: discrepancia.discrepancia,
   })
 
   return NextResponse.json({

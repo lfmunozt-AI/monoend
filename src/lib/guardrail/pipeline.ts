@@ -51,6 +51,16 @@ export interface EnforcementInput {
   conceptos: Record<string, number>;
   /** ¿La cuota citada es una simulación con TAE de referencia? */
   esSimulacion: boolean;
+  /**
+   * PIEZA 5a (complemento, 5ª tanda) — ¿el mensaje del usuario tiene tono
+   * emocional (frustración, vergüenza, miedo, pérdida de empleo…)? El
+   * enforcement solo tiene autoridad sobre cifras y hechos verificables — el
+   * tono es del modelo. Con esta señal en true, la frontera de autoridad se
+   * reduce a la misma de un turno META: SOLO corren el guardarraíl de entrada
+   * y el validador de seguridad; grounding, ensureSubstance, resolveClosing y
+   * enforceMissingClosing se DESACTIVAN, sea cual sea el carril.
+   */
+  esEmocional?: boolean;
   /** Modo de enforcement (PIEZA 1). Por defecto, el de la env var. */
   enforcement?: EnforcementMode;
   /** Cliente admin para persistir el log del guardarraíl (opcional). */
@@ -117,20 +127,26 @@ function paso(
  * validador de política → disclaimer → sustancia → cierre → The Commandments →
  * renumerar listas. En META se salta el grounding y la simulación (no hay nada
  * que fundamentar), pero la seguridad (validador, M4/M5/M7) se aplica igual.
+ *
+ * PIEZA 5a (complemento, 5ª tanda) — FRONTERA DE AUTORIDAD. Un turno con
+ * `esEmocional: true` corre con la MISMA frontera reducida que META, sea cual
+ * sea su carril real: el enforcement solo tiene autoridad sobre cifras y
+ * hechos verificables, nunca sobre el tono. Si una capa no puede señalar la
+ * cifra que está protegiendo, no toca el texto.
  */
 export async function applyEnforcement(
   raw: string,
   input: EnforcementInput,
 ): Promise<EnforcementResult> {
   const enforcement = input.enforcement ?? DEFAULT_ENFORCEMENT_MODE;
-  const { carril, lang, missing, conceptos, esSimulacion } = input;
+  const { carril, lang, missing, conceptos, esSimulacion, esEmocional } = input;
   const mutations: Mutation[] = [];
 
   let texto = raw;
   let guardrailBloqueado = false;
   let injection: { detected: boolean; patterns: string[] };
 
-  if (carril === "META") {
+  if (carril === "META" || esEmocional) {
     const inj = detectInjection(input.userMessage);
     injection = { detected: inj.sospechoso, patterns: inj.patrones };
   } else {
@@ -191,16 +207,21 @@ export async function applyEnforcement(
   }
 
   // 5 · SUSTANCIA (PIEZA 2) — último recurso, solo si la respuesta quedó
-  // realmente vacía. Desactivado en `minimal`.
-  if (carril === "FINANCIERO") {
+  // realmente vacía. Desactivado en `minimal` y en turnos emocionales (PIEZA
+  // 5a: prohibido forzar petición de dato cuando el usuario necesita que lo
+  // escuchen, no un formulario).
+  if (carril === "FINANCIERO" && !esEmocional) {
     texto = paso("ensureSubstance", "respuesta sin sustancia", texto, mutations, () =>
       ensureSubstance(texto, { lang, missing, enforcement }),
     );
   }
 
   // 6 · CIERRE (PIEZA 4) — solo añade; nunca pisa la pregunta del modelo.
+  // PIEZA 5a: un turno emocional NUNCA recibe cierre forzado, sea cual sea su
+  // carril — `resolveClosing` ya trata META como texto intacto; se simula lo
+  // mismo pasándole 'META' cuando `esEmocional` es true.
   texto = paso("resolveClosing", "cierre", texto, mutations, () =>
-    resolveClosing(texto, { carril, missing, lang, enforcement }),
+    resolveClosing(texto, { carril: esEmocional ? "META" : carril, missing, lang, enforcement }),
   );
 
   // 7 · RENUMERAR LISTAS (FIX 3), ANTES de Commandments — repara enumeradores

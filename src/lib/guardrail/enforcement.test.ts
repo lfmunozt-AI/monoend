@@ -295,3 +295,57 @@ test("CASO C end-to-end: la Reserva de Imprevistos nunca pasa a 48 meses", async
     assert.ok(!r.texto.includes("48 meses"), `enforcement=${enforcement}: ${r.texto}`);
   }
 });
+
+// ── PIEZA 5a (complemento, 5ª tanda) — FRONTERA DE AUTORIDAD EN TURNOS EMOCIONALES
+//
+// "La calidez es del modelo, no de las capas": el enforcement solo tiene
+// autoridad sobre cifras y hechos verificables. Un turno con esEmocional=true
+// corre con la misma frontera reducida de META — grounding, ensureSubstance,
+// resolveClosing y enforceMissingClosing se DESACTIVAN — sea cual sea su carril.
+
+test("PIEZA 5a: turno emocional NUNCA recibe cierre forzado, aunque falte un dato", async () => {
+  const texto = "Sé que esto pesa, y lo que sientes tiene sentido — no estás fallando.";
+  const r = await applyEnforcement(texto, {
+    ...BASE,
+    userMessage: "estoy frustrado, no consigo trabajo pero quiero ahorrar",
+    carril: "FINANCIERO",
+    missing: ["ingreso", "gastos"],
+    esEmocional: true,
+  });
+  assert.equal(r.texto, texto, "PROHIBIDO forzar petición de dato en un turno emocional");
+});
+
+test("PIEZA 5a: turno emocional NUNCA recibe sustancia forzada, aunque el texto sea corto", async () => {
+  const texto = "Entiendo.";
+  const r = await applyEnforcement(texto, {
+    ...BASE,
+    userMessage: "me da vergüenza lo mal que llevo mis cuentas",
+    carril: "FINANCIERO",
+    missing: ["ingreso"],
+    esEmocional: true,
+  });
+  assert.equal(r.texto, texto, "ensureSubstance no debe tocar un turno emocional");
+});
+
+test("PIEZA 5a: el mismo texto CON carril FINANCIERO pero esEmocional=false SÍ recibe cierre", async () => {
+  const texto = "Tu sobrante es 500 €.";
+  const r = await applyEnforcement(texto, {
+    ...BASE,
+    carril: "FINANCIERO",
+    missing: ["tae"],
+    esEmocional: false,
+  });
+  assert.notEqual(r.texto, texto, "sin la señal emocional, el cierre normal sigue aplicando");
+});
+
+test("PIEZA 5a: turno emocional en carril MIXTO también se desactiva (no solo FINANCIERO)", async () => {
+  const texto = "Ánimo — vamos paso a paso, hoy solo toca respirar.";
+  const r = await applyEnforcement(texto, {
+    ...BASE,
+    userMessage: "estoy agobiado, gano 2000",
+    carril: "MIXTO",
+    missing: ["gastos"],
+    esEmocional: true,
+  });
+  assert.equal(r.texto, texto);
+});

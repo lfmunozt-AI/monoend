@@ -1,0 +1,17 @@
+{
+  "name": "extraccion_anual_huerfano",
+  "playbook": "PB1",
+  "language": "es",
+  "description": "PIEZA 1 (5ª tanda): 'gano 27600 al año' NO se asume como si fuera mensual — dividir por 12 en silencio es exactamente el tipo de suposición que el principio nuevo prohíbe. El número queda huérfano a propósito y el sistema pregunta en vez de normalizar sin decirlo.",
+  "turns": [
+    {
+      "user": "gano 27600 al año",
+      "fixtureResponse": "Para trabajar con tu ingreso mensual, ¿los 27.600 € son brutos o netos al año? Divido entre 12 y seguimos con el número exacto.",
+      "expectCarril": "FINANCIERO",
+      "expectExtraccionAmbigua": true,
+      "expectEmocional": false,
+      "expectContains": ["27.600"],
+      "expectNotContains": ["ingreso mensual: 2.300", "sobrante", "capacidad de ahorro"]
+    }
+  ]
+}

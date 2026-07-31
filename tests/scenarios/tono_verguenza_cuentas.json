@@ -1,0 +1,27 @@
+{
+  "name": "tono_verguenza_cuentas",
+  "playbook": "PB1",
+  "language": "es",
+  "description": "PIEZA 5a/6 (complemento, 5ª tanda): tras un turno financiero (T1, deja missing pendiente), 'me da vergüenza lo mal que llevo mis cuentas' (T2) no trae señal propia → carril FINANCIERO por CONTINUIDAD del escenario activo. Sin la señal emocional, el enforcement normal forzaría sustancia/cierre por el missing pendiente; con ella, se desactiva: primero valida y normaliza SIN moralizar, y propone UNA cosa concreta — los datos pueden esperar.",
+  "turns": [
+    {
+      "user": "Gano 2300 euros al mes.",
+      "fixtureResponse": "Anotado: 2.300 € al mes. ¿Y tus gastos mensuales?",
+      "expectCarril": "FINANCIERO",
+      "expectBlocked": false
+    },
+    {
+      "user": "me da vergüenza lo mal que llevo mis cuentas",
+      "fixtureResponse": "Lo que cuentas le pasa a muchísima gente, y no dice nada de tu valía — llevar mal las cuentas no te define. Si quieres, hoy solo hacemos una cosa: anotar juntos en qué se fue el dinero del último mes, sin juzgar nada. El resto puede esperar.",
+      "expectCarril": "FINANCIERO",
+      "expectEmocional": true,
+      "expectContains": ["El resto puede esperar."],
+      "expectNotContains": [
+        "¿Y tus gastos mensuales?",
+        "necesito tus gastos",
+        "deberías",
+        "no es responsable"
+      ]
+    }
+  ]
+}
