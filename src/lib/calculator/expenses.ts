@@ -129,9 +129,13 @@ export function classifyExpenses(items: ExpenseItem[]): ExpenseClassification {
 
 // ── Parseo de una lista de gastos en texto libre ─────────────────────────────
 // Nombres que NO son un gasto (agregados, etiquetas de perfil, escenario de
-// crédito): se descartan al parsear.
+// crédito): se descartan al parsear. "carro/coche/auto/vehiculo" quedaron
+// FUERA a propósito (5ª tanda): son categorías de gasto legítimas (cuota del
+// carro, gasolina) y el caso real las necesita ("250 carro"). La colisión con
+// "financiar un carro de 30000" la resuelve `STOPWORD_NAME_RE` en el fallback
+// monto-primero, no esta lista.
 const NO_ES_GASTO =
-  /\b(ingreso|ingresos|sueldo|salario|gano|gana|gasto|gastos|meta|objetivo|plazo|carro|coche|auto|vehiculo|prestamo|credito|financiar|ahorro|ahorros|deuda)\b/;
+  /\b(ingreso|ingresos|sueldo|salario|gano|gana|gasto|gastos|meta|objetivo|plazo|prestamo|credito|financiar|ahorro|ahorros|deuda)\b/;
 
 /**
  * Extrae una lista de gastos ("netflix 100, luz 50, …") del mensaje. Segmenta por
@@ -139,11 +143,8 @@ const NO_ES_GASTO =
  * monto AL FINAL (tolerando € y "al mes"). Así "financiar un carro de 30000 a 36
  * meses" no cuenta (el monto no está al final) y "Ingresos 10000 euros al mes" se
  * descarta por el nombre. Devuelve [] si hay menos de 2 pares.
- *
- * Compartido por el orquestador (clasificador) y el scenario (para no machacar el
- * gasto agregado con el primer ítem de la lista — defecto B).
  */
-export function parseExpenseList(message: string): ExpenseItem[] {
+function parseExpenseListNameFirst(message: string): ExpenseItem[] {
   const items: ExpenseItem[] = [];
   const segmentos = message.split(/[,\n]|(?<=[.!?])\s+/);
   const re =
@@ -159,5 +160,66 @@ export function parseExpenseList(message: string): ExpenseItem[] {
     items.push({ name, amount });
   }
 
-  return items.length >= 2 ? items : [];
+  return items;
+}
+
+/**
+ * FALLBACK (5ª tanda) — secuencia "MONTO nombre MONTO nombre…" SIN comas.
+ * Caso real: "gasto= 1000 arriendo 500 servicios 250 carro 100 ropa" — el
+ * orden está INVERTIDO respecto al formato principal (monto ANTES del
+ * nombre, no después) y no hay comas entre ítems. Tokeniza por espacios y
+ * empareja cada número con las palabras que lo siguen hasta el próximo
+ * número; un número sin ninguna palabra detrás (p. ej. un total agregado
+ * seguido de ":") no produce ítem — lo cuenta el detector de huérfanos o la
+ * reconciliación de discrepancia, no esta función.
+ */
+// Palabras que, SOLAS, no son un nombre de gasto válido (preposiciones,
+// artículos, conectores, unidades de tiempo). QA real: sin esto, "financiar un
+// carro de 30000 a 36 meses" producía DOS ítems espurios ({a: 30000}, {meses:
+// 36}) — el 30000 y el 36 de un escenario de crédito, no una lista de gastos.
+const STOPWORD_NAME_RE =
+  /^(?:a|al|de|del|en|el|la|los|las|un|una|unos|unas|y|o|por|para|con|sin|que|es|son|mi|tu|su|meses?|mes|a[ñn]os?|anos?|d[ií]as?|semanas?|trimestres?|months?|years?|days?|weeks?)$/i;
+
+function parseExpenseListAmountFirst(message: string): ExpenseItem[] {
+  const tokens = message.trim().split(/\s+/).filter(Boolean);
+  const items: ExpenseItem[] = [];
+  let i = 0;
+  while (i < tokens.length) {
+    const tok = tokens[i];
+    if (!/^\d/.test(tok)) {
+      i++;
+      continue;
+    }
+    const amount = parseDigitAmount(tok.replace(/[.,;:€]+$/, ""));
+    let j = i + 1;
+    const words: string[] = [];
+    while (j < tokens.length && !/^\d/.test(tokens[j])) {
+      const w = tokens[j].replace(/^[.,;:()]+|[.,;:()]+$/g, "");
+      if (w) words.push(w);
+      j++;
+    }
+    const name = words.join(" ").trim();
+    const esSoloStopwords = words.length > 0 && words.every((w) => STOPWORD_NAME_RE.test(w));
+    if (Number.isFinite(amount) && amount > 0 && name && !esSoloStopwords && !NO_ES_GASTO.test(norm(name))) {
+      items.push({ name, amount });
+    }
+    i = j;
+  }
+  return items;
+}
+
+/**
+ * Extrae una lista de gastos del mensaje, en cualquiera de los DOS formatos:
+ * "nombre monto" (principal, con comas) o "monto nombre" (fallback, sin
+ * comas — QA real). Devuelve [] si ningún formato encuentra ≥2 pares.
+ *
+ * Compartido por el orquestador (clasificador) y el scenario (para no machacar el
+ * gasto agregado con el primer ítem de la lista — defecto B).
+ */
+export function parseExpenseList(message: string): ExpenseItem[] {
+  const nameFirst = parseExpenseListNameFirst(message);
+  if (nameFirst.length >= 2) return nameFirst;
+
+  const amountFirst = parseExpenseListAmountFirst(message);
+  return amountFirst.length >= 2 ? amountFirst : [];
 }

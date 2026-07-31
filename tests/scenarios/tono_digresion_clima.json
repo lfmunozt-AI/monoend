@@ -1,0 +1,22 @@
+{
+  "name": "tono_digresion_clima",
+  "playbook": "PB7",
+  "language": "es",
+  "description": "PIEZA 6/7 (complemento, 5ª tanda): '¿qué tiempo hace?' sin señal META ni financiera propia hereda el carril por CONTINUIDAD del escenario activo (FINANCIERO, no META — mismo patrón que CASO B del diagnóstico original). El modelo responde la pregunta de verdad, con naturalidad, y NO la usa de excusa para pedir un dato — el puente de vuelta cita el MISMO dato ya pendiente (la TAE), nunca uno nuevo ni una fórmula genérica de peticón.",
+  "turns": [
+    {
+      "user": "Gano 2500 euros al mes y mis gastos son 1500. Quiero financiar un carro de 20000 a 36 meses.",
+      "fixtureResponse": "Con una TAE de referencia del 7%, la cuota rondaría los 617,54 €/mes. ¿Qué TAE te ofrece tu banco?",
+      "expectCarril": "FINANCIERO",
+      "expectBlocked": false
+    },
+    {
+      "user": "¿qué tiempo hace?",
+      "fixtureResponse": "No tengo forma de saber el tiempo que hace donde estás, así que ahí no te puedo ayudar. Volviendo a lo tuyo: seguimos esperando la TAE real de tu banco para cerrar la cuota del carro.",
+      "expectCarril": "FINANCIERO",
+      "expectEmocional": false,
+      "expectContains": ["tiempo que hace"],
+      "expectNotContains": ["me compartes tus ingresos", "necesito tus gastos mensuales"]
+    }
+  ]
+}

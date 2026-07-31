@@ -43,6 +43,43 @@ function hasFinancialSignal(n: string): boolean {
   return HAS_DIGIT.test(n) || FINANCIAL_KEYWORDS.test(n);
 }
 
+// ── PIEZA 5c (complemento, 5ª tanda) — TONO EMOCIONAL ────────────────────────
+//
+// PRINCIPIO ARQUITECTÓNICO: el enforcement solo tiene autoridad sobre CIFRAS Y
+// HECHOS VERIFICABLES. Tono, empatía y consuelo son responsabilidad exclusiva
+// del modelo. Esta señal NO cambia el cálculo (missing/conceptos/valores
+// siguen igual) — solo le dice al PIPELINE (applyEnforcement) y al PROMPT que
+// este turno necesita la frontera de autoridad reducida de un turno humano:
+// sin grounding forzado, sin petición de dato forzada.
+const TONO_EMOCIONAL_RE = new RegExp(
+  "\\b(" +
+    // ES
+    "frustrad[oa]|hart[oa]|agobiad[oa]|no puedo mas|no doy mas|me da verguenza|" +
+    "me averguenza|tengo miedo|me despidieron|perdi el trabajo|sin trabajo|" +
+    "no consigo trabajo|no encuentro trabajo|estoy en cero|deprimid[oa]|" +
+    "angustiad[oa]|desesperad[oa]|abrumad[oa]|" +
+    // PT
+    "frustrad[oa]|farto[a]?|sobrecarregad[oa]|nao aguento mais|tenho vergonha|" +
+    "tenho medo|fui despedid[oa]|perdi o emprego|sem emprego|nao consigo emprego|" +
+    "estou a zero|deprimid[oa]|angustiad[oa]|desesperad[oa]|" +
+    // EN
+    "frustrated|fed up|overwhelmed|i can'?t (?:take it|do this) anymore|" +
+    "i'?m ashamed|i'?m scared|i'?m afraid|i got fired|lost my job|no job|" +
+    "can'?t find (?:a )?job|i'?m at zero|depressed|anxious|desperate" +
+    ")\\b",
+);
+
+/**
+ * ¿El mensaje expresa frustración, vergüenza, miedo, desánimo, pérdida de
+ * empleo, enfermedad o crisis familiar? Puro, determinista. No decide el
+ * carril (una pregunta financiera dicha con angustia sigue siendo
+ * financiera) — es una señal ADICIONAL que el pipeline usa para reducir su
+ * propia autoridad, nunca para ampliarla.
+ */
+export function esTonoEmocional(message: string): boolean {
+  return TONO_EMOCIONAL_RE.test(norm(message));
+}
+
 /**
  * ¿El MENSAJE trae señal financiera propia (una cifra o una keyword de dominio)?
  *

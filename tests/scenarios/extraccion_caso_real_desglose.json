@@ -1,0 +1,19 @@
+{
+  "name": "extraccion_caso_real_desglose",
+  "playbook": "PB1",
+  "language": "es",
+  "description": "CASO REAL (testdev4, 31/07 09:19): 'gano 2300 y gasto= 1000 arriendo 500 servicios 250 carro 100 ropa' se había extraído como gastos=1000 (el primer número tras 'gasto'); el gasto real es 1850 (la suma del desglose). Tras el fix (5ª tanda), la extracción asigna los 4 montos al desglose — sin huérfanos, sin discrepancia — y gastos_mensuales se recalcula como la suma. El eco de confirmación (PIEZA 3) va en la primera línea.",
+  "turns": [
+    {
+      "user": "peinso que mi ahorro es una desastre, gano 2300 y gasto= 1000 arriendo 500 servicios 250 carro 100 ropa",
+      "fixtureResponse": "Entendido: ingresas 2.300 € y gastas 1.850 € (arriendo 1.000, servicios 500, carro 250, ropa 100). Con eso te sobran 450 € al mes — nada de desastre, es un punto de partida claro. ¿Tienes ya una meta para ese sobrante?",
+      "expectCarril": "FINANCIERO",
+      "expectBlocked": false,
+      "expectExtraccionAmbigua": false,
+      "expectEmocional": false,
+      "expectContains": ["1.850", "450"],
+      "expectConcept": { "sobrante": { "value": 450, "tol": 0 } },
+      "expectScenarioState": { "ingreso_mensual": 2300, "gastos_mensuales": 1850 }
+    }
+  ]
+}

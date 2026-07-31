@@ -1,0 +1,21 @@
+{
+  "name": "tono_frustracion_sin_empleo",
+  "playbook": "PB1",
+  "language": "es",
+  "description": "PIEZA 5a/6 (complemento, 5ª tanda): 'estoy frustrado, no consigo trabajo pero quiero ahorrar' trae señal financiera propia ('ahorrar') → carril FINANCIERO con missing no vacío (sin ingreso ni gastos aún). El tono emocional desactiva la autoridad normal del enforcement: PROHIBIDO forzar la petición de ingreso/gastos en este turno — consuelo, alternativas sin depender de ingreso, y cierre devolviendo el control.",
+  "turns": [
+    {
+      "user": "estoy frustrado, no consigo trabajo pero quiero ahorrar",
+      "fixtureResponse": "Sé que no tener trabajo mientras quieres ahorrar pesa, y no te voy a prometer que la meta sigue en el mismo plazo — eso sería mentirte. Mientras buscas, hay margen real: revisar qué gasto fijo se puede pausar o renegociar, y ver si hay alguna ayuda a la que tengas derecho ahora mismo. Tú decides por dónde empezar.",
+      "expectCarril": "FINANCIERO",
+      "expectEmocional": true,
+      "expectContains": ["Tú decides por dónde empezar."],
+      "expectNotContains": [
+        "me compartes tus ingresos",
+        "necesito tus gastos mensuales",
+        "¿Cuál es tu ingreso mensual?",
+        "Para darte una cifra exacta"
+      ]
+    }
+  ]
+}

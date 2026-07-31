@@ -373,11 +373,31 @@ export interface ScenarioContext {
  * - crédito sin TAE → cuota en REFERENCIAS con TAE de referencia del 7%.
  * - lista de gastos en el mensaje → clasificación + recorte del 50%.
  * `conceptos` alimenta el grounding semántico; `valores` es el superset numérico.
+ *
+ * PIEZA 1 (5ª tanda) — `opts.extraccionAmbigua`: si la extracción de ESTE
+ * turno quedó incompleta (números huérfanos) o el detalle de gastos no
+ * reconcilia con el agregado declarado, PROHIBIDO calcular sobrante,
+ * capacidad, cuota o cualquier derivada con esos datos — el orquestador NO
+ * emite ninguna línea de TU REALIDAD/REFERENCIAS; devuelve el bloque vacío
+ * ("" — igual que cuando no hay hechos) y dejamos que el aviso de ambigüedad
+ * (`notaExtraccionAmbigua`, scenario.ts) sea lo único que llegue al prompt.
+ *
+ * `opts.valoresAmbiguos` — los números CRUDOS de la ambigüedad misma (los
+ * huérfanos, o el agregado y la suma que no reconcilian): el modelo necesita
+ * poder CITARLOS para preguntar ("dijiste 1.000 € pero el detalle suma
+ * 850 €") sin que el guardarraíl de cifras los bloquee por no estar en
+ * `cifrasCalculadas` — no son una cifra derivada, son el eco de lo que el
+ * propio usuario dijo.
  */
 export function buildScenarioContext(
   scenario: ScenarioState,
   userMessage: string,
+  opts?: { extraccionAmbigua?: boolean; valoresAmbiguos?: number[] },
 ): ScenarioContext {
+  if (opts?.extraccionAmbigua) {
+    return { bloque: "", conceptos: {}, valores: opts.valoresAmbiguos ?? [], missing: scenario.missing ?? [] };
+  }
+
   const realidad: Linea[] = [];
   const referencias: string[] = [];
   const sinClasificar: string[] = [];

@@ -51,7 +51,7 @@ export {
   type ResolveClosingOptions,
   type Mutation,
 } from "./policy";
-export { classifyTurn, type Carril } from "./turn-classifier";
+export { classifyTurn, esTonoEmocional, tieneSenalFinanciera, type Carril } from "./turn-classifier";
 export {
   enforceCommandments,
   type CommandmentContext,
