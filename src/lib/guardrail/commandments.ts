@@ -157,6 +157,15 @@ function stripUnbackedConcepts(
       // "cuota" sin que `conceptos.cuota` estuviera poblado (missing incluía
       // 'tae') y este Mandamiento lo eliminaba — las capas peleándose entre sí.
       if (esTextoCanonico(seg.text)) return true;
+      // QA (4ª tanda, surgido al conectar Commandments al harness de
+      // regresión): "¿Quieres que te prepare un recordatorio mensual para la
+      // cuota?" mencionaba "cuota" (concepto derivado) SIN que el motor la
+      // hubiera calculado este turno — y se eliminaba, aunque la frase no cita
+      // NINGÚN valor de "cuota", solo nombra el concepto de pasada. El
+      // Mandamiento existe para atrapar una CIFRA afirmada sin respaldo (el
+      // déficit fantasma citaba "9500 €"); sin una cifra en la propia frase no
+      // hay nada que fundamentar, así que no hay nada que eliminar.
+      if (!/\d/.test(seg.text)) return true;
       const nombrados = conceptsInSentence(seg.text);
       const deficitContrario = nombrados.includes("deficit") && (conceptos.sobrante ?? 0) > 0;
       const sinCalculo = nombrados.some((c) => DERIVED_CONCEPTS.has(c) && !(c in conceptos));
@@ -312,15 +321,53 @@ function tieneCifraMonetaria(text: string): boolean {
 }
 
 /**
- * ¿`text` es un PLAN FANTASMA? Solo si (a) algo cambió respecto al `raw`
- * original, (b) el texto sigue anunciando un plan y pidiendo confirmación, y
- * (c) no le queda ninguna cifra monetaria real — el cascarón sin sustancia
- * que el diagnóstico real detectó.
+ * Cuenta ítems de lista numerada BIEN FORMADOS ("N.<sep> contenido") por
+ * línea. Cuenta sobre el texto YA renumerado (`renumberLists`), así que un
+ * enumerador huérfano o pegado ("1.2.3.") no aparece como línea propia y no
+ * infla el conteo — cada línea contada es un ítem con contenido real.
+ */
+function contarItemsDeLista(text: string): number {
+  const lineas = renumberLists(text).texto.split("\n");
+  return lineas.filter((l) => /^\s*\d+[.):-]\s+\S/.test(l)).length;
+}
+
+/**
+ * ¿`text` es un PLAN FANTASMA? Solo si:
+ *   (a) algo cambió respecto al `raw` original;
+ *   (b) `text` NO es un texto canónico nuestro (QA real, 4ª tanda: la
+ *       respuesta segura de output-validator.ts cuando una GARANTÍA prohibida
+ *       se elimina — "No puedo prometerte resultados de inversión… tu PLAN…
+ *       ¿Cuál es tu META?" — menciona "plan", cierra en pregunta y no cita
+ *       cifra: calza EXACTO con la forma de un plan fantasma. Revertirla al
+ *       raw devolvería la garantía prohibida que la propia capa de seguridad
+ *       acababa de bloquear. Una sustitución de seguridad intencional no es
+ *       un vaciado);
+ *   (c) `text` sigue anunciando un plan y pidiendo confirmación;
+ *   (d) el `raw` ERA una lista numerada (`nRaw > 0`) — un "plan fantasma" real
+ *       es un PLAN NUMERADO que perdió su sustancia. QA real (4ª tanda): "Tus
+ *       ingresos son de 500 € y tus gastos son de 500 €… ¿Confirmamos el
+ *       plan?" no es una lista numerada; el grounding elimina correctamente
+ *       la hallucinación (ingreso/gastos falsos) y deja solo la pregunta de
+ *       cierre — sin este chequeo, M9 confundía esa pregunta corta (sin
+ *       cifra, menciona "plan") con un plan vaciado y revertía al raw,
+ *       resucitando la mentira que el grounding acababa de bloquear con
+ *       razón. Sin lista numerada en el raw no hay "pasos" que mutilar ni
+ *       "vaciar": nada de esto es cosa de M9;
+ *   (e) Y, dentro de (d), O BIEN no le queda ninguna cifra monetaria real
+ *       (cascarón sin sustancia), O BIEN perdió pasos de la lista numerada
+ *       del raw (plan MUTILADO, FIX 4 — "no basta con que quede alguna cifra
+ *       o algún ítem": QA real, raw 3 pasos → final 1 paso CON cifra propia,
+ *       igual mutilado) — cualquiera de las dos basta.
  */
 function esPlanFantasma(text: string, raw: string | undefined): boolean {
   if (raw === undefined || raw === text) return false;
+  if (esTextoCanonico(text)) return false;
   if (!PLAN_ANNOUNCE_RE.test(norm(text))) return false;
   if (!endsWithRequestOrProposal(text)) return false;
+
+  const nRaw = contarItemsDeLista(raw);
+  if (nRaw === 0) return false;
+
   // Normaliza la numeración SOLO para detectar sustancia: enumeradores
   // huérfanos pegados ("1.2.3.") no cuentan como cifra monetaria, pero
   // `isListEnumerator` solo reconoce un enumerador si abre línea — con la
@@ -328,7 +375,9 @@ function esPlanFantasma(text: string, raw: string | undefined): boolean {
   // fantasma pasaría desapercibido. `renumberLists` corre de nuevo, sin
   // efecto, si el texto que llega aquí ya está limpio (pipeline.ts la aplica
   // antes de Commandments) — idempotente por diseño.
-  return !tieneCifraMonetaria(renumberLists(text).texto);
+  const sinCifras = !tieneCifraMonetaria(renumberLists(text).texto);
+  const mutilado = contarItemsDeLista(text) < nRaw;
+  return sinCifras || mutilado;
 }
 
 /**

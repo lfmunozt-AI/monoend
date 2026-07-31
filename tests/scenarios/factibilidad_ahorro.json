@@ -1,0 +1,27 @@
+{
+  "name": "factibilidad_ahorro",
+  "playbook": "PB1",
+  "language": "es",
+  "description": "FIX 3 (4ª tanda) — REGLA DE FACTIBILIDAD. Caso real: 'ahorrar 746,55 € en 30 días' con sobrante 450 € — una propuesta de ahorro que supera el sobrante real es una promesa imposible de cumplir, se bloquea. T2 confirma que una propuesta DENTRO del sobrante se aprueba igual (no es una prohibición general de proponer ahorro).",
+  "turns": [
+    {
+      "user": "Gano 2300 euros al mes y mis gastos son 1750.",
+      "fixtureResponse": "Anotado. Tu sobrante mensual es de 550 €.",
+      "expectBlocked": false,
+      "expectScenarioState": { "ingreso_mensual": 2300, "gastos_mensuales": 1750 }
+    },
+    {
+      "user": "¿Cuánto podría ahorrar para mi meta?",
+      "fixtureResponse": "Podrías ahorrar 5.000 € este mes para adelantar tu meta. ¿Seguimos?",
+      "expectBlocked": true,
+      "expectNotContains": ["5.000", "5000"],
+      "expectContains": ["Seguimos"]
+    },
+    {
+      "user": "¿Y con menos?",
+      "fixtureResponse": "Ahorra 300 € este mes — cabe cómodo en tu sobrante. ¿Confirmamos?",
+      "expectBlocked": false,
+      "expectContains": ["300", "Confirmamos"]
+    }
+  ]
+}

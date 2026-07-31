@@ -18,6 +18,7 @@ import {
   esRespuestaRepetida,
   actualizarDigresiones,
   notaRetornoMeta,
+  notaSinCifrasDePlan,
   type ScenarioState,
 } from '@/lib/calculator/scenario'
 import { registrarDatosFinancieros, resolveDelta, buildToolResult } from '@/lib/calculator/tools'
@@ -270,6 +271,11 @@ export async function POST(request: Request) {
   seed.digresiones_seguidas = actualizarDigresiones(prevScenario, carril, cleanMessage)
   const notaDigresion = notaRetornoMeta(seed)
 
+  // FIX 2b (4ª tanda) — refuerzo determinista del auto-chequeo: si el
+  // playbook activo implica cifras de plan y falta un dato, se lo decimos
+  // directamente en vez de confiar solo en que el modelo se autochequee.
+  const notaSinCifras = notaSinCifrasDePlan(seed)
+
   console.warn('[chat] carril', JSON.stringify({
     user_id: user.id,
     conversation_id: convId,
@@ -315,6 +321,7 @@ export async function POST(request: Request) {
     basePrompt,
     `ESTADO ACTUAL CONOCIDO (lo que ya sabemos del usuario):\n${summarizeScenario(seed)}`,
     notaDigresion,
+    notaSinCifras,
     idiomaObligatorio,
   ].filter(Boolean).join('\n\n')
 
@@ -359,7 +366,7 @@ export async function POST(request: Request) {
   let respondingMessages: Parameters<typeof callLLMWithTools>[0]
   if (usedTool && toolCall) {
     const toolResult = JSON.stringify(buildToolResult(scenario, verified))
-    const systemPrompt2 = [basePrompt, notaDigresion, idiomaObligatorio].filter(Boolean).join('\n\n')
+    const systemPrompt2 = [basePrompt, notaDigresion, notaSinCifras, idiomaObligatorio].filter(Boolean).join('\n\n')
     const messages2 = [
       ...allMessages,
       { role: 'assistant' as const, content: call1.content, toolCalls: [toolCall] },

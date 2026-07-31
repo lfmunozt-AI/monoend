@@ -157,7 +157,15 @@ function ctx(overrides: Partial<CommandmentContext> = {}): CommandmentContext {
 }
 
 test("Mandamiento 9: el FINAL vaciado del caso real se detecta y se revierte al raw", () => {
-  const raw = "Propongo un plan concreto: te doy 3 pasos con cifras reales. ¿Arrancamos con este plan?";
+  // El raw DEBE ser una lista numerada real (FIX 4, más abajo, exige nRaw>0
+  // como precondición) — es justo la estructura que el vaciado perdió.
+  const raw =
+    "Propongo un plan concreto:\n" +
+    "1. Recorta 100 € de suscripciones.\n" +
+    "2. Aumenta tus ingresos en 100 € extra.\n" +
+    "3. Mantén la Reserva de Imprevistos intacta.\n" +
+    "4. Revisa el progreso en 30 días.\n" +
+    "¿Arrancamos con este plan?";
   const vaciado = "Propongo un plan concreto:\n1.2.3. Mantener la Reserva de Imprevistos intacta.\n" +
     "4. Revisar progreso en 30 días para ajustar.\n¿Arrancamos con este plan?";
   // "Mantener..." y "Revisar... 30 días" no traen NINGUNA cifra monetaria real
@@ -223,10 +231,16 @@ test("FIX 6: 'Con ese dato la cuota es exacta al 100%' sobrevive al Mandamiento 
   assert.equal(r.violaciones.some((v) => v.mandamiento === 3), false);
 });
 
-test("FIX 6: una frase del MODELO que mencione 'cuota' sin respaldo SIGUE bloqueada (no es inmunidad general)", () => {
-  const texto = "La cuota de tu préstamo será perfecta, confía en el plan.";
+test("FIX 6: una frase del MODELO que AFIRME una cifra de 'cuota' sin respaldo SIGUE bloqueada (no es inmunidad general)", () => {
+  const texto = "La cuota de tu préstamo será de 953,99 €, confía en el plan.";
   const r = enforceCommandments(texto, ctx({ conceptos: {} }));
   assert.notEqual(r.texto, texto, "no es un texto canónico nuestro: sigue sujeta al Mandamiento 3");
+});
+
+test("Mandamiento 3: mencionar 'cuota' de pasada, SIN cifra, no se toca (no hay nada que fundamentar)", () => {
+  const texto = "¿Quieres que te prepare un recordatorio mensual para la cuota?";
+  const r = enforceCommandments(texto, ctx({ conceptos: {} }));
+  assert.equal(r.texto, texto, "sin cifra en la frase, no hay concepto AFIRMADO que eliminar");
 });
 
 // ── Caso real, extremo a extremo ─────────────────────────────────────────────

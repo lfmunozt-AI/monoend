@@ -732,13 +732,40 @@ function flattenStrings(x: unknown): string[] {
   return [];
 }
 
+// FIX (4ª tanda) — QA real al conectar The Commandments al harness: la
+// respuesta segura de `output-validator.ts` cuando una garantía de
+// rentabilidad se elimina y no queda sustancia ("No puedo prometerte
+// resultados de inversión… Lo que sí puedo es calcular tu PLAN… ¿Cuál es la
+// META que quieres conquistar?") menciona "plan", termina en pregunta y no
+// cita ninguna cifra — coincide EXACTO con la forma de un "plan fantasma"
+// (Mandamiento 9). Sin registrarla aquí, M9 la confundía con un plan vaciado
+// y la REVERTÍA al raw original — es decir, devolvía la garantía prohibida
+// que la propia capa de seguridad acababa de eliminar. Duplicada literal (no
+// importada) para evitar un ciclo: `output-validator.ts` YA importa de
+// `policy.ts` (`cleanup`), así que `policy.ts` no puede importar de vuelta.
+// Si el texto de SAFE_RESPONSE cambia allí, debe actualizarse aquí también.
+const SAFE_RESPONSE_OUTPUT_VALIDATOR: Record<Language, string> = {
+  es:
+    "No puedo prometerte resultados de inversión — nadie puede con honestidad. " +
+    "Lo que sí puedo es calcular tu plan con tus datos reales. " +
+    "¿Cuál es la meta que quieres conquistar?",
+  pt:
+    "Não posso prometer-te resultados de investimento — ninguém pode com honestidade. " +
+    "O que posso é calcular o teu plano com os teus dados reais. " +
+    "Qual é a meta que queres conquistar?",
+  en:
+    "I can't promise you investment returns — nobody honestly can. " +
+    "What I can do is build your plan from your real numbers. " +
+    "What's the goal you want to conquer?",
+};
+
 // Se registra tanto el texto COMPLETO de cada plantilla como cada una de sus
 // oraciones por separado (`splitSentences`): varias plantillas (MISSING_REQUEST)
 // son DOS oraciones ("¿Qué TAE…? Con ese dato…") y las capas posteriores
 // (Mandamiento 3) filtran frase a frase — sin esto, ninguna mitad calzaría
 // exacta contra el texto completo.
 const TEXTOS_CANONICOS = new Set(
-  [SAFE_ASK, SAFE_GENERIC, SAFE_EMPTY, MISSING_REQUEST, INSUMO_REQUEST, GENERIC_REQUEST]
+  [SAFE_ASK, SAFE_GENERIC, SAFE_EMPTY, MISSING_REQUEST, INSUMO_REQUEST, GENERIC_REQUEST, SAFE_RESPONSE_OUTPUT_VALIDATOR]
     .flatMap(flattenStrings)
     .flatMap((s) => [s, ...splitSentences(s)])
     .map((s) => s.trim().toLowerCase()),
@@ -872,6 +899,13 @@ export function ensureSubstance(
  * los espacios internos, se recortan las líneas y se reducen los saltos
  * múltiples a un máximo de párrafo.
  *
+ * FIX 5 (4ª tanda) — GARANTÍA DE ESPACIO ENTRE FRASES. QA real: al eliminar la
+ * frase de en medio, las dos que sobrevivían quedaban pegadas sin espacio
+ * ("Tu observación es justa.Confirma si quieres..."). Se inserta un espacio
+ * entre un cierre de frase (.!?) y la mayúscula/¿/¡ que la sigue SIN espacio —
+ * cosmético y seguro: nunca toca separadores de miles ("1.234", dígito tras el
+ * punto) ni pasa dentro de una misma frase bien formada (que ya trae su espacio).
+ *
  * Exportada: el enforcement del validador (C1) elimina frases igual que aquí y
  * necesita exactamente la misma limpieza.
  */
@@ -881,6 +915,7 @@ export function cleanup(text: string): string {
     .map((line) => line.replace(/[ \t]+/g, " ").trim())
     .join("\n")
     .replace(/\n{3,}/g, "\n\n")
+    .replace(/([.!?])(?=[\p{Lu}¿¡])/gu, "$1 ")
     .trim();
 }
 

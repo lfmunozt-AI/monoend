@@ -19,6 +19,13 @@
  *  10. disclaimer si el producto sobrevivió al enforcement
  *  11. ensureSubstance(texto, {idioma, missing})                       ── solo FINANCIERO
  *  12. resolveClosing(texto, { carril, missing, idioma })              ── TODOS los carriles
+ *  13. renumberLists(texto)                                            ── TODOS los carriles
+ *  14. enforceCommandments(texto, { ...raw })  → THE COMMANDMENTS       ── TODOS los carriles
+ *  15. renumberLists(texto) otra vez (post-Commandments)                ── TODOS los carriles
+ *
+ * Los pasos 13-15 se añadieron en la 4ª tanda de AG08: antes el harness no
+ * ejecutaba The Commandments, así que el Mandamiento 9 (plan fantasma/
+ * mutilado) no se podía probar aquí — ver `plan_mutilado.json`.
  *
  * Los pasos 6-12 replican `route.ts` en orden, incluido el carrilado por turno
  * (Pieza 1-2 de AG08): META se salta la jaula de cifras y el cierre forzado
@@ -67,8 +74,11 @@ import {
   enforceSimulationHonesty,
   classifyTurn,
   parseEnforcementMode,
+  enforceCommandments,
+  renumberLists,
   type Carril,
   type EnforcementMode,
+  type CommandmentViolation,
 } from '../src/lib/guardrail'
 import {
   validateConsigliereOutput,
@@ -116,6 +126,12 @@ interface Turn {
   expectScenarioState?: Record<string, unknown>
   /** Carril esperado (Pieza 1 de AG08: FINANCIERO|META|MIXTO). Opcional. */
   expectCarril?: Carril
+  /**
+   * ¿Debe dispararse el Mandamiento 9 (PLAN FANTASMA / plan mutilado, 4ª
+   * tanda AG08) en este turno? Si es `true`, el texto final debe ser
+   * exactamente `fixtureResponse` (el raw revertido).
+   */
+  expectMandamiento9?: boolean
 }
 
 interface ProfileSelector {
@@ -321,6 +337,8 @@ interface TurnOutcome {
   missing: string[]
   lang: Language
   carril: Carril
+  /** Violaciones de The Commandments detectadas en este turno (4ª tanda). */
+  violations: CommandmentViolation[]
 }
 
 async function modelResponse(
@@ -386,6 +404,9 @@ async function runTurn(
 
   // 5 · el modelo (fixture o real)
   const response = await modelResponse(turn, live, scenario, verified.bloque, history, profile)
+  // `raw` — la respuesta CRUDA, antes de cualquier capa. El Mandamiento 9 (4ª
+  // tanda) la necesita para revertir un plan vaciado/mutilado.
+  const raw = response
 
   // 6-7 · jaula de cifras + honestidad de simulación: SOLO fuera de META (Pieza 2).
   let finalText = response
@@ -426,6 +447,22 @@ async function runTurn(
   // 12 · resolutor ÚNICO de cierre, por carril (Pieza 3: fix del doble cierre)
   finalText = resolveClosing(finalText, { carril, missing: state.missing, lang: userLang, enforcement })
 
+  // 13-15 · renumerar listas → The Commandments → renumerar listas otra vez
+  // (mismo orden que pipeline.ts::applyEnforcement). Antes el harness no
+  // ejecutaba Commandments — sin esto, el Mandamiento 9 (4ª tanda) no se podía
+  // probar aquí porque nunca corría.
+  finalText = renumberLists(finalText).texto
+  const esSimulacion = state.credito?.tae_es_referencia === true
+  const commandments = enforceCommandments(finalText, {
+    carril,
+    lang: userLang,
+    missing: state.missing,
+    conceptos: verified.conceptos,
+    esSimulacion,
+    raw,
+  })
+  finalText = renumberLists(commandments.texto).texto
+
   return {
     finalText,
     blocked,
@@ -436,6 +473,7 @@ async function runTurn(
     missing: state.missing,
     lang: userLang,
     carril,
+    violations: commandments.violaciones,
   }
 }
 
@@ -483,6 +521,13 @@ function checkTurn(turn: Turn, out: TurnOutcome, live: boolean): string[] {
 
   if (turn.expectCarril !== undefined && turn.expectCarril !== out.carril) {
     errs.push(`expectCarril: esperaba ${turn.expectCarril}, encontré ${out.carril}`)
+  }
+
+  if (turn.expectMandamiento9 !== undefined) {
+    const got = out.violations.some((v) => v.mandamiento === 9)
+    if (got !== turn.expectMandamiento9) {
+      errs.push(`expectMandamiento9: esperaba ${turn.expectMandamiento9}, encontré ${got}`)
+    }
   }
 
   return errs

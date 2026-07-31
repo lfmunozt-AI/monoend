@@ -12,6 +12,7 @@ import {
   esRespuestaRepetida,
   actualizarDigresiones,
   notaRetornoMeta,
+  notaSinCifrasDePlan,
 } from "./scenario";
 
 test("merge: TAE 9% real sobre un crédito previo → recalcula tae_es_referencia", () => {
@@ -439,4 +440,38 @@ test("PIEZA 7 · CASO B: una digresión sin señal financiera cuenta aunque el c
     "mis gastos ahora son 1800",
   );
   assert.equal(vuelta, 0, "un turno con contenido financiero real sí reinicia");
+});
+
+// ── FIX 2b (4ª tanda) — AUTO-CHEQUEO DETERMINISTA ─────────────────────────────
+
+test("FIX 2b: sin missing → sin nota", () => {
+  const s = mergeScenario({}, extractScenarioDelta("quiero financiar un carro de 30000 a 36 meses"));
+  // tiene crédito pero le falta la TAE — missing NO está vacío en este caso,
+  // así que probamos aparte con un estado sin nada faltante.
+  const completo = { ...s, missing: [], credito: { ...s.credito!, tae_pct: 9, tae_es_referencia: false } };
+  assert.equal(notaSinCifrasDePlan(completo), null);
+});
+
+test("FIX 2b: missing no vacío pero SIN crédito ni meta → sin nota (nada que frenar)", () => {
+  assert.equal(notaSinCifrasDePlan({ missing: ["ingreso"] }), null);
+});
+
+test("FIX 2b: crédito activo + falta la TAE → nota de refuerzo con el campo correcto", () => {
+  const s = mergeScenario({}, extractScenarioDelta("quiero financiar un carro de 30000 a 36 meses"));
+  const nota = notaSinCifrasDePlan(s);
+  assert.ok(nota, `debería haber nota: ${JSON.stringify(s)}`);
+  assert.match(nota!, /NO propongas cifras de plan/);
+  assert.match(nota!, /TAE real/);
+  assert.match(nota!, /Pídelo con calidez/);
+});
+
+test("FIX 2b: meta activa sin monto → nota pide el campo que falta", () => {
+  const s = mergeScenario({}, { meta: { titulo: "Piso" } });
+  const nota = notaSinCifrasDePlan(s);
+  assert.ok(nota);
+  assert.match(nota!, /monto de la meta/);
+});
+
+test("FIX 2b: undefined → sin nota (compatibilidad)", () => {
+  assert.equal(notaSinCifrasDePlan(undefined), null);
 });

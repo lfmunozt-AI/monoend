@@ -384,7 +384,10 @@ test("semántico: sobrante 500 correcto → APROBADO", () => {
 
 test("semántico: cifra SIN concepto conocido sigue con la heurística", () => {
   // "1000" sin keyword de concepto en la frase: la heurística (10% de 10000) aprueba.
-  const r = validateGrounding("Podrías apartar 1.000 € para tu meta.", FACTS_SEM, CIF_SEM);
+  // FIX 3 (4ª tanda): frase sin verbo de ahorro/recorte, para no activar la
+  // regla de factibilidad (sobrante=500 < 1000 la bloquearía primero, y con
+  // razón — ver "factibilidad: ahorrar más del sobrante real → BLOQUEADA").
+  const r = validateGrounding("Este mes tendrás disponibles 1.000 € extra para tu meta.", FACTS_SEM, CIF_SEM);
   assert.equal(r.cifras_bloqueadas.length, 0, "sin concepto, la heurística intacta");
 });
 
