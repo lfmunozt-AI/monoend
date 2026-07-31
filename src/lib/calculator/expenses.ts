@@ -42,10 +42,16 @@ function round2(n: number): number {
 
 // Keywords normalizadas (sin acentos, minúsculas). Multi-palabra permitido.
 const VITALES_KEYWORDS = [
-  // vivienda
-  "vivienda", "alquiler", "renda", "rent", "hipoteca", "mortgage",
-  // suministros
-  "luz", "electricidad", "eletricidade", "electricity", "agua", "water", "gas",
+  // vivienda — FIX 6 (7ª tanda, testdev6): "arriendo" (término LatAm de
+  // alquiler) caía a "desconocido" — el diálogo real decía "arriendo 1000" y
+  // todo el desglose se iba a desconocidos, dejando el clasificador
+  // inoperante (0 vitales, 0 no vitales). "renta" (México) queda FUERA a
+  // propósito: colisiona con "renta fija"/"renta variable" (terminología de
+  // inversión ya usada en el prompt), un falso positivo peor que el hueco.
+  "vivienda", "alquiler", "arriendo", "renda", "rent", "hipoteca", "mortgage",
+  // suministros — "servicios" (LatAm, genérico para luz/agua/gas/internet)
+  // tenía el mismo hueco.
+  "luz", "electricidad", "eletricidade", "electricity", "agua", "water", "gas", "servicios",
   // alimentación
   "mercado", "supermercado", "comida", "alimentacao", "groceries", "food",
   // salud

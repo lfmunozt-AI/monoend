@@ -36,6 +36,35 @@ import type { VerifiedFact } from "./extract";
 // en profundidad (invariante c) — el mismo criterio, un solo lugar de verdad.
 export const DERIVED_CONCEPTS = new Set(["deficit", "sobrante", "cuota", "recorte", "capacidad_anual"]);
 
+// FIX 3 (7ª tanda, testdev6) — DESFASE DE UN TURNO: CORREGIR, NO BORRAR. Un
+// DATO DECLARADO por el usuario (ingreso, gastos, monto, plazo, tae) es
+// inequívoco cuando la propia frase lo nombra: si el modelo cita el número
+// equivocado ("gastas 2.100 €" con gastos=2.200 reales — típicamente un
+// desfase de un turno, el modelo citó el valor del turno anterior), el motor
+// SABE la cifra correcta y puede sustituirla en su sitio sin fabricar nada —
+// a diferencia de una DERIVADA (cuota/sobrante/déficit/recorte/capacidad
+// anual), donde sustituir por OTRO concepto puede fabricar un absurdo
+// financiero (ver FIX A, más abajo: la brecha citada mal reescrita al
+// ingreso). Distinto también del rol POSICIONAL (monto/plazo por adyacencia
+// estructural, ya con su propia `correccion`): aquí el concepto se identifica
+// por NOMBRE semántico en la frase (`nearestConceptInSentence`), no por
+// posición fija.
+const DATO_DECLARADO_CONCEPTS = new Set(["ingreso", "gastos", "monto", "plazo", "tae"]);
+
+// FIX 3 — GUARDA DE ENCUADRE DE DELTA. "Necesitas aumentar tus ingresos en
+// 300 €" NO es una afirmación de cuánto ES el ingreso — es un DELTA/gap sobre
+// él. Corregir el 300 a "10000" (el ingreso completo) fabricaría un absurdo
+// peor que el que se borraba antes ("aumenta tus ingresos en 10000€" cuando
+// el ingreso YA es 10000). Un verbo de encuadre de delta (aumentar/recortar/
+// necesitar + verbo) sobre la MISMA frase desactiva la corrección para
+// ingreso/gastos — cae al borrado conservador de siempre.
+const DELTA_FRAMING_RE =
+  /\b(aumentar|aumento|incrementar|incremento|subir|increase|recortar|recorte|reducir|reduccion|reduce|necesitas?\s+\w+)\b|de\s+mas\b|de\s+menos\b|mas\s+de\s+lo\s+que|menos\s+de\s+lo\s+que|more\s+than\s+you|less\s+than\s+you/;
+
+function esEncuadreDeDelta(sentenceText: string): boolean {
+  return DELTA_FRAMING_RE.test(normLite(sentenceText));
+}
+
 /**
  * Cifras del motor para el grounding. Forma evolucionada (PIEZA 2):
  * - `valores`: todas las cifras aprobables por coincidencia exacta (c0).
@@ -233,18 +262,25 @@ export function validateGrounding(
     const sentenceText = modelResponse.slice(sentStart, sentEnd);
     const esReferencia = hasReferenceMarker(sentenceText);
 
-    // (FACTIBILIDAD — FIX 3, 4ª tanda) — una propuesta de ahorrar/destinar/
-    // reservar no puede superar el SOBRANTE real; una propuesta de recortar no
-    // puede superar el GASTO real. Caso real: "ahorra 746,55 € en 30 días" con
-    // un sobrante de 450 € no es un consejo, es una promesa imposible de
-    // cumplir. Corre ANTES que cualquier otra vía de aprobación — incluida la
-    // de propuesta genérica de abajo — porque una cifra no debe colarse solo
-    // porque "casualmente" coincide con OTRO concepto verificado. El verbo
-    // puede estar en CUALQUIER punto de la frase, no solo al principio (a
-    // diferencia de `esFraseDePropuesta`): "Podrías ahorrar X €" también cuenta.
+    // (FACTIBILIDAD — FIX 3, 4ª tanda; acotada FIX 4, 7ª tanda) — una
+    // PROPUESTA de ahorrar/destinar/reservar no puede superar el SOBRANTE
+    // real; una propuesta de recortar no puede superar el GASTO real. Caso
+    // real: "ahorra 746,55 € en 30 días" con un sobrante de 450 € no es un
+    // consejo, es una promesa imposible de cumplir.
+    //
+    // FIX 4 (7ª tanda, testdev6) — BUG BLOQUEANTE: la versión anterior
+    // buscaba el verbo en TODA la frase, así que un ENUNCIADO factual
+    // ("Ingresas 2.300 € y gastas 2.100 €, te sobra 200 € al mes para
+    // destinar a…") bloqueaba el propio ingreso/gastos/sobrante SOLO porque
+    // la frase mencionaba "destinar" en una cláusula final sin cifra propia —
+    // ninguna de esas tres cifras es una propuesta de acción. Ahora el verbo
+    // debe preceder A ESA CIFRA de cerca (misma ventana de 45 caracteres que
+    // usa `roleConcept` para monto/plazo): "Podrías ahorrar X €" sigue
+    // contando (el verbo gobierna X), pero "te sobra 200 € ... destinar" ya
+    // no (el verbo no gobierna el 200 — está lejos, en otra cláusula).
     if (!isPercent(modelResponse, m) && !isTimeUnit(modelResponse, m)) {
-      const nFrase = normLite(sentenceText);
-      if (SAVE_VERB_RE.test(nFrase) && conceptos.sobrante !== undefined) {
+      const before = normLite(modelResponse.slice(Math.max(0, m.start - 45), m.start));
+      if (SAVE_VERB_RE.test(before) && conceptos.sobrante !== undefined) {
         if (m.value > conceptos.sobrante + 1) {
           bloqueadas.push({
             ...base(m, moneda),
@@ -258,7 +294,7 @@ export function validateGrounding(
         }
         continue;
       }
-      if (CUT_VERB_RE.test(nFrase) && conceptos.gastos !== undefined) {
+      if (CUT_VERB_RE.test(before) && conceptos.gastos !== undefined) {
         if (m.value > conceptos.gastos + 1) {
           bloqueadas.push({
             ...base(m, moneda),
@@ -417,13 +453,36 @@ export function validateGrounding(
           categoria: "calculo",
           motivo: `coincide con otro concepto verificado de la misma frase (${rescate})`,
         });
+      } else if (DATO_DECLARADO_CONCEPTS.has(conceptoCercano) && !reclamados.has(conceptoCercano) && !esEncuadreDeDelta(sentenceText)) {
+        // FIX 3 (7ª tanda) — desfase de un turno sobre un DATO DECLARADO: se
+        // corrige en sitio en vez de borrar la frase entera (ver el bloque de
+        // comentario junto a `DATO_DECLARADO_CONCEPTS`, arriba).
+        //
+        // BUG BLOQUEANTE encontrado simulando testdev6 — `!reclamados.has(...)`
+        // es la MISMA guarda que ya protege el "rescate" (arriba): sin ella,
+        // "gastas 2.200 € (arriendo 1.000, servicios 500...)" corregía CADA
+        // ítem del desglose al agregado — "arriendo 2.200 €, servicios 2.200
+        // €..." — porque "gastos" es el único concepto conocido de la frase y
+        // los ítems, al no coincidir con él, se "corregían" a su valor. Si
+        // "gastos" ya quedó correctamente reclamado por OTRA cifra de la MISMA
+        // frase (el 2.200 real), no puede TAMBIÉN ser el destino de corrección
+        // de cifras que en realidad son otra cosa (ítems de un desglose).
+        bloqueadas.push({
+          ...base(m, moneda),
+          motivo: `desfase de un turno: no coincide con el dato declarado verificado (${conceptoCercano}) — se corrige en sitio`,
+          etiqueta: labelWithinSentence(modelResponse, m),
+          start: m.start,
+          end: m.end,
+          correccion: conceptos[conceptoCercano],
+        });
       } else {
         // FIX A (QA real) — el motor conoce el valor correcto, pero SUSTITUIRLO
         // fabrica una mentira con apariencia verificada ("liberar al menos
         // 10000 €" — brecha real ~247 € — reescrita al ingreso; "gastas 1000 €"
         // — 11.000 real — reescrito a otro concepto). Solo monto/plazo (patrón
-        // posicional inequívoco, más arriba) se corrigen en su sitio; todo lo
-        // demás se ELIMINA — sin `correccion`.
+        // posicional inequívoco, más arriba) y los DATOS DECLARADOS (justo
+        // encima) se corrigen en su sitio; las DERIVADAS se ELIMINAN — sin
+        // `correccion`.
         bloqueadas.push({
           ...base(m, moneda),
           motivo: `no coincide con el concepto verificado por el motor (${conceptoCercano})`,

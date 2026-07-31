@@ -111,3 +111,29 @@ test("parseExpenseList: 'compras en supermercado 400, luz 50' — el nombre pued
   assert.ok(supermercado, `debería reconocer el nombre con preposición interna: ${JSON.stringify(items)}`);
   assert.equal(supermercado?.amount, 400);
 });
+
+// ── FIX 6 (7ª tanda, testdev6) — CLASIFICADOR DE GASTOS INOPERANTE ───────────
+// "arriendo" (alquiler, término LatAm) y "servicios" (suministros, término
+// LatAm) caían a "desconocido" — el diálogo real quedó con
+// gastos_detalle={vitales:0, noVitales:0, desconocidos:2200} pese a que el
+// usuario listó exactamente esas dos partidas, dejando el clasificador
+// inoperante (sin vitales/no vitales no hay plan de recorte posible).
+
+test("FIX 6: 'arriendo' se clasifica como VITAL (vivienda, término LatAm)", () => {
+  assert.equal(classifyExpense("arriendo"), "vital");
+});
+
+test("FIX 6: 'servicios' se clasifica como VITAL (suministros, término LatAm)", () => {
+  assert.equal(classifyExpense("servicios"), "vital");
+});
+
+test("FIX 6: caso real testdev6 — 'arriendo 1000, servicios 500' → clasificados, NO desconocidos", () => {
+  const items = parseExpenseList("arriendo 1000, servicios 500");
+  const r = classifyExpenses(items);
+  assert.equal(r.vitales.total, 1500, `arriendo + servicios deben ir a vitales: ${JSON.stringify(r)}`);
+  assert.equal(r.desconocidos.total, 0, "nada debería quedar sin clasificar");
+});
+
+test("FIX 6: 'renta' NO se añade a vitales (colisión deliberada con 'renta fija'/'renta variable')", () => {
+  assert.equal(classifyExpense("renta"), "desconocido");
+});

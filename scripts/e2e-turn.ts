@@ -13,6 +13,12 @@
 // nunca datos fabricados a mano), y AFIRMA sobre lo leído DESDE LA BD, nunca
 // desde el objeto en memoria.
 //
+// 7ª TANDA (testdev6) — añadido T3: crédito con MONTO y SIN plazo. Afirma que
+// conceptos.monto queda expuesto (FIX 2) y que credito.plazo_meses jamás se
+// persiste como 0 (FIX 1) — el bloqueo circular real: plazo_meses=0
+// invalidaba el bloque de crédito entero, dejando el monto invisible para el
+// guardarraíl y borrando la propia pregunta que iba a conseguir el plazo.
+//
 // Seguro: sin env (SUPABASE_SERVICE_ROLE_KEY + NEXT_PUBLIC_SUPABASE_URL) →
 // SKIP con exit 0 (mismo patrón que smoke-db.ts). La conversación y la meta
 // se marcan con un título/nombre reconocible y se borran siempre (finally).
@@ -28,10 +34,11 @@ import {
   detectarDiscrepanciaGastos,
   deltaSinGastosPorDiscrepancia,
   detectarEventosICA,
-  numerosCandidatos,
   type ScenarioState,
 } from "../src/lib/calculator/scenario";
 import { toolArgsToScenarioDelta } from "../src/lib/calculator/tools";
+import { buildScenarioContext } from "../src/lib/calculator/orchestrator";
+import { validateGrounding } from "../src/lib/guardrail/validate";
 import { persistTurn, type GoalUpsert } from "../src/lib/persistence";
 
 const URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -185,13 +192,38 @@ async function main(): Promise<void> {
     assert(hayEventoReal, `[BD] ica_history debe tener al menos un evento ≠ chat_consulta entre los últimos 10: ${JSON.stringify(eventosRecientes)}`);
     console.log(`✓ afirma 5: [BD] ica_history registró eventos reales: ${JSON.stringify(eventosRecientes.slice(0, 5))}`);
 
+    // ── T3 (7ª tanda) — crédito con MONTO y SIN plazo: conceptos.monto debe
+    // quedar presente y la pregunta por el plazo NO debe borrarse (FIX 1/2 del
+    // incidente testdev6: plazo_meses=0 de placeholder invalidaba TODO el
+    // bloque de crédito, dejando el monto invisible para el guardarraíl).
+    const delta3 = toolArgsToScenarioDelta({ credito_monto: 2400, credito_tae_pct: 18 });
+    estado = await ejecutarTurno(db, userId, convId, estado, delta3, "el banco me ofrece un 18% para financiar 2400");
+    console.log("✓ T3: persistTurn ejecutado (crédito con monto y TAE, sin plazo)");
+
+    const read3 = await db.from("conversations").select("scenario_state").eq("id", convId).single();
+    if (read3.error) throw new Error(`re-read T3: ${read3.error.message}`);
+    const scenarioDB3 = (read3.data as { scenario_state: ScenarioState }).scenario_state;
+    assert(scenarioDB3.credito?.monto === 2400, `[BD] credito.monto debe ser 2400 (fue ${scenarioDB3.credito?.monto})`);
+    assert(scenarioDB3.credito?.plazo_meses === undefined, `[BD] credito.plazo_meses debe quedar undefined, NUNCA 0 (fue ${scenarioDB3.credito?.plazo_meses})`);
+    console.log("✓ afirma 8: [BD] credito.monto=2400 persistido, plazo_meses ausente (no 0)");
+
+    const ctx3 = buildScenarioContext(scenarioDB3, "el banco me ofrece un 18% para financiar 2400");
+    assert(ctx3.conceptos.monto === 2400, `conceptos.monto debe estar presente sin plazo: ${JSON.stringify(ctx3.conceptos)}`);
+    assert(!("cuota" in ctx3.conceptos), "sin plazo, la cuota (derivada) NO debe calcularse");
+    console.log("✓ afirma 9: conceptos.monto presente pese a no tener plazo; conceptos.cuota ausente");
+
+    const preguntaPlazo = "¿A cuántos meses quieres financiar esos 2.400 €?";
+    const groundingResult = validateGrounding(preguntaPlazo, [], { valores: ctx3.valores, conceptos: ctx3.conceptos });
+    assert(groundingResult.cifras_bloqueadas.length === 0, `la pregunta por el plazo NO debe bloquearse: ${JSON.stringify(groundingResult.cifras_bloqueadas)}`);
+    console.log("✓ afirma 10: la pregunta por el plazo citando 2.400 € sobrevive el guardarraíl de cifras");
+
     // Afirma 6: response_telemetry tiene una fila por cada turno del diálogo.
     const telRead = await db.from("response_telemetry").select("id").eq("conversation_id", convId);
     if (telRead.error) throw new Error(`leer response_telemetry: ${telRead.error.message}`);
-    assert((telRead.data ?? []).length === 2, `[BD] response_telemetry debe tener 2 filas (una por turno), tiene ${(telRead.data ?? []).length}`);
-    console.log(`✓ afirma 6: [BD] response_telemetry tiene una fila por cada uno de los 2 turnos`);
+    assert((telRead.data ?? []).length === 3, `[BD] response_telemetry debe tener 3 filas (una por turno), tiene ${(telRead.data ?? []).length}`);
+    console.log(`✓ afirma 6: [BD] response_telemetry tiene una fila por cada uno de los 3 turnos`);
 
-    // ── T3: petición de plan de recorte con solo el agregado (sin desglose) ─
+    // ── T-recorte: petición de plan de recorte con solo el agregado (sin desglose) ─
     // Afirma 7 es de PROMPT (notaFaltaDesglose), no de persistencia — se
     // verifica aparte, en memoria, contra la MISMA función que route.ts
     // invoca (no una simulación): pide el desglose, nunca ingreso/gastos.

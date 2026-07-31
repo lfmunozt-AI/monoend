@@ -527,21 +527,77 @@ export function resolveClosing(text: string, opts: ResolveClosingOptions): strin
   // un cierre es reescritura (desactivada).
   if (enforcement === "minimal") return limpio;
 
+  // FIX 5 (7ª tanda, testdev6) — GARANTÍA INCONDICIONAL DE UN SOLO CIERRE. Sea
+  // cual sea el camino que tome esta función (delegativo sustituido, cierre
+  // añadido, o el texto del modelo dejado intacto), el resultado NUNCA puede
+  // llevar más de una pregunta final — "Si la respuesta YA termina en
+  // pregunta, no se añade nada. Sin excepciones." Antes esta garantía solo
+  // vivía en Commandments (Mandamiento 1, más adelante en la cadena); ahora
+  // `resolveClosing` la aplica a SU PROPIA salida en cada retorno, así que un
+  // segundo cierre nunca sale de esta función, ni siquiera transitoriamente.
+  const unaSolaPregunta = (t: string): string => maxOneClosingQuestion(t, missing ?? []).texto;
+
   // (a) el cierre delegativo se sustituye por la petición canónica.
   if (eraDelegativo) {
-    return missing && missing.length > 0
-      ? enforceMissingClosing(limpio, missing, lang)
-      : rewriteDelegativeClosing(text, lang);
+    return unaSolaPregunta(
+      missing && missing.length > 0
+        ? enforceMissingClosing(limpio, missing, lang)
+        : rewriteDelegativeClosing(text, lang),
+    );
   }
 
-  // (b) el modelo YA pide cualquier dato concreto → intacto.
-  if (pideDatoConcreto(limpio)) return limpio;
+  // (b) el modelo YA pide cualquier dato concreto → intacto (salvo colapsar un
+  // posible segundo cierre que el propio modelo hubiera escrito).
+  if (pideDatoConcreto(limpio)) return unaSolaPregunta(limpio);
 
   // (c) no hay cierre: se AÑADE el canónico del dato que falta.
-  if (missing && missing.length > 0) return enforceMissingClosing(limpio, missing, lang);
+  if (missing && missing.length > 0) return unaSolaPregunta(enforceMissingClosing(limpio, missing, lang));
 
   // (d) nada que pedir y nada que arreglar.
-  return limpio;
+  return unaSolaPregunta(limpio);
+}
+
+// ── Mandamiento 1 — máx. 1 pregunta final ────────────────────────────────────
+// Bloque de cierre: frases finales que son pregunta/propuesta, recolectadas
+// desde el final mientras lo sean (mismo criterio que `enforceMissingClosing`).
+//
+// FIX 5 (7ª tanda) — vivía solo en commandments.ts (Mandamiento 1), corriendo
+// DESPUÉS de `resolveClosing` en la cadena. Se mueve aquí (policy.ts) y se
+// exporta para que `resolveClosing` la aplique a SU PROPIA salida — Commandments
+// sigue siendo la red de seguridad final (por si otra capa aguas abajo
+// reintroduce un segundo cierre), pero ya no es la ÚNICA barrera.
+export function maxOneClosingQuestion(
+  text: string,
+  missing: string[],
+): { texto: string; corregido: boolean } {
+  const sentences = splitSentences(text);
+  if (sentences.length === 0) return { texto: text, corregido: false };
+
+  let start = sentences.length;
+  while (start > 0 && endsWithRequestOrProposal(sentences.slice(0, start).join(" "))) {
+    // endsWithRequestOrProposal opera sobre la ÚLTIMA frase del texto que se le
+    // pase: reconstruimos el prefijo para evaluar cada candidata desde el final.
+    start--;
+  }
+  const closingIdxs: number[] = [];
+  for (let i = sentences.length - 1; i >= start; i--) closingIdxs.unshift(i);
+
+  const questionIdxs = closingIdxs.filter((i) => sentences[i].trim().endsWith("?"));
+  if (questionIdxs.length <= 1) return { texto: text, corregido: false };
+
+  // Prioridad: la pregunta que menciona missing[0] gana; si ninguna lo hace, la
+  // ÚLTIMA (la más reciente en la respuesta) gana.
+  const field = missing[0] === "meta_monto" ? "meta" : missing[0];
+  const keywordRe = field ? MISSING_KEYWORDS[field] : undefined;
+  let keepIdx = questionIdxs[questionIdxs.length - 1];
+  if (keywordRe) {
+    const withKeyword = questionIdxs.find((i) => keywordRe.test(norm(sentences[i])));
+    if (withKeyword !== undefined) keepIdx = withKeyword;
+  }
+
+  const drop = new Set(questionIdxs.filter((i) => i !== keepIdx));
+  const texto = cleanup(sentences.filter((_, i) => !drop.has(i)).join(" "));
+  return { texto, corregido: true };
 }
 
 // ── PIEZA 4 — simulación: prohibir la afirmación falsa ───────────────────────

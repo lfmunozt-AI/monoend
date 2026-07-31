@@ -20,8 +20,19 @@ export interface GastosDetalle {
 }
 
 export interface CreditoState {
-  monto: number;
-  plazo_meses: number;
+  /**
+   * FIX 1 (7ª tanda, testdev6) — CERO NO ES UN VALOR. `monto`/`plazo_meses`
+   * eran `number` obligatorios, así que un crédito parcial (solo TAE, o solo
+   * monto) se rellenaba con `0` de PLACEHOLDER para satisfacer el tipo. Ese
+   * 0 no es "desconocido": es un valor FALSO que se colaba como si fuera
+   * real — `buildScenarioContext` exigía `plazo_meses > 0` para exponer
+   * siquiera el monto, así que un crédito con monto real pero plazo aún sin
+   * declarar dejaba el monto invisible para el guardarraíl (bloqueo circular:
+   * se borraba la propia pregunta que iba a conseguir el plazo). Ahora
+   * ausente es `undefined`, nunca `0`.
+   */
+  monto?: number;
+  plazo_meses?: number;
   /** TAE en %. Si `tae_es_referencia`, es el 7% supuesto, no el del usuario. */
   tae_pct?: number;
   tae_es_referencia: boolean;
@@ -288,7 +299,7 @@ export function extractScenarioDelta(
     if (p) {
       const tae = parseDigitAmount(p[1]);
       if (Number.isFinite(tae) && tae > 0 && tae < 100) {
-        delta.credito = { monto: 0, plazo_meses: 0, tae_pct: tae, tae_es_referencia: false };
+        delta.credito = { tae_pct: tae, tae_es_referencia: false };
       }
     }
   }
@@ -301,7 +312,7 @@ export function extractScenarioDelta(
     if (m) {
       const tae = parseDigitAmount(m[1]);
       if (Number.isFinite(tae) && tae > 0 && tae < 100) {
-        delta.credito = { monto: 0, plazo_meses: 0, tae_pct: tae, tae_es_referencia: false };
+        delta.credito = { tae_pct: tae, tae_es_referencia: false };
       }
     }
   }
@@ -395,7 +406,12 @@ export function extractScenarioDelta(
       const v = parseDigitAmount(a[1]);
       if (Number.isFinite(v) && v > 0) meta.monto = v;
     }
-    if (plazo) meta.plazo_meses = toMonths(parseDigitAmount(plazo[1]), plazo[2]);
+    if (plazo) {
+      // FIX 1 (7ª tanda) — cero no es un valor: un plazo mal formado (0 tras
+      // redondear) no se persiste como si fuera real.
+      const meses = toMonths(parseDigitAmount(plazo[1]), plazo[2]);
+      if (meses > 0) meta.plazo_meses = meses;
+    }
     if (meta.monto !== undefined || meta.plazo_meses !== undefined) delta.meta = meta;
   }
 
@@ -776,11 +792,11 @@ export function mergeScenario(
   }
 
   if (delta.credito !== undefined) {
-    const merged: CreditoState = {
-      ...(base.credito ?? { monto: 0, plazo_meses: 0, tae_es_referencia: true }),
-    };
-    if (delta.credito.monto) merged.monto = delta.credito.monto;
-    if (delta.credito.plazo_meses) merged.plazo_meses = delta.credito.plazo_meses;
+    // FIX 1 (7ª tanda) — sin placeholder de 0: si no hay crédito previo, el
+    // objeto arranca solo con lo que de verdad se sabe (nada de monto/plazo).
+    const merged: CreditoState = { ...(base.credito ?? { tae_es_referencia: true }) };
+    if (delta.credito.monto !== undefined) merged.monto = delta.credito.monto;
+    if (delta.credito.plazo_meses !== undefined) merged.plazo_meses = delta.credito.plazo_meses;
     if (delta.credito.objeto) merged.objeto = delta.credito.objeto;
     if (delta.credito.tae_pct !== undefined) {
       merged.tae_pct = delta.credito.tae_pct;
@@ -795,7 +811,7 @@ export function mergeScenario(
   // crédito: comprar ese carro/casa/lo-que-sea, en ese monto y ese plazo. Sin
   // esto, `missing` pide "meta" con el carro ya sobre la mesa — el modelo
   // pierde contexto y repite preguntas.
-  if (base.credito && base.credito.monto > 0 && (base.meta === undefined || base.meta_derivada)) {
+  if (base.credito && base.credito.monto !== undefined && base.credito.monto > 0 && (base.meta === undefined || base.meta_derivada)) {
     base.meta = {
       titulo: base.credito.objeto ? capitalize(base.credito.objeto) : "compra financiada",
       monto: base.credito.monto,

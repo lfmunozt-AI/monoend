@@ -203,16 +203,25 @@ const CONCEPT_KEYWORDS: [RegExp, string][] = [
   [/recorte necesario|\breducir\b|cut needed/, "recorte_necesario"],
   [/ahorro necesario|necesitas ahorrar|savings needed|need to save/, "ahorro_necesario_mensual"],
   [/\b(cuota|cuotas|mensualidad|mensualidade|prestacao|prestacoes|payment|installment)\b/, "cuota"],
-  [/\b(sobrante|excedente|surplus|left ?over)\b/, "sobrante"],
+  // FIX 4 (7ª tanda) — "te sobra 200€" (verbo SOBRAR) faltaba: solo el
+  // sustantivo "sobrante" estaba cubierto, así que "sobra" caía sin concepto
+  // y el 200 (correcto) se mis-atribuía al concepto vecino más cercano.
+  [/\b(sobrante|sobra|sobran|excedente|surplus|left ?over)\b/, "sobrante"],
   [/\b(recorte|corte|cut)\b/, "recorte"],
   [/\b(capacidad (?:de ahorro )?anual|capacidad anual|annual capacity|yearly (?:savings|capacity))\b/, "capacidad_anual"],
-  [/\b(ingreso|ingresos|sueldo|salario|rendimento|income|earnings|gano|ganas)\b/, "ingreso"],
+  // FIX 3 (7ª tanda) — "ingresas"/"ingresa" (verbo INGRESAR, distinto de
+  // "gano/ganas" ya cubierto) faltaba, mismo hueco que "gastas" abajo.
+  [/\b(ingreso|ingresos|sueldo|salario|rendimento|income|earnings|gano|ganas|ingresas|ingresa|ingresan)\b/, "ingreso"],
   // "gastos" NO debe casar con "gastos vitales"/"gastos no vitales": son
   // subtotales con su propio valor (gastos_vitales/gastos_no_vitales), sin
   // concepto propio todavía — si "gastos" los capturase, el guardarraíl
   // "corregiría" 510/135 al total mensual (2372), que es la propia alucinación
   // que este fix busca evitar, solo que sobre un concepto distinto.
-  [/\b(?:gastos|gasto)\b(?!\s+(?:vitales|no\s+vitales))|\b(?:despesas|expenses|spending)\b/, "gastos"],
+  // FIX 3 (7ª tanda) — "gastas"/"gastan" (verbo conjugado) faltaban: "ingreso"
+  // ya reconocía "gano/ganas" pero "gastos" solo el sustantivo, así que
+  // "gastas 2.100 €" (con gastos=2.200 reales) nunca encontraba el concepto y
+  // caía al catch-all genérico (se borraba en vez de corregirse en sitio).
+  [/\b(?:gastos|gasto|gastas|gasta|gastan)\b(?!\s+(?:vitales|no\s+vitales))|\b(?:despesas|expenses|spending)\b/, "gastos"],
   // BUG 2: el déficit (gastas más de lo que ingresas) es un concepto propio, no
   // un "sobrante negativo" — sin esto, un déficit citado con la cifra errónea
   // caería a la heurística genérica igual que ingreso/gastos antes del fix.

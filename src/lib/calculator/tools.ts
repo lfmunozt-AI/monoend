@@ -86,7 +86,15 @@ export function toolArgsToScenarioDelta(args: Record<string, unknown>): Partial<
   const taeRaw = num(args.credito_tae_pct);
   const tae = taeRaw !== undefined && taeRaw > 0 && taeRaw < 100 ? taeRaw : undefined;
   if (monto !== undefined || plazo !== undefined || tae !== undefined) {
-    const credito: CreditoState = { monto: monto ?? 0, plazo_meses: plazo ?? 0, tae_es_referencia: true };
+    // FIX 1 (7ª tanda, testdev6) — CERO NO ES UN VALOR: el placeholder
+    // `monto ?? 0` / `plazo ?? 0` era la causa raíz del bloqueo circular real
+    // ("el banco me ofrece 18%" sin plazo dejaba plazo_meses=0 persistido,
+    // que a su vez invalidaba el bloque de crédito entero en
+    // buildScenarioContext y borraba la propia pregunta que pedía el plazo).
+    // Un campo no declarado queda `undefined`, nunca `0`.
+    const credito: CreditoState = { tae_es_referencia: true };
+    if (monto !== undefined) credito.monto = monto;
+    if (plazo !== undefined) credito.plazo_meses = plazo;
     if (tae !== undefined) {
       credito.tae_pct = tae;
       credito.tae_es_referencia = false;

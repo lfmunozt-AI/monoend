@@ -5,7 +5,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { buildVerifiedContext, buildScenarioContext } from "./orchestrator";
-import { mergeScenario } from "./scenario";
+import { mergeScenario, extractScenarioDelta } from "./scenario";
+import { toolArgsToScenarioDelta } from "./tools";
 import { validateGrounding } from "../guardrail/validate";
 
 // ── PIEZA 2 — buildVerifiedContext ──────────────────────────────────────────
@@ -297,4 +298,56 @@ test("FIX B: ahorro_necesario_mensual = meta.monto / meta.plazo_meses", () => {
   const { bloque, conceptos } = buildScenarioContext(s, "");
   assert.ok(bloque.includes("ahorro_necesario_mensual: 500"), `bloque:\n${bloque}`);
   assert.equal(conceptos.ahorro_necesario_mensual, 500);
+});
+
+// ── FIX 1/2 (7ª tanda, testdev6) — CERO NO ES UN VALOR + DATOS DECLARADOS
+// SIEMPRE EN CONCEPTOS. Bug real: "el banco me ofrece 18%" sobre un crédito
+// de 2400€ sin plazo dejaba credito.plazo_meses=0 persistido (placeholder de
+// tipo), que invalidaba TODO el bloque de crédito en buildScenarioContext
+// (exigía monto>0 Y plazo>0 para exponer siquiera el monto) — el guardarraíl
+// bloqueaba "¿A cuántos meses financias esos 2.400€?" por citar una cifra
+// "sin respaldo", borrando la propia pregunta que iba a conseguir el plazo.
+
+test("FIX 1: toolArgsToScenarioDelta SIN plazo → credito.plazo_meses ausente, NUNCA 0", () => {
+  const delta = toolArgsToScenarioDelta({ credito_monto: 2400, credito_tae_pct: 18 });
+  assert.equal(delta.credito?.monto, 2400);
+  assert.equal(delta.credito?.plazo_meses, undefined, "plazo_meses debe quedar undefined, no 0");
+});
+
+test("FIX 1: extractScenarioDelta 'el banco me ofrece un 18%' (TAE corta) → sin monto/plazo en 0", () => {
+  const prev = mergeScenario(undefined, { credito: { monto: 2400, tae_es_referencia: true } });
+  const delta = extractScenarioDelta("el banco me ofrece un 18%", "es", prev);
+  assert.equal(delta.credito?.tae_pct, 18);
+  assert.equal(delta.credito?.monto, undefined, "el delta de la respuesta de TAE no debe traer monto=0");
+  assert.equal(delta.credito?.plazo_meses, undefined, "el delta de la respuesta de TAE no debe traer plazo=0");
+});
+
+test("FIX 2: crédito con monto y SIN plazo → conceptos.monto presente, conceptos.cuota ausente", () => {
+  const s = mergeScenario(
+    { ingreso_mensual: 2300, gastos_mensuales: 2200, missing: [] },
+    { credito: { monto: 2400, tae_pct: 18, tae_es_referencia: false } },
+  );
+  assert.equal(s.credito?.plazo_meses, undefined, "precondición: sin plazo declarado");
+  const { conceptos, valores } = buildScenarioContext(s, "");
+  assert.equal(conceptos.monto, 2400, `conceptos.monto debe estar presente: ${JSON.stringify(conceptos)}`);
+  assert.equal(conceptos.tae, 18, "la TAE real también es un dato declarado, no una derivada");
+  assert.ok(!("cuota" in conceptos), "sin plazo, la cuota (derivada) NO se calcula");
+  assert.ok(valores.includes(2400), "2400 debe estar en valores para que el guardarraíl lo apruebe");
+});
+
+test("FIX 2: la pregunta por el plazo sobrevive al grounding (caso real testdev6)", () => {
+  const s = mergeScenario(
+    { ingreso_mensual: 2300, gastos_mensuales: 2200, missing: [] },
+    { credito: { monto: 2400, tae_pct: 18, tae_es_referencia: false } },
+  );
+  const { conceptos, valores } = buildScenarioContext(s, "");
+  const texto = "¿A cuántos meses quieres financiar esos 2.400 €?";
+  const r = validateGrounding(texto, [], { valores, conceptos });
+  assert.equal(r.cifras_bloqueadas.length, 0, `2.400 no debería bloquearse: ${JSON.stringify(r.cifras_bloqueadas)}`);
+});
+
+test("FIX 2: crédito con monto Y plazo → cuota SÍ se calcula (sin regresión)", () => {
+  const s = mergeScenario(undefined, { credito: { monto: 2400, plazo_meses: 12, tae_pct: 18, tae_es_referencia: false } });
+  const { conceptos } = buildScenarioContext(s, "");
+  assert.ok(conceptos.cuota > 0, `con ambos insumos, la cuota SÍ debe calcularse: ${JSON.stringify(conceptos)}`);
 });
