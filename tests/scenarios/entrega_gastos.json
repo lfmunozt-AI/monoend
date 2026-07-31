@@ -2,7 +2,7 @@
   "name": "entrega_gastos",
   "playbook": "PB4",
   "language": "es",
-  "description": "Entrega de gastos. Verifica (a) la clasificación vital/no vital, (b) el recorte del 50% con supuesto explícito, (c) que NO se moraliza sobre la cerveza, y (d) que la lista NUNCA se toma como si el primer ítem (15) fuera el agregado — pero SÍ recalcula gastos_mensuales como la suma del detalle (BUG 1: el detalle manda sobre el agregado, aunque este quedara obsoleto).",
+  "description": "Entrega de gastos. Verifica (a) la clasificación vital/no vital, (b) el recorte del 50% con supuesto explícito, (c) que NO se moraliza sobre la cerveza. El desglose (suma 645) contradice el agregado ya confirmado en T1 (2372): FIX 3 (8ª tanda, testdev7) SUPERSEDE al antiguo BUG 1 ('el detalle manda silenciosamente') — se pregunta cuál de los dos usar en vez de recalcular en silencio, la misma regla que cerró la 'trampa de los 50€' real.",
   "profile": { "archetype": "gastador", "country": "ES" },
   "turns": [
     {
@@ -13,13 +13,13 @@
     },
     {
       "user": "Mis gastos: netflix 15, luz 80, agua 30, cerveza 120, mercado 400",
-      "fixtureResponse": "Tus gastos vitales suman 510 € y los no vitales 135 €. Asumiendo que reduces los no vitales a la mitad (50%), liberas 67,5 € al mes. El ocio importa: la clave es dimensionarlo. ¿Confirmamos ese supuesto?",
-      "expectContains": ["510", "135", "67,5"],
-      "expectConcept": { "recorte": { "value": 67.5, "tol": 0.5 } },
+      "fixtureResponse": "Tus gastos vitales suman 510 € y los no vitales 135 €. Con un recorte del 50% en los no vitales, liberas 67,5 € al mes. El ocio importa: la clave es dimensionarlo. ¿Confirmamos ese recorte?",
+      "expectContains": ["645", "¿Cuál de los dos uso?"],
       "expectNotContains": ["alcohol", "vicio", "deberías dejar", "malgastas", "dejar de beber"],
-      "expectBlocked": false,
-      "expectFallback": false,
-      "expectScenarioState": { "ingreso_mensual": {{monthlyNet}}, "gastos_mensuales": 645 }
+      "expectBlocked": true,
+      "expectDiscrepanciaGastos": true,
+      "expectExtraccionAmbigua": true,
+      "expectScenarioState": { "ingreso_mensual": {{monthlyNet}}, "gastos_mensuales": {{gastosMes}} }
     }
   ]
 }

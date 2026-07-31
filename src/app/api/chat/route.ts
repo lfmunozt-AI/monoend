@@ -23,13 +23,17 @@ import {
   detectarNumerosHuerfanos,
   detectarDiscrepanciaGastos,
   notaExtraccionAmbigua,
+  notaReconciliacionDesglose,
+  respuestaAclaracionCanonica,
   deltaSinGastosPorDiscrepancia,
   renderDatosRecienEntendidos,
   numerosCandidatos,
   notaFaltaDesglose,
   detectarEventosICA,
+  notaMensajeRepetido,
   type ScenarioState,
 } from '@/lib/calculator/scenario'
+import { extraerDesgloseIrregular } from '@/lib/calculator/expenses'
 import { registrarDatosFinancieros, resolveDelta, buildToolResult } from '@/lib/calculator/tools'
 import { detectLanguage } from '@/lib/language'
 import { getICAScore } from '@/lib/ica-service'
@@ -275,8 +279,19 @@ export async function POST(request: Request) {
   const notaTonoEmocional = esEmocional
     ? 'TONO EMOCIONAL detectado en este turno (frustración, vergüenza, miedo, pérdida de empleo…). ' +
       'PROHIBIDO pedir datos financieros o forzar un cierre en esta respuesta: consuela primero y ofrece ' +
-      'una alternativa concreta, según el MANDATO DE TONO. El eco de datos recién entendidos, si lo hay, espera al turno siguiente.'
+      'una alternativa concreta, según el MANDATO DE TONO. El eco de datos recién entendidos, si lo hay, espera al turno siguiente. ' +
+      // FIX 4a (8ª tanda, testdev7) — refuerzo explícito: la primera frase de la
+      // respuesta tiene que ser empatía, ANTES de cualquier cifra (calculada o
+      // citada) — el tono nunca queda relegado a un segundo plano por un dato.
+      'ABRE tu respuesta reconociendo cómo se siente el usuario — ANTES de mencionar cualquier cifra, cálculo o dato financiero.'
     : null
+
+  // FIX 4b (8ª tanda, testdev7) — MENSAJE REPETIDO. Compara el mensaje del
+  // usuario (más fiable que comparar las respuestas del modelo entre sí, ver
+  // `notaMensajeRepetido`) contra el ÚLTIMO mensaje de usuario de esta misma
+  // conversación.
+  const lastUserMessage = [...contextMessages].reverse().find((m) => m.role === 'user')?.content
+  const notaRepeticionUsuario = notaMensajeRepetido(cleanMessage, lastUserMessage)
 
   // PIEZA 1 — modo de enforcement del turno ('full' por defecto). Se resuelve
   // UNA vez y baja por toda la cadena; se registra en telemetría para el A/B.
@@ -341,6 +356,7 @@ export async function POST(request: Request) {
     notaDigresion,
     notaSinCifras,
     notaTonoEmocional,
+    notaRepeticionUsuario,
     idiomaObligatorio,
   ].filter(Boolean).join('\n\n')
 
@@ -385,10 +401,30 @@ export async function POST(request: Request) {
   // distinta: ES el mismo campo contradiciéndose a sí mismo, así que solo ESE
   // campo se retiene hasta reconciliar (`deltaSinGastosPorDiscrepancia`); el
   // resto del delta (ingreso, crédito, meta…) se persiste igualmente.
+  // FIX 3 (8ª tanda, testdev7) — `seed` (el agregado YA CONOCIDO de un turno
+  // anterior) entra como segunda fuente de comparación: la trampa real era un
+  // agregado declarado en un turno y un desglose de 15 partidas en el
+  // SIGUIENTE, sin repetir el agregado — sin `seed`, `detectarDiscrepanciaGastos`
+  // solo veía el desglose y nunca la contradicción con los 2.200 € previos.
   const huerfanos = detectarNumerosHuerfanos(cleanMessage, delta)
-  const discrepancia = detectarDiscrepanciaGastos(delta)
+  const discrepancia = detectarDiscrepanciaGastos(delta, seed)
   const extraccionAmbigua = huerfanos.extraccionIncompleta || discrepancia.discrepancia
-  const notaAmbigua = extraccionAmbigua ? notaExtraccionAmbigua(huerfanos, discrepancia) : null
+  // FIX 3 — si hay discrepancia Y se puede extraer el desglose irregular del
+  // mensaje, la nota ECHA la lista completa (más informativa/accionable que
+  // el genérico "números sin asignar"); si no hay desglose extraíble, cae al
+  // caso genérico de FIX 2.
+  const desgloseParaEco = discrepancia.discrepancia ? extraerDesgloseIrregular(cleanMessage) : null
+  const notaAmbigua = !extraccionAmbigua
+    ? null
+    : desgloseParaEco && discrepancia.suma !== undefined && discrepancia.agregado !== undefined
+      ? notaReconciliacionDesglose(desgloseParaEco, discrepancia.suma, discrepancia.agregado)
+      : notaExtraccionAmbigua(huerfanos, discrepancia)
+  // FIX 2c — texto literal (no instrucción de prompt) para el respaldo
+  // determinista de `applyEnforcement`: si el modelo, pese a `notaAmbigua`,
+  // igual entrega cifras derivadas, se sustituye la respuesta entera por esto.
+  const respuestaAclaracion = extraccionAmbigua
+    ? respuestaAclaracionCanonica(huerfanos, discrepancia, userLang)
+    : null
 
   if (extraccionAmbigua) {
     console.warn('[chat] extraccion_ambigua', JSON.stringify({
@@ -419,7 +455,14 @@ export async function POST(request: Request) {
     ...numerosCandidatos(cleanMessage),
     ...(discrepancia.suma !== undefined ? [discrepancia.suma] : []),
   ]
-  const verified = buildScenarioContext(scenario, cleanMessage, { valoresExtra })
+  // FIX 2a (8ª tanda) — con extracción ambigua, ninguna DERIVADA nueva
+  // (sobrante, cuota, capacidad, recorte…) se calcula este turno; los HECHOS
+  // ya confirmados (ingreso, gastos del último turno confirmado, crédito) se
+  // siguen exponiendo con normalidad.
+  const verified = buildScenarioContext(scenario, cleanMessage, {
+    valoresExtra,
+    derivadasSuprimidas: extraccionAmbigua,
+  })
 
   // PIEZA 3 — ECO DE CONFIRMACIÓN: la primera línea de la respuesta devuelve lo
   // que SÍ quedó claro este turno (el delta que se va a persistir, no el
@@ -445,7 +488,7 @@ export async function POST(request: Request) {
     const toolResult = JSON.stringify(buildToolResult(scenario, verified))
     // PIEZA 1/3 — la nota de ambigüedad y el eco de confirmación van en ESTA
     // llamada (aún no se ha generado nada con el delta de este turno).
-    const systemPrompt2 = [basePrompt, notaDigresion, notaSinCifras, notaAmbigua, notaEco, notaDesglose, notaTonoEmocional, idiomaObligatorio]
+    const systemPrompt2 = [basePrompt, notaDigresion, notaSinCifras, notaAmbigua, notaEco, notaDesglose, notaTonoEmocional, notaRepeticionUsuario, idiomaObligatorio]
       .filter(Boolean).join('\n\n')
     const messages2 = [
       ...allMessages,
@@ -467,7 +510,7 @@ export async function POST(request: Request) {
     // del delta, resuelto después). Se regenera UNA vez con la nota inyectada —
     // mismo patrón que el REINTENTO ÚNICO ACOTADO de las derivadas de decisión,
     // más abajo.
-    const systemPromptRegen = [basePrompt, `ESTADO ACTUAL CONOCIDO (lo que ya sabemos del usuario):\n${summarizeScenario(seed)}`, notaDigresion, notaSinCifras, notaAmbigua, notaEco, notaDesglose, notaTonoEmocional, idiomaObligatorio]
+    const systemPromptRegen = [basePrompt, `ESTADO ACTUAL CONOCIDO (lo que ya sabemos del usuario):\n${summarizeScenario(seed)}`, notaDigresion, notaSinCifras, notaAmbigua, notaEco, notaDesglose, notaTonoEmocional, notaRepeticionUsuario, idiomaObligatorio]
       .filter(Boolean).join('\n\n')
     const regen = await callLLMWithTools(
       allMessages,
@@ -553,6 +596,11 @@ export async function POST(request: Request) {
       // PIEZA 5a (complemento, 5ª tanda) — frontera de autoridad reducida en
       // turnos emocionales: el enforcement no toca tono, solo cifras.
       esEmocional,
+      // FIX 2c (8ª tanda) — respaldo determinista: si pese a `notaAmbigua` el
+      // modelo igual entrega cifras derivadas, se sustituye la respuesta
+      // entera por `respuestaAclaracion`.
+      extraccionAmbigua,
+      respuestaAclaracion,
       enforcement: enforcementMode,
       supabase: admin,
       userId,

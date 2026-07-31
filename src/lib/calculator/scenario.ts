@@ -9,7 +9,7 @@
 // extrae — mejor no tocar el estado que corromperlo. Código PURO, edge-safe.
 
 import { parseDigitAmount, findNumberMentions, dedupeOverlaps, type NumberMention } from "../guardrail/numbers";
-import { parseExpenseList, classifyExpenses } from "./expenses";
+import { parseExpenseList, classifyExpenses, extraerDesgloseIrregular, type ExpenseItem } from "./expenses";
 import type { Language } from "../language";
 import { tieneSenalFinanciera, type Carril } from "../guardrail/turn-classifier";
 
@@ -360,6 +360,20 @@ export function extractScenarioDelta(
   // monto-primero de `parseExpenseList` ya habría troceado el mensaje entero
   // en detalle y el agregado nunca habría quedado registrado aparte.
   const aggMatch = GASTO_AGREGADO_DETALLE_RE.exec(n);
+  // FIX 3 (8ª tanda, testdev7) — DESGLOSE IRREGULAR: ≥4 pares número/etiqueta
+  // en cualquier orden, con guion bajo como separador interno ("Diezmo_Vital
+  // 225, 700 Casa_Vital..."). Se calcula AQUÍ, ANTES de decidir por `esLista`
+  // — BUG BLOQUEANTE encontrado probando el caso real: `parseExpenseList`
+  // (nameFirst) no falla limpiamente con etiquetas con guion bajo, encuentra
+  // coincidencias PARCIALES espurias ("Diezmo_Vital 225" → capta solo
+  // "Vital: 225", perdiendo "Diezmo_"), así que `esLista` daba `true` con
+  // basura (4 ítems mal recortados, sumaban 815 € de un desglose real de
+  // 2.250 €) ANTES de que este desglose, correcto y más completo, tuviera
+  // oportunidad de correr. Gana el parser que encuentre MÁS partidas — nunca
+  // el que corra primero.
+  const desgloseIrregular = extraerDesgloseIrregular(message);
+  const usarDesgloseIrregular = !!desgloseIrregular && desgloseIrregular.length > listItems.length;
+
   if (aggMatch) {
     const agregado = parseDigitAmount(aggMatch[1]);
     if (Number.isFinite(agregado) && agregado > 0) delta.gastos_mensuales = agregado;
@@ -374,6 +388,17 @@ export function extractScenarioDelta(
       };
       delta.gastos_es_detalle = true;
     }
+  } else if (usarDesgloseIrregular) {
+    // NO se toca gastos_mensuales: el agregado (si lo hay) es el YA conocido
+    // de un turno previo; `detectarDiscrepanciaGastos` (más abajo) lo
+    // reconcilia con la suma de este desglose.
+    const cls = classifyExpenses(desgloseIrregular as ExpenseItem[]);
+    delta.gastos_detalle = {
+      vitales: cls.vitales.total,
+      noVitales: cls.noVitales.total,
+      desconocidos: cls.desconocidos.total,
+    };
+    delta.gastos_es_detalle = true;
   } else if (esLista) {
     // Lista desglosada: gastos_detalle con totales por grupo. NO se toca
     // gastos_mensuales (el merge conserva el agregado previo — defecto B).
@@ -504,7 +529,16 @@ function valoresAsignadosEnDelta(message: string, delta: Partial<ScenarioState>)
   if (delta.ingreso_mensual !== undefined) vals.push(delta.ingreso_mensual);
   if (delta.gastos_mensuales !== undefined) vals.push(delta.gastos_mensuales);
   if (delta.gastos_es_detalle) {
-    for (const item of parseExpenseList(message)) vals.push(item.amount);
+    // FIX 3 (8ª tanda) — el mismo criterio de "gana quien encuentre MÁS
+    // partidas" que decide `extractScenarioDelta`: si `parseExpenseList`
+    // solo encontró coincidencias PARCIALES espurias (guion bajo rompe su
+    // regex de nombre), `extraerDesgloseIrregular` encuentra más y gana —
+    // sin esto, las cifras del caso real se contarían como huérfanas pese a
+    // estar correctamente atribuidas a `gastos_detalle`.
+    const items = parseExpenseList(message);
+    const irregulares = extraerDesgloseIrregular(message);
+    const efectivos = irregulares && irregulares.length > items.length ? irregulares : items;
+    for (const item of efectivos) vals.push(item.amount);
   }
   if (delta.credito) {
     if (delta.credito.monto) vals.push(delta.credito.monto);
@@ -550,17 +584,31 @@ export interface DiscrepanciaGastosResult {
 }
 
 /**
- * ¿El agregado declarado (`gastos_mensuales`) y la suma del desglose
- * (`gastos_detalle`) se contradicen? Solo aplica cuando AMBOS llegaron en el
- * MISMO delta (ver `GASTO_AGREGADO_DETALLE_RE` en `extractScenarioDelta`) —
- * el caso normal (solo detalle, sin agregado propio) nunca dispara esto.
+ * ¿El agregado declarado y la suma del desglose se contradicen?
+ *
+ * Dos fuentes posibles para el agregado, en orden de prioridad:
+ *  1. `delta.gastos_mensuales` — declarado en el MISMO mensaje (ver
+ *     `GASTO_AGREGADO_DETALLE_RE` en `extractScenarioDelta`, "gasto 1000:
+ *     500 arriendo...").
+ *  2. `prev?.gastos_mensuales` (FIX 3, 8ª tanda) — el YA CONOCIDO de un turno
+ *     anterior. CASO REAL (testdev7): el usuario declaró "2.200 €" en un
+ *     turno y, en el SIGUIENTE, dio un desglose de 15 partidas que suma
+ *     2.250 € sin repetir el agregado — la discrepancia (una trampa de 50 €
+ *     que el usuario probablemente no notó) solo es detectable comparando
+ *     contra lo YA sabido, no contra el propio mensaje.
+ * Sin ningún agregado (ni del mensaje ni previo) no hay nada que reconciliar
+ * — el detalle simplemente se acepta.
  */
-export function detectarDiscrepanciaGastos(delta: Partial<ScenarioState>): DiscrepanciaGastosResult {
-  if (delta.gastos_mensuales === undefined || !delta.gastos_detalle) return { discrepancia: false };
+export function detectarDiscrepanciaGastos(
+  delta: Partial<ScenarioState>,
+  prev?: Partial<ScenarioState>,
+): DiscrepanciaGastosResult {
+  if (!delta.gastos_detalle) return { discrepancia: false };
+  const agregado = delta.gastos_mensuales ?? prev?.gastos_mensuales;
+  if (agregado === undefined) return { discrepancia: false };
   const suma = round2(
     delta.gastos_detalle.vitales + delta.gastos_detalle.noVitales + delta.gastos_detalle.desconocidos,
   );
-  const agregado = delta.gastos_mensuales;
   if (Math.abs(suma - agregado) <= 1) return { discrepancia: false };
   return { discrepancia: true, agregado, suma };
 }
@@ -601,13 +649,89 @@ export function notaExtraccionAmbigua(
     );
   }
   if (huerfanos.extraccionIncompleta) {
+    // FIX 3 (8ª tanda) — 4 o más huérfanos es la firma de un desglose de
+    // gastos que el parser NO consiguió estructurar (probó
+    // `extraerDesgloseIrregular` y no llegó al umbral, o el formato es
+    // demasiado irregular incluso para eso) — "no inventes: pide el
+    // desglose en formato claro" en vez de dejar que el modelo intente
+    // adivinar un plan sobre números que no entendimos.
+    const pistaFormato = huerfanos.numerosHuerfanos.length >= 4
+      ? " Parece un desglose de gastos que no logré estructurar — pide que te lo repita en formato claro, " +
+        "una partida por línea (ej. \"arriendo: 500\")."
+      : "";
     return (
       `NÚMEROS SIN ASIGNAR: el usuario mencionó ${huerfanos.numerosHuerfanos.join(", ")} y no quedó claro a ` +
       "qué corresponden. Pregúntale a qué se refieren — con calidez, no como un interrogatorio — pero eso " +
       "NO te impide seguir usando con normalidad los datos que SÍ tienes claros de este mismo mensaje " +
       "(ingreso, gastos, meta, crédito…): calcula con esos igual, y añade la pregunta de los números " +
-      "sueltos aparte."
+      `sueltos aparte.${pistaFormato}`
     );
+  }
+  return null;
+}
+
+/**
+ * FIX 3 (8ª tanda, testdev7) — ECO DE DESGLOSE Y RECONCILIACIÓN. Cuando SÍ se
+ * consiguió estructurar el desglose (`extraerDesgloseIrregular`) pero no
+ * reconcilia con el agregado ya conocido, esta nota es MÁS ÚTIL que
+ * `notaExtraccionAmbigua`'s rama de discrepancia genérica: le da al modelo la
+ * LISTA ENTENDIDA para que la eche de vuelta al usuario (así el usuario ve
+ * exactamente qué se entendió y puede corregir un ítem concreto, no solo
+ * "el total no cuadra"). CASO REAL: 15 partidas suman 2.250 €, el usuario
+ * había dicho 2.200 € — una trampa de 50 € que el propio usuario no había
+ * notado.
+ */
+export function notaReconciliacionDesglose(
+  items: ExpenseItem[],
+  suma: number,
+  agregado: number,
+): string {
+  const lista = items.map((i) => `${i.name}: ${i.amount} €`).join(", ");
+  return (
+    `RECONCILIACIÓN DE DESGLOSE: entendiste estas partidas — ${lista} — que suman ${suma} €, pero el ` +
+    `usuario había declarado ${agregado} € antes (una diferencia de ${round2(Math.abs(suma - agregado))} €). ` +
+    "Tu respuesta ECHA esa lista entendida de vuelta al usuario (compacta, con tu propia voz — nunca la " +
+    `copies literal) y pregunta cuál de los dos números usar: los ${suma} € del desglose o los ${agregado} € ` +
+    "que había dicho antes. Cero cifras derivadas (sobrante, capacidad, cuota, plan) en este turno."
+  );
+}
+
+// FIX 2c (8ª tanda, testdev7) — RESPUESTA DE ACLARACIÓN CANÓNICA. Texto
+// USER-FACING (no una instrucción de prompt) para el enforcement determinista
+// de pipeline.ts: si, pese a `notaExtraccionAmbigua`/`notaReconciliacionDesglose`
+// en el prompt, el modelo IGUAL entrega un plan o cifras derivadas nuevas, el
+// código sustituye la respuesta ENTERA por esta pregunta — es la única
+// sustitución total permitida cuando la extracción es ambigua, y se registra
+// en `mutations`.
+const RESPUESTA_ACLARACION_DISCREPANCIA: Record<"es" | "pt" | "en", (agregado: number, suma: number) => string> = {
+  es: (agregado, suma) => `Antes de seguir: me dijiste ${agregado} € de gastos, pero el desglose que me diste suma ${suma} €. ¿Cuál de los dos uso?`,
+  pt: (agregado, suma) => `Antes de continuar: disseste-me ${agregado} € de despesas, mas o detalhe que me deste soma ${suma} €. Qual dos dois uso?`,
+  en: (agregado, suma) => `Before we continue: you told me ${agregado} € in expenses, but the breakdown you gave me adds up to ${suma} €. Which one should I use?`,
+};
+const RESPUESTA_ACLARACION_HUERFANOS: Record<"es" | "pt" | "en", (lista: string) => string> = {
+  es: (lista) => `Antes de seguir, ¿a qué corresponden estos números que mencionaste: ${lista}?`,
+  pt: (lista) => `Antes de continuar, a que correspondem estes números que mencionaste: ${lista}?`,
+  en: (lista) => `Before we continue, what do these numbers you mentioned refer to: ${lista}?`,
+};
+
+/**
+ * Pregunta de aclaración CANÓNICA (texto literal, no instrucción de prompt)
+ * para cuando el enforcement determinista tiene que sustituir la respuesta
+ * entera. Prioriza discrepancia sobre huérfanos genéricos, igual que
+ * `notaExtraccionAmbigua`. `null` si nada es ambiguo (no debería llamarse
+ * en ese caso, pero es seguro).
+ */
+export function respuestaAclaracionCanonica(
+  huerfanos: ExtraccionIncompletaResult,
+  discrepancia: DiscrepanciaGastosResult,
+  lang: Language,
+): string | null {
+  const idioma = lang === "es" || lang === "pt" || lang === "en" ? lang : "es";
+  if (discrepancia.discrepancia) {
+    return RESPUESTA_ACLARACION_DISCREPANCIA[idioma](discrepancia.agregado!, discrepancia.suma!);
+  }
+  if (huerfanos.extraccionIncompleta) {
+    return RESPUESTA_ACLARACION_HUERFANOS[idioma](huerfanos.numerosHuerfanos.join(", "));
   }
   return null;
 }
@@ -1163,4 +1287,41 @@ export function detectarEventosICA(
   }
 
   return eventos;
+}
+
+// ── FIX 4b (8ª tanda, testdev7) — MENSAJE DE USUARIO REPETIDO ───────────────
+// El QA real mostró 3 mensajes casi idénticos del usuario recibiendo 3
+// respuestas casi idénticas del modelo (un bucle silencioso). El mecanismo ya
+// existente (`esRespuestaRepetida`) compara la RESPUESTA del modelo contra su
+// propia respuesta anterior — pero eso solo detecta el bucle DESPUÉS de que ya
+// ocurrió una vez. Comparar el MENSAJE del usuario contra su propio mensaje
+// anterior es más fiable como señal de entrada: si el usuario repite su
+// pregunta literal (o casi), es una señal directa de que su primera pregunta
+// no quedó respondida — no depende de que el modelo también haya repetido su
+// texto (dos respuestas distintas a la misma pregunta repetida son igual de
+// síntoma del problema).
+/**
+ * ¿El mensaje ACTUAL del usuario es (casi) idéntico al ANTERIOR? Reutiliza el
+ * mismo umbral de similitud que `esRespuestaRepetida`, pero más estricto
+ * (0.95 en vez de 0.9): un mensaje de usuario es corto y una coincidencia
+ * parcial es más fácil de dar por casualidad que en una respuesta larga del
+ * modelo.
+ */
+export function esMensajeRepetido(actual: string, anterior: string | undefined): boolean {
+  return esRespuestaRepetida(actual, anterior, 0.95);
+}
+
+/**
+ * Nota de prompt (FIX 4b) — cuando el usuario repite literalmente su mensaje
+ * anterior, prohíbe repetir la respuesta anterior y pide reconocer la
+ * repetición con calidez, preguntando específicamente qué no quedó resuelto.
+ */
+export function notaMensajeRepetido(mensajeActual: string, mensajeAnterior: string | undefined): string | null {
+  if (!esMensajeRepetido(mensajeActual, mensajeAnterior)) return null;
+  return (
+    "EL USUARIO REPITE SU MENSAJE ANTERIOR casi literalmente. NO repitas tu respuesta anterior palabra por " +
+    "palabra ni reformules el mismo diagnóstico: reconoce la repetición con calidez (algo no quedó claro o " +
+    "no fue respondido) y pregunta específicamente qué parte de tu respuesta anterior no resolvió lo que " +
+    "necesitaba."
+  );
 }

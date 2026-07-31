@@ -351,3 +351,28 @@ test("FIX 2: crédito con monto Y plazo → cuota SÍ se calcula (sin regresión
   const { conceptos } = buildScenarioContext(s, "");
   assert.ok(conceptos.cuota > 0, `con ambos insumos, la cuota SÍ debe calcularse: ${JSON.stringify(conceptos)}`);
 });
+
+// ── FIX 2 (8ª tanda, testdev7) — derivadasSuprimidas ─────────────────────────
+
+test("FIX 2: derivadasSuprimidas=true → sin sobrante/capacidad/déficit, PERO ingreso/gastos (hechos) siguen expuestos", () => {
+  const s = mergeScenario(undefined, { ingreso_mensual: 2300, gastos_mensuales: 2200 });
+  const { conceptos, bloque } = buildScenarioContext(s, "", { derivadasSuprimidas: true });
+  assert.equal(conceptos.ingreso, 2300, "el hecho ingreso sigue expuesto");
+  assert.equal(conceptos.gastos, 2200, "el hecho gastos (confirmado en turno previo) sigue expuesto");
+  assert.ok(!("sobrante" in conceptos), `sin derivadas: ${JSON.stringify(conceptos)}`);
+  assert.ok(!("capacidad_anual" in conceptos));
+  assert.ok(!bloque.includes("sobrante_mensual"));
+});
+
+test("FIX 2: derivadasSuprimidas=true con crédito completo → sin cuota (derivada)", () => {
+  const s = mergeScenario(undefined, { credito: { monto: 2400, plazo_meses: 12, tae_pct: 18, tae_es_referencia: false } });
+  const { conceptos } = buildScenarioContext(s, "", { derivadasSuprimidas: true });
+  assert.equal(conceptos.monto, 2400, "el monto (hecho) sigue expuesto");
+  assert.ok(!("cuota" in conceptos), `sin derivadas: ${JSON.stringify(conceptos)}`);
+});
+
+test("FIX 2: derivadasSuprimidas=false (u omitido) → comportamiento normal, sin regresión", () => {
+  const s = mergeScenario(undefined, { ingreso_mensual: 2300, gastos_mensuales: 2200 });
+  const { conceptos } = buildScenarioContext(s, "");
+  assert.equal(conceptos.sobrante, 100);
+});

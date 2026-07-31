@@ -34,6 +34,8 @@ import {
   enforceOutputPolicy,
   mentionsSpecificProduct,
 } from "../llm/output-validator";
+import { DERIVED_CONCEPTS } from "./validate";
+import { conceptsInSentence } from "./context";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 export interface EnforcementInput {
@@ -61,6 +63,23 @@ export interface EnforcementInput {
    * enforceMissingClosing se DESACTIVAN, sea cual sea el carril.
    */
   esEmocional?: boolean;
+  /**
+   * FIX 2c (8ª tanda, testdev7) — ¿la extracción de ESTE turno quedó ambigua
+   * (huérfanos sin asignar o discrepancia agregado/desglose)? Con esto en
+   * true, si tras TODA la cadena el texto sigue mencionando algún concepto
+   * de `DERIVED_CONCEPTS` (sobrante, cuota, recorte…), se sustituye la
+   * respuesta ENTERA por `respuestaAclaracion` — la única sustitución total
+   * permitida en este caso. El prompt ya lo pide (`notaExtraccionAmbigua`/
+   * `notaReconciliacionDesglose`); esto es el respaldo determinista para
+   * cuando el modelo no obedece.
+   */
+  extraccionAmbigua?: boolean;
+  /**
+   * Texto literal de la pregunta de aclaración (generado por
+   * `respuestaAclaracionCanonica` en route.ts). Requerido cuando
+   * `extraccionAmbigua` es true; si falta, este paso no hace nada.
+   */
+  respuestaAclaracion?: string | null;
   /** Modo de enforcement (PIEZA 1). Por defecto, el de la env var. */
   enforcement?: EnforcementMode;
   /** Cliente admin para persistir el log del guardarraíl (opcional). */
@@ -139,7 +158,7 @@ export async function applyEnforcement(
   input: EnforcementInput,
 ): Promise<EnforcementResult> {
   const enforcement = input.enforcement ?? DEFAULT_ENFORCEMENT_MODE;
-  const { carril, lang, missing, conceptos, esSimulacion, esEmocional } = input;
+  const { carril, lang, missing, conceptos, esSimulacion, esEmocional, extraccionAmbigua, respuestaAclaracion } = input;
   const mutations: Mutation[] = [];
 
   let texto = raw;
@@ -254,6 +273,23 @@ export async function applyEnforcement(
   texto = paso("renumberLists", "numeración de lista (post-Commandments)", texto, mutations, () =>
     renumberLists(texto).texto,
   );
+
+  // 10 · EXTRACCIÓN AMBIGUA (FIX 2c, 8ª tanda) — red de seguridad final. El
+  // prompt ya le prohibió al modelo dar plan/cifras derivadas este turno; si
+  // aun así `texto` menciona algún concepto DERIVADO (sobrante, cuota,
+  // recorte…), no hay forma segura de "limpiar" la frase sin adivinar cuál
+  // cifra es la correcta — la ÚNICA salida honesta es sustituir la respuesta
+  // ENTERA por la pregunta de aclaración. Va DESPUÉS de Commandments a
+  // propósito: si M9 ya revirtió a un plan completo con `raw`, esta capa
+  // sigue teniendo la última palabra cuando la extracción es ambigua.
+  if (extraccionAmbigua && respuestaAclaracion) {
+    const derivadosMencionados = conceptsInSentence(texto).filter((c) => DERIVED_CONCEPTS.has(c));
+    if (derivadosMencionados.length > 0) {
+      texto = paso("extraccionAmbigua", "sustitución por pregunta de aclaración", texto, mutations, () =>
+        respuestaAclaracion,
+      );
+    }
+  }
 
   return {
     texto,

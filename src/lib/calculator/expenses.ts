@@ -241,3 +241,98 @@ export function parseExpenseList(message: string): ExpenseItem[] {
   const amountFirst = parseExpenseListAmountFirst(message);
   return amountFirst.length >= 2 ? amountFirst : [];
 }
+
+// ── FIX 3 (8ª tanda, testdev7) — DESGLOSE IRREGULAR (etiquetas con guion bajo,
+// orden mixto) ────────────────────────────────────────────────────────────
+//
+// CASO REAL: "Diezmo_Vital 225, 700 Casa_Vital Supermercado_Vital 450, 120
+// Servicios_Vitales, ..." — un desglose de 15 partidas donde CADA una puede
+// venir en cualquiera de los dos órdenes ("nombre monto" O "monto nombre"),
+// mezclados en el MISMO mensaje, con etiquetas propias del usuario que usan
+// GUION BAJO como separador interno ("Diezmo_Vital"). `parseExpenseList`
+// (arriba) falla aquí por DOS motivos: (a) elige UN solo orden para todo el
+// mensaje, nunca mezcla ambos; (b) su regex de nombre solo admite letras y
+// espacios — el guion bajo rompe el match a mitad de palabra. El resultado
+// real: 0 partidas extraídas, las 15 cifras cayeron a "número huérfano".
+//
+// Algoritmo: tokeniza por espacios/comas (el guion bajo queda DENTRO del
+// token, como separador interno de la etiqueta) y empareja cada NÚMERO con
+// la PALABRA vecina VÁLIDA — prueba primero la de ATRÁS, si no cuela prueba
+// la de ADELANTE — sin exigir un orden fijo para todo el mensaje. SÍ aplica
+// el mismo filtro NO_ES_GASTO/STOPWORD_NAME_RE que ya usa el fallback
+// monto-primero de `parseExpenseList`: sin él, un mensaje con contexto
+// alrededor del desglose real ("gano 2300 y gasto= 1000 arriendo...")
+// emparejaba "gano" con 2300 y "gasto=" con 1000 — BUG encontrado probando
+// contra el caso real de la 5ª tanda antes de esta misma tanda. Una palabra
+// ya RECLAMADA por otro número no puede reclamarse dos veces.
+const NUMERO_TOKEN_RE = /^\d+(?:[.,]\d+)?$/;
+
+function esNumeroToken(tok: string): boolean {
+  return NUMERO_TOKEN_RE.test(tok.replace(/[€$]+$/, ""));
+}
+
+/**
+ * ¿`tok` es una palabra que puede ser el NOMBRE de una partida de gasto?
+ *
+ * `NO_ES_GASTO` solo se aplica cuando el nombre candidato es UNA sola
+ * palabra (sin guion bajo) — ahí "gasto"/"gano"/"ahorro" sueltos SÍ delatan
+ * texto de contexto ajeno al desglose ("gasto= 1000 arriendo…", donde
+ * "gasto=" nunca fue una partida). Una etiqueta COMPUESTA por guion bajo
+ * ("Ahorro_Posible", "Gastos_Varios_Posible") es otra cosa: es la
+ * CATEGORÍA propia del usuario, aunque una de sus palabras internas
+ * coincida por casualidad con la lista de exclusión — bloquearla ahí perdía
+ * partidas reales del desglose (caso testdev7: "Ahorro_Posible" y
+ * "Gastos_Varios_Posible" quedaban fuera pese a ser dos ítems legítimos del
+ * mismo desglose de 15 partidas).
+ */
+function esNombreValido(tok: string): boolean {
+  const esCompuesto = tok.includes("_");
+  const limpio = tok.replace(/_/g, " ").replace(/^[.,;:()]+|[.,;:()]+$/g, "").trim();
+  if (!limpio || !/\p{L}/u.test(limpio)) return false;
+  if (!esCompuesto && NO_ES_GASTO.test(norm(limpio))) return false;
+  const palabras = limpio.split(/\s+/);
+  if (palabras.every((w) => STOPWORD_NAME_RE.test(w))) return false;
+  return true;
+}
+
+/**
+ * Extrae un desglose de "número etiqueta" / "etiqueta número" en cualquier
+ * orden, mezclados en el mismo mensaje. Devuelve `null` (no `[]`) si hay
+ * MENOS de 4 pares — por debajo de ese umbral, la ambigüedad de un
+ * emparejamiento tan permisivo pesa más que el beneficio; ver
+ * `notaFaltaDesglose`/`detectarNumerosHuerfanos` para el caso genérico.
+ */
+export function extraerDesgloseIrregular(message: string): ExpenseItem[] | null {
+  const tokens = message
+    .split(/[\s,]+/)
+    .map((t) => t.trim())
+    .filter(Boolean);
+
+  const reclamado = new Set<number>();
+  const items: ExpenseItem[] = [];
+
+  for (let i = 0; i < tokens.length; i++) {
+    if (!esNumeroToken(tokens[i])) continue;
+    const amount = parseDigitAmount(tokens[i].replace(/[€$]+$/, ""));
+    if (!Number.isFinite(amount) || amount <= 0) continue;
+
+    const atras = i - 1;
+    const adelante = i + 1;
+    let nombreIdx: number | undefined;
+    if (atras >= 0 && !reclamado.has(atras) && !esNumeroToken(tokens[atras]) && esNombreValido(tokens[atras])) {
+      nombreIdx = atras;
+    } else if (
+      adelante < tokens.length && !reclamado.has(adelante) &&
+      !esNumeroToken(tokens[adelante]) && esNombreValido(tokens[adelante])
+    ) {
+      nombreIdx = adelante;
+    }
+
+    if (nombreIdx === undefined) continue;
+    reclamado.add(nombreIdx);
+    const name = tokens[nombreIdx].replace(/_/g, " ").replace(/^[.,;:()]+|[.,;:()]+$/g, "").trim();
+    items.push({ name, amount });
+  }
+
+  return items.length >= 4 ? items : null;
+}

@@ -376,3 +376,54 @@ test("FIX 5: cierre delegativo sustituido — el resultado sigue siendo UNA sola
   const out = resolveClosing(texto, { carril: "FINANCIERO", missing: ["plazo"], lang: "es" });
   assert.equal((out.match(/\?/g) ?? []).length, 1, `debe quedar UNA sola pregunta: ${out}`);
 });
+
+// ── FIX 2c (8ª tanda, testdev7) — enforcement determinista de extracción ─────
+// ambigua. El prompt YA le prohíbe al modelo dar plan/cifras derivadas
+// cuando la extracción del turno quedó ambigua (huérfanos o discrepancia
+// agregado/desglose) — esta es la red de seguridad: si el modelo IGUAL
+// entrega una cifra derivada, se sustituye la respuesta ENTERA por la
+// pregunta de aclaración, y esa sustitución queda en `mutations`.
+
+const RESPUESTA_ACLARACION = "Antes de seguir: me dijiste 2200 € de gastos, pero el desglose que me diste suma 2250 €. ¿Cuál de los dos uso?";
+
+test("FIX 2c: extraccionAmbigua=true y la respuesta SÍ trae una cifra derivada (sobrante) → se sustituye entera", async () => {
+  const texto = "Tu sobrante mensual es de 550 €, así que puedes destinarlo a tu meta cada mes.";
+  const r = await applyEnforcement(texto, {
+    ...BASE,
+    extraccionAmbigua: true,
+    respuestaAclaracion: RESPUESTA_ACLARACION,
+  });
+  assert.equal(r.texto, RESPUESTA_ACLARACION, "debe sustituirse por la pregunta de aclaración");
+  assert.ok(r.mutations.some((m) => m.capa === "extraccionAmbigua"), "la sustitución debe quedar registrada en mutations");
+  assert.ok(auditarMutaciones(texto, r.texto, r.mutations));
+});
+
+test("FIX 2c: extraccionAmbigua=true pero la respuesta NO menciona ninguna cifra derivada → se entrega intacta", async () => {
+  const texto = "¿A qué corresponden esos números que mencionaste? Quiero anotarlos bien.";
+  const r = await applyEnforcement(texto, {
+    ...BASE,
+    extraccionAmbigua: true,
+    respuestaAclaracion: RESPUESTA_ACLARACION,
+  });
+  assert.equal(r.texto, texto, "sin cifra derivada, no hay nada que sustituir");
+});
+
+test("FIX 2c: extraccionAmbigua=false (turno normal) → aunque haya cifra derivada, NUNCA se sustituye por esta capa", async () => {
+  const texto = "Tu sobrante mensual es de 550 €, así que puedes destinarlo a tu meta cada mes.";
+  const r = await applyEnforcement(texto, {
+    ...BASE,
+    extraccionAmbigua: false,
+    respuestaAclaracion: RESPUESTA_ACLARACION,
+  });
+  assert.notEqual(r.texto, RESPUESTA_ACLARACION);
+});
+
+test("FIX 2c: extraccionAmbigua=true pero SIN respuestaAclaracion (no se calculó) → no hace nada, evita romper el turno", async () => {
+  const texto = "Tu sobrante mensual es de 550 €.";
+  const r = await applyEnforcement(texto, {
+    ...BASE,
+    extraccionAmbigua: true,
+    respuestaAclaracion: null,
+  });
+  assert.notEqual(r.texto, RESPUESTA_ACLARACION);
+});

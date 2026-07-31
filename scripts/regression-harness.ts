@@ -101,7 +101,8 @@ import {
 } from '../src/lib/llm/output-validator'
 import { detectLanguage, type Language } from '../src/lib/language'
 import { findNumberMentions, dedupeOverlaps } from '../src/lib/guardrail/numbers'
-import { isPercent } from '../src/lib/guardrail/context'
+import { isPercent, conceptsInSentence } from '../src/lib/guardrail/context'
+import { DERIVED_CONCEPTS } from '../src/lib/guardrail/validate'
 
 // La cadena de escenario de AG08, ya en develop. El shim provisional de AG07 se
 // borró: el harness prueba SU código. Ojo — el contrato real quedó repartido:
@@ -112,8 +113,10 @@ import {
   mergeScenario,
   detectarNumerosHuerfanos,
   detectarDiscrepanciaGastos,
+  respuestaAclaracionCanonica,
   deltaSinGastosPorDiscrepancia,
   numerosCandidatos,
+  notaMensajeRepetido,
   type ScenarioState,
 } from '../src/lib/calculator/scenario'
 import { buildScenarioContext } from '../src/lib/calculator/orchestrator'
@@ -157,6 +160,10 @@ interface Turn {
   expectExtraccionAmbigua?: boolean
   /** PIEZA 5c (complemento, 5ª tanda) — ¿debe detectarse tono emocional? */
   expectEmocional?: boolean
+  /** FIX 3 (8ª tanda) — ¿debe quedar marcada la discrepancia agregado/desglose? */
+  expectDiscrepanciaGastos?: boolean
+  /** FIX 4b (8ª tanda) — ¿debe detectarse mensaje repetido respecto al anterior? */
+  expectMensajeRepetido?: boolean
 }
 
 interface ProfileSelector {
@@ -368,6 +375,10 @@ interface TurnOutcome {
   extraccionAmbigua: boolean
   /** PIEZA 5c (5ª tanda) — ¿tono emocional detectado en el mensaje del usuario? */
   esEmocional: boolean
+  /** FIX 3 (8ª tanda) — ¿discrepancia agregado/desglose (misma frontera de 1 €)? */
+  discrepanciaGastos: boolean
+  /** FIX 4b (8ª tanda) — ¿el mensaje del usuario repite (≥95%) el anterior? */
+  mensajeRepetido: boolean
 }
 
 async function modelResponse(
@@ -435,8 +446,12 @@ async function runTurn(
   // discrepancia (agregado ≠ suma del desglose, el MISMO campo
   // contradiciéndose) retiene su propio campo hasta reconciliar; el resto del
   // delta se persiste igual — ver la misma lógica en route.ts.
+  // FIX 3 (8ª tanda, testdev7) — `prevState` como segunda fuente del agregado
+  // ya conocido, igual que route.ts: la discrepancia real de testdev7 era
+  // cross-turno (agregado declarado en un turno, desglose en el siguiente sin
+  // repetirlo).
   const huerfanos = detectarNumerosHuerfanos(turn.user, delta)
-  const discrepancia = detectarDiscrepanciaGastos(delta)
+  const discrepancia = detectarDiscrepanciaGastos(delta, prevState)
   const extraccionAmbigua = huerfanos.extraccionIncompleta || discrepancia.discrepancia
   const deltaAPersistir = deltaSinGastosPorDiscrepancia(delta, discrepancia)
 
@@ -447,7 +462,15 @@ async function runTurn(
     ...numerosCandidatos(turn.user),
     ...(discrepancia.suma !== undefined ? [discrepancia.suma] : []),
   ]
-  const verified = buildScenarioContext(state, turn.user, { valoresExtra })
+  // FIX 2a (8ª tanda) — con extracción ambigua, ninguna derivada nueva se
+  // calcula este turno; ver la misma lógica en route.ts.
+  const verified = buildScenarioContext(state, turn.user, { valoresExtra, derivadasSuprimidas: extraccionAmbigua })
+
+  // FIX 4b (8ª tanda, testdev7) — mensaje de usuario (casi) idéntico al
+  // anterior de esta misma conversación (señal de entrada, no depende de la
+  // respuesta del modelo). Ver la misma lógica en route.ts.
+  const lastUserMessage = [...history].reverse().find((h) => h.role === 'user')?.content
+  const mensajeRepetido = notaMensajeRepetido(turn.user, lastUserMessage) !== null
 
   // PIEZA 5c (complemento, 5ª tanda) — tono emocional: reduce la autoridad del
   // enforcement (grounding/sustancia/cierre se desactivan), sea cual sea el
@@ -526,6 +549,20 @@ async function runTurn(
   })
   finalText = renumberLists(commandments.texto).texto
 
+  // 16 · FIX 2c (8ª tanda, testdev7) — respaldo determinista: si el texto
+  // final AÚN menciona una cifra derivada (`DERIVED_CONCEPTS`) en un turno de
+  // extracción ambigua, se sustituye la respuesta entera por la pregunta de
+  // aclaración — misma lógica que pipeline.ts::applyEnforcement paso 10.
+  if (extraccionAmbigua) {
+    const respuestaAclaracion = respuestaAclaracionCanonica(huerfanos, discrepancia, userLang)
+    if (respuestaAclaracion) {
+      const derivadosMencionados = conceptsInSentence(finalText).filter((c) => DERIVED_CONCEPTS.has(c))
+      if (derivadosMencionados.length > 0) {
+        finalText = respuestaAclaracion
+      }
+    }
+  }
+
   return {
     finalText,
     blocked,
@@ -539,6 +576,8 @@ async function runTurn(
     violations: commandments.violaciones,
     extraccionAmbigua,
     esEmocional,
+    discrepanciaGastos: discrepancia.discrepancia,
+    mensajeRepetido,
   }
 }
 
@@ -601,6 +640,14 @@ function checkTurn(turn: Turn, out: TurnOutcome, live: boolean): string[] {
 
   if (turn.expectEmocional !== undefined && turn.expectEmocional !== out.esEmocional) {
     errs.push(`expectEmocional: esperaba ${turn.expectEmocional}, encontré ${out.esEmocional}`)
+  }
+
+  if (turn.expectDiscrepanciaGastos !== undefined && turn.expectDiscrepanciaGastos !== out.discrepanciaGastos) {
+    errs.push(`expectDiscrepanciaGastos: esperaba ${turn.expectDiscrepanciaGastos}, encontré ${out.discrepanciaGastos}`)
+  }
+
+  if (turn.expectMensajeRepetido !== undefined && turn.expectMensajeRepetido !== out.mensajeRepetido) {
+    errs.push(`expectMensajeRepetido: esperaba ${turn.expectMensajeRepetido}, encontré ${out.mensajeRepetido}`)
   }
 
   return errs

@@ -20,25 +20,38 @@ export interface NumberMention {
 }
 
 // ── Dígitos ──────────────────────────────────────────────────────────────────
-// Grupo 1 (el número), tres alternativas:
+// Grupo 1 (el número), dos alternativas:
 //   a) miles con punto (1.200, 1.200.000) y coma decimal opcional (1.200,50).
-//   b) miles con ESPACIO (2 500, 1 200 000) y coma decimal opcional.
-//   c) dígitos llanos con coma decimal opcional (40000, 2000,50).
+//   b) dígitos llanos con coma decimal opcional (40000, 2000,50).
 // Grupo 2 (opcional): sufijo "k"/"K" → ×1000 ("2,5k" = 2500). El sufijo solo se
 // consume si NO va seguido de otra letra, para no comerse "2kg".
-// Los lookarounds evitan enganchar trozos de un número más largo. La alternativa
-// de espacio exige grupos de EXACTAMENTE 3 dígitos, así "2 500" se une pero
-// "2500 500" (ya de 4 dígitos) o "2 cosas" no.
+// Los lookarounds evitan enganchar trozos de un número más largo.
+//
+// FIX 1 (8ª tanda, testdev7) — EL ESPACIO YA NO ES SEPARADOR DE MILLARES. QA
+// real: "Diezmo_Vital 225, 700 Casa_Vital ... 60 100 Pañales_Bebe_Vital" — el
+// desglose tenía DOS partidas seguidas ("60" y "100", separadas por espacio,
+// SIN relación entre sí) que el parser fusionaba en "60100" — un error
+// aritmético de 850€ que ni el propio usuario habría anticipado. En ES/PT el
+// separador de millares real es el PUNTO ("1.200") y el decimal es la COMA
+// ("1.200,50"); el espacio no cumple ese rol en el uso real de la app — solo
+// lo imitaba de forma ambigua ("2 500" sí, pero "60 100" también, sin
+// distinción posible por el propio parser). Dos números separados por un
+// espacio son DOS números: "2 400 €" se lee como [2, 400], no [2400] — la
+// ambigüedad la resuelve el eco de confirmación al usuario (scenario.ts), no
+// el parser adivinando.
 const DIGIT_RE =
-  /(?<!\d)(\d{1,3}(?:\.\d{3})+(?:,\d+)?|\d{1,3}(?: \d{3})+(?:,\d+)?|\d+(?:,\d+)?)(k(?![\p{L}]))?(?!\d)/giu;
+  /(?<!\d)(\d{1,3}(?:\.\d{3})+(?:,\d+)?|\d+(?:,\d+)?)(k(?![\p{L}]))?(?!\d)/giu;
 
 /**
- * Parsea un literal de dígitos en convención es/LatAm a número.
- * El espacio es separador de miles (se elimina), igual que el punto; la coma es
- * el decimal. El sufijo "k" NO llega aquí (lo aplica `findNumberMentions`).
+ * Parsea un literal de dígitos en convención es/LatAm a número. Si tiene
+ * punto, es separador de miles (se elimina); la coma es el decimal. El
+ * sufijo "k" NO llega aquí (lo aplica `findNumberMentions`). El literal ya no
+ * puede traer espacios internos (FIX 1, 8ª tanda: `DIGIT_RE` dejó de
+ * capturarlos) — el `replace` queda como limpieza defensiva de espacios en
+ * los BORDES si algún llamante externo pasa un fragmento sin recortar.
  */
 export function parseDigitAmount(raw: string): number {
-  const noSpaces = raw.replace(/\s/g, "");
+  const noSpaces = raw.trim();
   // Si tiene punto, es separador de miles → se elimina. La coma es decimal.
   const normalized = noSpaces.includes(".")
     ? noSpaces.replace(/\./g, "").replace(",", ".")

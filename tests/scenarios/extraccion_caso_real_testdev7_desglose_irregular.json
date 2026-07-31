@@ -1,0 +1,25 @@
+{
+  "name": "extraccion_caso_real_testdev7_desglose_irregular",
+  "playbook": "PB1",
+  "language": "es",
+  "description": "CASO REAL (testdev7, 31/07 21:07): T1 declara ingreso 2500 y gastos agregados 2200. T2 es el mensaje real — 15 partidas con etiquetas de guion bajo, orden mixto nombre-monto/monto-nombre ('Diezmo_Vital 225, 700 Casa_Vital Supermercado_Vital 450, 120 Servicios_Vitales, Telecomunicaciones_Necesario 60 100 Pañales_Bebe_Vital...') — antes del FIX 1 (8ª tanda) '60 100' se pegaba en 60100 (espacio como separador de miles); antes del FIX 3, el desglose con guion bajo no se extraía en absoluto. La suma real (2.250 €) CONTRADICE el agregado ya confirmado en T1 (2.200 €) — una discrepancia de 50 € que el propio usuario no notó (la 'trampa de los 50 €'). FIX 2c prueba el respaldo determinista: el fixtureResponse simula un modelo que, pese a la nota de aclaración, igual entrega un sobrante — se sustituye entera por la pregunta de reconciliación.",
+  "turns": [
+    {
+      "user": "Gano 2500 euros al mes y mis gastos son 2200.",
+      "fixtureResponse": "Anotado. Tu sobrante mensual es de 300 €. ¿Tienes el desglose de tus gastos?",
+      "expectBlocked": false,
+      "expectExtraccionAmbigua": false,
+      "expectScenarioState": { "ingreso_mensual": 2500, "gastos_mensuales": 2200 }
+    },
+    {
+      "user": "Diezmo_Vital 225, 700 Casa_Vital Supermercado_Vital 450, 120 Servicios_Vitales, Telecomunicaciones_Necesario 60 100 Pañales_Bebe_Vital, Colegio_Niño_Necesario 150 Transporte_Necesario 100, 80 Ropa_Posible, Ocio_Familiar 60 40 Farmacia_Vital, Suscripciones_Ocio 25 40 Gimnasio_Necesario, 60 Ahorro_Posible Gastos_Varios_Posible 40",
+      "fixtureResponse": "Con esos gastos, tu nuevo sobrante mensual sería de 250 €. ¿Confirmamos ese sobrante?",
+      "expectBlocked": true,
+      "expectExtraccionAmbigua": true,
+      "expectDiscrepanciaGastos": true,
+      "expectContains": ["2200", "2250", "¿Cuál de los dos uso?"],
+      "expectNotContains": ["60100"],
+      "expectScenarioState": { "ingreso_mensual": 2500, "gastos_mensuales": 2200 }
+    }
+  ]
+}

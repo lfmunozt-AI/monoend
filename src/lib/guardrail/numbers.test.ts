@@ -1,21 +1,33 @@
-// Tests de la ampliación del parser numérico: espacio como separador de miles
-// ("2 500") y sufijo "k" ("2,5k"). Runner nativo de Node (node:test) vía tsx.
-// Ejecutar: `npm test`. NO debe romper las convenciones existentes.
+// Tests del parser numérico: sufijo "k" ("2,5k") y la convención de millares
+// es/LatAm (punto = miles, coma = decimal). El espacio COMO separador de
+// miles se retiró en la 8ª tanda (FIX 1, testdev7) — ver los tests de esa
+// sección más abajo. Runner nativo de Node (node:test) vía tsx. Ejecutar:
+// `npm test`.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { parseDigitAmount, findNumberMentions } from "./numbers";
 
-test("numbers: espacio como separador de miles '2 500' → 2500", () => {
-  assert.equal(parseDigitAmount("2 500"), 2500);
+// FIX 1 (8ª tanda, testdev7) — BUG BLOQUEANTE: el espacio como separador de
+// miles fusionaba partidas SIN relación entre sí ("60 100" de un desglose de
+// gastos → 60100, un error aritmético de cientos de euros). El separador de
+// miles real en ES/PT es el PUNTO; el espacio ya NO agrupa — dos números
+// separados por un espacio son DOS números.
+test("numbers: el espacio YA NO es separador de miles — 'tengo 2 500 pesos' → dos números [2, 500]", () => {
   const vals = findNumberMentions("tengo 2 500 pesos").map((m) => m.value);
-  assert.ok(vals.includes(2500), `esperaba 2500 en ${JSON.stringify(vals)}`);
+  assert.deepEqual(vals, [2, 500]);
 });
 
-test("numbers: espacio de miles con más grupos '1 200 000' → 1200000", () => {
-  const vals = findNumberMentions("ahorré 1 200 000 el año pasado").map((m) => m.value);
-  assert.ok(vals.includes(1200000), `esperaba 1200000 en ${JSON.stringify(vals)}`);
+test("numbers: caso real testdev7 — '60 100' (dos partidas de un desglose) → [60, 100], NUNCA 60100", () => {
+  const vals = findNumberMentions("Telecomunicaciones 60 100 Pañales").map((m) => m.value);
+  assert.ok(!vals.includes(60100), `60100 NUNCA debe aparecer: ${JSON.stringify(vals)}`);
+  assert.ok(vals.includes(60) && vals.includes(100), `esperaba 60 y 100 por separado: ${JSON.stringify(vals)}`);
+});
+
+test("numbers: '2.400 €' (punto = millares, la convención real) SIGUE uniéndose en 2400", () => {
+  const vals = findNumberMentions("cuesta 2.400 €").map((m) => m.value);
+  assert.deepEqual(vals, [2400]);
 });
 
 test("numbers: sufijo k '2,5k' → 2500", () => {

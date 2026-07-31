@@ -45,17 +45,31 @@ export function computeNewScore(current: number, evento: string): number {
   return Math.min(100, Math.max(0, current + delta))
 }
 
+/**
+ * FIX 6 (8ª tanda, testdev7) — FUENTE ÚNICA DE VERDAD. Antes leía la última
+ * fila de `ica_history` — `updateICAScore` (más abajo) SÍ escribía
+ * `profiles.ica_score` en cada turno, pero nadie lo LEÍA: tanto este archivo
+ * como `/api/ica/score` (dashboard) y `route.ts` (chat) trataban
+ * `ica_history` como la fuente primaria y `profiles.ica_score` como un mero
+ * espejo — un espejo que nadie consulta no es una fuente de verdad, es una
+ * columna muerta. Riesgo real, no solo cosmético: las dos escrituras de
+ * `updateICAScore` corren en `Promise.all` sin transacción — si UNA de las
+ * dos falla (o si algo escribe en `ica_history` directamente, sin pasar por
+ * `updateICAScore` — un `event_trigger` "rls-audit-marker" encontrado en
+ * producción es evidencia de exactamente eso), las dos tablas divergen
+ * silenciosamente y el valor mostrado dependía de cuál se leyera. Ahora se
+ * lee `profiles.ica_score` directamente: es la fuente que YA se mantenía
+ * actualizada pero se ignoraba en la lectura.
+ */
 export async function getICAScore(userId: string): Promise<number> {
   const { data, error } = await adminClient()
-    .from('ica_history')
-    .select('score')
+    .from('profiles')
+    .select('ica_score')
     .eq('user_id', userId)
-    .order('recorded_at', { ascending: false })
-    .limit(1)
     .maybeSingle()
 
   if (error) throw error
-  return (data as { score: number } | null)?.score ?? 0
+  return (data as { ica_score: number | null } | null)?.ica_score ?? 0
 }
 
 export async function updateICAScore(

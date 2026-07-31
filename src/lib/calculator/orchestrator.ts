@@ -393,12 +393,22 @@ export interface ScenarioContext {
  * CITARLOS al preguntar ("dijiste 1.000 € pero el detalle suma 850 €") sin
  * que se bloqueen por no ser una cifra derivada — son el eco de lo que el
  * propio usuario escribió, no una cifra inventada.
+ *
+ * `opts.derivadasSuprimidas` (FIX 2, 8ª tanda, testdev7) — cuando la
+ * extracción de ESTE turno quedó ambigua (huérfanos o discrepancia de
+ * gastos), el orquestador NO emite ninguna derivada NUEVA que dependa de
+ * gastos: sobrante, déficit, capacidad anual, cuota, brecha, esfuerzo total,
+ * recorte propuesto, nueva capacidad. Los HECHOS declarados (ingreso, gastos
+ * — el último valor CONFIRMADO, no el de este turno ambiguo —, monto/plazo/
+ * TAE de crédito) SÍ se siguen exponiendo: son verdad verificada de turnos
+ * anteriores, no algo que este turno haya puesto en duda.
  */
 export function buildScenarioContext(
   scenario: ScenarioState,
   userMessage: string,
-  opts?: { valoresExtra?: number[] },
+  opts?: { valoresExtra?: number[]; derivadasSuprimidas?: boolean },
 ): ScenarioContext {
+  const derivadasSuprimidas = opts?.derivadasSuprimidas ?? false;
 
   const realidad: Linea[] = [];
   const referencias: string[] = [];
@@ -421,7 +431,7 @@ export function buildScenarioContext(
   if (gasto !== undefined) {
     realidad.push({ etiqueta: "gastos_mensuales", valor: gasto, formula: "dato que aportaste" });
   }
-  if (ingreso !== undefined && gasto !== undefined) {
+  if (ingreso !== undefined && gasto !== undefined && !derivadasSuprimidas) {
     const s = sobrante(ingreso, gasto);
     if (s.ok) {
       sobranteValor = s.valor;
@@ -476,8 +486,11 @@ export function buildScenarioContext(
   }
 
   // La CUOTA (y todo lo que depende de ella) es una DERIVADA: exige AMBOS
-  // insumos — nunca se inventa un plazo o un monto que falte.
+  // insumos — nunca se inventa un plazo o un monto que falte. FIX 2 (8ª
+  // tanda): tampoco se calcula si ESTE turno dejó la extracción ambigua — la
+  // cuota depende de `sobranteValor`/`deficitValor` (arriba, ya suprimidos).
   if (
+    !derivadasSuprimidas &&
     scenario.credito &&
     scenario.credito.monto !== undefined && scenario.credito.monto > 0 &&
     scenario.credito.plazo_meses !== undefined && scenario.credito.plazo_meses > 0
@@ -539,7 +552,10 @@ export function buildScenarioContext(
   }
 
   // ── Lista de gastos en el mensaje → clasificación ─────────────────────────
-  const items = parseExpenseList(userMessage);
+  // FIX 2 (8ª tanda) — también se suprime: la clasificación vitales/no
+  // vitales de ESTE mensaje es una derivada NUEVA del campo gastos, que es
+  // justamente el que quedó en duda.
+  const items = derivadasSuprimidas ? [] : parseExpenseList(userMessage);
   if (items.length >= 2) {
     const cls = classifyExpenses(items);
     const listaTxt = (g: ExpenseItem[]) => g.map((i) => `${i.name} ${i.amount}`).join(", ");

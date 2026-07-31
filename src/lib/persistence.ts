@@ -136,11 +136,39 @@ export function serializarError(err: unknown): { message: string; code?: string;
 
 /**
  * PIEZA 3 — la meta declarada crea (o actualiza) una fila en `goals`. Una
- * sola meta ACTIVA por usuario: si la meta de este turno tiene un título
- * distinto de la(s) activa(s) en BD, esas se ARCHIVAN (status='paused', NUNCA
- * se borran) y se inserta la nueva. Si coincide con la ya activa, se
+ * sola meta ACTIVA por usuario: si la meta de este turno es un cambio
+ * EXPLÍCITO de meta (categoría distinta a las activas), esas se ARCHIVAN
+ * (status='paused', NUNCA se borran) y se inserta la nueva. Si no, se
  * actualiza en sitio (no se duplica la fila cada turno).
+ *
+ * FIX 5 (8ª tanda, testdev7) — UNA META, UNA FILA. Antes se matcheaba por
+ * TÍTULO EXACTO: `scenario.meta.titulo` es texto libre que el usuario suele
+ * refinar turno a turno ("ahorrar para un auto" → "ahorrar 15.000€ para un
+ * auto usado") — cada refinamiento ya no coincidía carácter a carácter con
+ * el título anterior, así que el código archivaba la fila "vieja" e insertaba
+ * una NUEVA cada vez: el origen real de "2 filas en goals para una sola
+ * meta" que reportó el usuario. Ahora se matchea por (user_id, status=
+ * 'active') sin más — cualquier meta activa se trata como LA MISMA meta y se
+ * actualiza en sitio — salvo que la CATEGORÍA inferida (`inferGoalCategory`,
+ * ya existente para clasificar el enum de la tabla) cambie de una meta
+ * claramente distinta (p. ej. 'vehicle' → 'property'): la señal más fiable
+ * disponible sin depender de comparar texto literal, y sin necesitar un flag
+ * nuevo de "cambio explícito" que el resto del pipeline no produce hoy.
+ * Con una sola meta activa en BD (el caso normal), se actualiza siempre —
+ * incluso si la categoría difiere — porque con una sola candidata no hay
+ * ambigüedad real de A CUÁL de varias actualizar.
+ *
+ * Extraída como función pura (testable sin mockear Supabase): dado el set de
+ * metas activas y la categoría de la meta de este turno, ¿cuál actualizar
+ * ('undefined' si ninguna — el turno inserta una fila nueva)?
  */
+export function seleccionarMetaActivaAActualizar<T extends { category: string | null }>(
+  activas: T[],
+  categoriaNueva: string,
+): T | undefined {
+  return activas.find((g) => g.category === categoriaNueva) ?? (activas.length === 1 ? activas[0] : undefined)
+}
+
 async function persistGoal(
   admin: SupabaseClient,
   userId: string,
@@ -150,27 +178,38 @@ async function persistGoal(
   try {
     const { data: activas, error: selErr } = await admin
       .from('goals')
-      .select('id, title')
+      .select('id, title, category')
       .eq('user_id', userId)
       .eq('status', 'active')
     if (selErr) throw selErr
 
-    const filas = (activas ?? []) as Array<{ id: string; title: string }>
-    const existente = filas.find((g) => g.title === goal.titulo)
+    const filas = (activas ?? []) as Array<{ id: string; title: string; category: string | null }>
     const targetDate = goal.plazoMeses !== undefined ? addMonthsISO(goal.plazoMeses) : null
     const category = inferGoalCategory(goal.titulo)
+    const existente = seleccionarMetaActivaAActualizar(filas, category)
 
     if (existente) {
+      // FIX 5 — el título SÍ se actualiza aquí (antes no hacía falta: el
+      // match exigía título idéntico, así que nunca cambiaba). Con el match
+      // ahora por categoría/única-activa, el título puede refinarse turno a
+      // turno sin generar una fila nueva — la fila existente debe reflejarlo.
       const { error } = await admin
         .from('goals')
-        .update({ target_amount: goal.monto, target_date: targetDate, category, updated_at: new Date().toISOString() })
+        .update({
+          title: goal.titulo,
+          target_amount: goal.monto,
+          target_date: targetDate,
+          category,
+          updated_at: new Date().toISOString(),
+        })
         .eq('id', existente.id)
       if (error) throw error
       return true
     }
 
-    // Meta nueva o con título distinto: archiva las activas previas (nunca
-    // se borran) e inserta la nueva como la única activa.
+    // Cambio EXPLÍCITO de meta (categoría distinta, con más de una activa en
+    // BD): archiva las activas previas (nunca se borran) e inserta la nueva
+    // como la única activa.
     const idsAArchivar = filas.map((g) => g.id)
     if (idsAArchivar.length > 0) {
       const { error: archErr } = await admin.from('goals').update({ status: 'paused' }).in('id', idsAArchivar)

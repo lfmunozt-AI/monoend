@@ -1,0 +1,23 @@
+{
+  "name": "mensaje_repetido_tres_veces",
+  "playbook": "PB1",
+  "language": "es",
+  "description": "FIX 4b (8ª tanda, testdev7) — el usuario repite (≥95% similar) su mensaje 3 veces seguidas. La señal `notaMensajeRepetido`/`esMensajeRepetido` compara el mensaje del USUARIO contra su propio mensaje anterior (más fiable que comparar las respuestas del modelo entre sí, que ya cubre `esRespuestaRepetida`/FIX C). T1 no tiene mensaje anterior (false). T2 y T3 SÍ deben marcar la repetición — el modelo (fixture, aquí simulado con 3 respuestas DISTINTAS a propósito) recibiría la nota para reconocer la repetición y preguntar qué no quedó resuelto.",
+  "turns": [
+    {
+      "user": "no me alcanza el dinero para pagar mis gastos este mes",
+      "fixtureResponse": "Entiendo que estás apretado este mes. ¿Cuánto ganas y cuánto gastas, aproximadamente?",
+      "expectMensajeRepetido": false
+    },
+    {
+      "user": "no me alcanza el dinero para pagar mis gastos este mes",
+      "fixtureResponse": "Veo que me repites lo mismo — puede que mi última respuesta no te sirviera. ¿Qué parte no quedó clara?",
+      "expectMensajeRepetido": true
+    },
+    {
+      "user": "no me alcanza el dinero para pagar mis gastos este mes",
+      "fixtureResponse": "De nuevo el mismo mensaje. Vamos con un solo dato a la vez: ¿cuánto ganas al mes?",
+      "expectMensajeRepetido": true
+    }
+  ]
+}

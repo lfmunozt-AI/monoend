@@ -21,7 +21,12 @@ import {
   pideRecorte,
   notaFaltaDesglose,
   detectarEventosICA,
+  notaReconciliacionDesglose,
+  respuestaAclaracionCanonica,
+  esMensajeRepetido,
+  notaMensajeRepetido,
 } from "./scenario";
+import { extraerDesgloseIrregular } from "./expenses";
 
 test("merge: TAE 9% real sobre un crédito previo → recalcula tae_es_referencia", () => {
   const prev = mergeScenario(
@@ -773,4 +778,110 @@ test("detectarEventosICA: TAE real nueva (antes de referencia) → tae_declarada
 test("detectarEventosICA: antes undefined (primer turno de la conversación) no rompe", () => {
   const despues = mergeScenario({}, { ingreso_mensual: 2300 });
   assert.deepEqual(detectarEventosICA(undefined, despues), ["dato_ingreso"]);
+});
+
+// ── FIX 3 (8ª tanda, testdev7) — ECO DE DESGLOSE Y RECONCILIACIÓN ────────────
+const MSG_TESTDEV7 =
+  "Diezmo_Vital 225, 700 Casa_Vital Supermercado_Vital 450, 120 Servicios_Vitales, " +
+  "Telecomunicaciones_Necesario 60 100 Pañales_Bebe_Vital, Colegio_Niño_Necesario 150 " +
+  "Transporte_Necesario 100, 80 Ropa_Posible, Ocio_Familiar 60 40 Farmacia_Vital, " +
+  "Suscripciones_Ocio 25 40 Gimnasio_Necesario, 60 Ahorro_Posible Gastos_Varios_Posible 40";
+
+test("caso real testdev7: el desglose se extrae, 0 huérfanos, discrepancia detectada contra el agregado PREVIO", () => {
+  const prev = { ingreso_mensual: 2300, gastos_mensuales: 2200, missing: [] };
+  const delta = extractScenarioDelta(MSG_TESTDEV7, "es", prev);
+  const suma = delta.gastos_detalle!.vitales + delta.gastos_detalle!.noVitales + delta.gastos_detalle!.desconocidos;
+  assert.equal(suma, 2250, `la suma del desglose debe ser 2250: ${JSON.stringify(delta.gastos_detalle)}`);
+
+  const huerfanos = detectarNumerosHuerfanos(MSG_TESTDEV7, delta);
+  assert.equal(huerfanos.extraccionIncompleta, false, `0 huérfanos esperados: ${JSON.stringify(huerfanos)}`);
+
+  const discrepancia = detectarDiscrepanciaGastos(delta, prev);
+  assert.equal(discrepancia.discrepancia, true, "2250 (desglose) ≠ 2200 (agregado previo) — trampa de 50€");
+  assert.equal(discrepancia.agregado, 2200);
+  assert.equal(discrepancia.suma, 2250);
+});
+
+test("caso real testdev7: notaReconciliacionDesglose echa la lista completa y ambos totales", () => {
+  const prev = { ingreso_mensual: 2300, gastos_mensuales: 2200, missing: [] };
+  const delta = extractScenarioDelta(MSG_TESTDEV7, "es", prev);
+  const discrepancia = detectarDiscrepanciaGastos(delta, prev);
+  const items = extraerDesgloseIrregular(MSG_TESTDEV7)!;
+  const nota = notaReconciliacionDesglose(items, discrepancia.suma!, discrepancia.agregado!);
+  assert.match(nota, /2250/);
+  assert.match(nota, /2200/);
+  assert.match(nota, /Diezmo Vital/);
+  assert.match(nota, /Cero cifras derivadas/);
+});
+
+test("detectarDiscrepanciaGastos: SIN prev y SIN agregado en el propio delta → sin discrepancia (nada que reconciliar)", () => {
+  const delta = extractScenarioDelta(MSG_TESTDEV7);
+  assert.deepEqual(detectarDiscrepanciaGastos(delta), { discrepancia: false });
+});
+
+test("deltaSinGastosPorDiscrepancia con discrepancia cross-turno: el agregado PREVIO sobrevive intacto hasta reconciliar", () => {
+  const prev = { ingreso_mensual: 2300, gastos_mensuales: 2200, missing: [] };
+  const delta = extractScenarioDelta(MSG_TESTDEV7, "es", prev);
+  const discrepancia = detectarDiscrepanciaGastos(delta, prev);
+  const deltaAPersistir = deltaSinGastosPorDiscrepancia(delta, discrepancia);
+  const estado = mergeScenario(prev, deltaAPersistir);
+  assert.equal(estado.gastos_mensuales, 2200, "el agregado previo (2200) NO se pisa hasta que el usuario aclare");
+  assert.equal(estado.ingreso_mensual, 2300, "el resto del estado no se toca");
+});
+
+// ── FIX 2c (8ª tanda, testdev7) — respuestaAclaracionCanonica ───────────────
+
+test("respuestaAclaracionCanonica: discrepancia → pregunta con AMBOS totales, prioriza sobre huérfanos", () => {
+  const huerfanos = { extraccionIncompleta: true, numerosHuerfanos: [60, 100] };
+  const discrepancia = { discrepancia: true, agregado: 2200, suma: 2250 };
+  const texto = respuestaAclaracionCanonica(huerfanos, discrepancia, "es");
+  assert.match(texto!, /2200/);
+  assert.match(texto!, /2250/);
+});
+
+test("respuestaAclaracionCanonica: solo huérfanos → pregunta con la lista de números", () => {
+  const huerfanos = { extraccionIncompleta: true, numerosHuerfanos: [60, 100] };
+  const discrepancia = { discrepancia: false };
+  const texto = respuestaAclaracionCanonica(huerfanos, discrepancia, "es");
+  assert.match(texto!, /60/);
+  assert.match(texto!, /100/);
+});
+
+test("respuestaAclaracionCanonica: nada ambiguo → null", () => {
+  const huerfanos = { extraccionIncompleta: false, numerosHuerfanos: [] };
+  const discrepancia = { discrepancia: false };
+  assert.equal(respuestaAclaracionCanonica(huerfanos, discrepancia, "es"), null);
+});
+
+test("respuestaAclaracionCanonica: respeta el idioma (pt/en)", () => {
+  const huerfanos = { extraccionIncompleta: false, numerosHuerfanos: [] };
+  const discrepancia = { discrepancia: true, agregado: 2200, suma: 2250 };
+  assert.match(respuestaAclaracionCanonica(huerfanos, discrepancia, "pt")!, /despesas/);
+  assert.match(respuestaAclaracionCanonica(huerfanos, discrepancia, "en")!, /expenses/);
+});
+
+// ── FIX 4b (8ª tanda, testdev7) — mensaje de usuario repetido ───────────────
+
+test("esMensajeRepetido: mensaje idéntico → true", () => {
+  const msg = "no me alcanza el dinero para pagar mis gastos este mes";
+  assert.equal(esMensajeRepetido(msg, msg), true);
+});
+
+test("esMensajeRepetido: mensajes claramente distintos → false", () => {
+  assert.equal(esMensajeRepetido("gano 2300 al mes", "mi meta es comprar un auto"), false);
+});
+
+test("esMensajeRepetido: sin mensaje anterior (primer turno) → false", () => {
+  assert.equal(esMensajeRepetido("hola", undefined), false);
+});
+
+test("notaMensajeRepetido: repetido → nota con instrucción de NO repetir y preguntar qué faltó", () => {
+  const msg = "no me alcanza el dinero para pagar mis gastos este mes";
+  const nota = notaMensajeRepetido(msg, msg);
+  assert.ok(nota);
+  assert.match(nota!, /NO repitas/i);
+});
+
+test("notaMensajeRepetido: no repetido → null", () => {
+  assert.equal(notaMensajeRepetido("gano 2300", "mi meta es un auto"), null);
 });
