@@ -144,12 +144,50 @@ frecuencia o severidad de la descrita, debe re-evaluarse.
    trazables en producción — a diferencia del harness, D1 SÍ lo detectaría en
    caliente si ocurriera con usuarios reales.
 
+## Batería G0 — persistencia real del turno (E2E, bloqueante) — añadido AG08, 2026-07-31
+
+Incidente (testdev5, 31/07 10:25-10:42): un usuario dio ingreso y gastos, el
+modelo los usó bien DENTRO del turno (los tenía en el historial de chat), pero
+`scenario_state` nunca se escribió en BD — el motor no tenía memoria real,
+solo la ilusión de tenerla mientras duraba la conversación. `goals` seguía en
+0 filas pese a una meta declarada, y `response_telemetry` llevaba semanas sin
+una fila (la migración que le añadió columnas nunca se ejecutó en Supabase).
+
+Ninguna batería existente lo habría detectado: G1a (`test:regression`) corre
+en memoria pura, nunca toca la BD; `smoke:db` (AG01) prueba un solo campo
+(TAE) de una sola tabla (`conversations`). Ninguno hace el ciclo
+escritura→re-lectura de las CUATRO tablas que un turno real toca
+(`conversations.scenario_state`, `goals`, `ica_history`, `response_telemetry`).
+
+```bash
+npm run test:e2e
+```
+
+`scripts/e2e-turn.ts` reproduce el diálogo real de testdev5 contra la BD real
+(vía `persistTurn`, `src/lib/persistence.ts` — el mismo código que
+`route.ts` invoca, nunca una simulación) y afirma sobre lo leído DESDE LA BD:
+ingreso/gastos persistidos pese a números huérfanos en el mismo mensaje,
+`missing` sin campos ya conocidos, una fila en `goals` para la meta
+declarada, eventos reales en `ica_history` (no solo `chat_consulta`), y una
+fila en `response_telemetry` por turno. Sin las env vars de Supabase
+(`NEXT_PUBLIC_SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY`) hace `SKIP` con
+`exit 0` — mismo contrato que `smoke:db` — así que en un entorno sin
+credenciales no bloquea, pero en CI/staging con credenciales, SÍ.
+
+**Umbral: `test:e2e` debe pasar en verde (o SKIP explícito documentado) antes
+de cualquier merge a `develop` y antes de promover a `main`.** Un SKIP en la
+propia máquina de un agente no exime de correrlo en un entorno CON
+credenciales antes del merge — responsable de esa verificación: quien haga el
+merge final (mismo protocolo que la ejecución de migraciones SQL, ver
+CLAUDE.md § Protocolo de migraciones).
+
 ## Cómo se ejecuta la batería completa
 
 ```bash
 npm run build                                  # compila limpio
 npm run test:regression                        # G1a — 0 rojos (salvo §3)
 npm run telemetry:review -- --date=YYYY-MM-DD   # G1b — 0 eventos G1b
+npm run test:e2e                                # G0 — persistencia real, bloqueante (ver arriba)
 ```
 
 El diálogo manual (§ anterior) no tiene comando: es una sesión real contra

@@ -27,14 +27,18 @@
  * ejecutaba The Commandments, así que el Mandamiento 9 (plan fantasma/
  * mutilado) no se podía probar aquí — ver `plan_mutilado.json`.
  *
- * 5ª TANDA (complemento) — dos señales nuevas se calculan tras el paso 2 y
- * gatean los pasos 6-7/11/12, igual que `pipeline.ts::applyEnforcement`:
- *   · extraccionAmbigua (PIEZA 1/2) — números huérfanos o un agregado de
- *     gastos que no reconcilia con su desglose: el delta financiero NUNCA se
- *     persiste (`deltaSeguro`) y `buildScenarioContext` no calcula derivadas.
- *   · esEmocional (PIEZA 5c) — tono emocional en el mensaje: desactiva
- *     grounding, honestidad de simulación, sustancia y cierre forzado, sea
- *     cual sea el carril — la calidez es del modelo, no de estas capas.
+ * 5ª TANDA (complemento) — esEmocional (PIEZA 5c) se calcula tras el paso 2 y
+ * gatea los pasos 6-7/11/12, igual que `pipeline.ts::applyEnforcement`: tono
+ * emocional en el mensaje desactiva grounding, honestidad de simulación,
+ * sustancia y cierre forzado, sea cual sea el carril — la calidez es del
+ * modelo, no de estas capas.
+ *
+ * 6ª TANDA (bug bloqueante, testdev5) — extraccionAmbigua (huérfanos o
+ * discrepancia de gastos) YA NO apaga el cálculo del turno: un huérfano es
+ * solo una señal para preguntar. Solo la discrepancia retiene su propio
+ * campo (gastos) hasta reconciliar (`deltaSinGastosPorDiscrepancia`); el
+ * resto del delta se persiste y `buildScenarioContext` calcula normal con lo
+ * que el estado realmente tiene.
  *
  * Los pasos 6-12 replican `route.ts` en orden, incluido el carrilado por turno
  * (Pieza 1-2 de AG08): META se salta la jaula de cifras y el cierre forzado
@@ -108,7 +112,7 @@ import {
   mergeScenario,
   detectarNumerosHuerfanos,
   detectarDiscrepanciaGastos,
-  deltaSeguro,
+  deltaSinGastosPorDiscrepancia,
   numerosCandidatos,
   type ScenarioState,
 } from '../src/lib/calculator/scenario'
@@ -425,21 +429,25 @@ async function runTurn(
   // financiero que registrar).
   const delta = carril === 'META' ? {} : extractScenarioDelta(turn.user, userLang, prevState)
 
-  // PIEZA 1/2 (5ª tanda) — "ningún dato entra al estado sin que el usuario lo
-  // vea": números huérfanos o un agregado de gastos que no reconcilia con su
-  // propio desglose prohíben calcular derivadas y persistir el delta financiero.
+  // PIEZA 1 (6ª tanda) — HUÉRFANOS MARCAN, NUNCA DESCARTAN. Un número suelto
+  // que no encaja en ningún campo es solo una señal para preguntar — nunca un
+  // motivo para descartar campos extraídos con confianza. Solo la
+  // discrepancia (agregado ≠ suma del desglose, el MISMO campo
+  // contradiciéndose) retiene su propio campo hasta reconciliar; el resto del
+  // delta se persiste igual — ver la misma lógica en route.ts.
   const huerfanos = detectarNumerosHuerfanos(turn.user, delta)
   const discrepancia = detectarDiscrepanciaGastos(delta)
   const extraccionAmbigua = huerfanos.extraccionIncompleta || discrepancia.discrepancia
+  const deltaAPersistir = deltaSinGastosPorDiscrepancia(delta, discrepancia)
 
-  const state = mergeScenario(prevState, extraccionAmbigua ? deltaSeguro(delta) : delta)
+  const state = mergeScenario(prevState, deltaAPersistir)
   // Todo número candidato del mensaje queda autorizado para el guardarraíl —
   // ver la misma lógica en route.ts.
-  const valoresAmbiguos = [
+  const valoresExtra = [
     ...numerosCandidatos(turn.user),
     ...(discrepancia.suma !== undefined ? [discrepancia.suma] : []),
   ]
-  const verified = buildScenarioContext(state, turn.user, { extraccionAmbigua, valoresAmbiguos })
+  const verified = buildScenarioContext(state, turn.user, { valoresExtra })
 
   // PIEZA 5c (complemento, 5ª tanda) — tono emocional: reduce la autoridad del
   // enforcement (grounding/sustancia/cierre se desactivan), sea cual sea el

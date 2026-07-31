@@ -3,7 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { classifyExpense, classifyExpenses } from "./expenses";
+import { classifyExpense, classifyExpenses, parseExpenseList } from "./expenses";
 
 test("clasificación ES: vitales, no vitales, desconocido", () => {
   assert.equal(classifyExpense("luz"), "vital");
@@ -83,4 +83,31 @@ test("lista vacía → todo 0, recorte 0", () => {
   assert.equal(r.vitales.total, 0);
   assert.equal(r.noVitales.total, 0);
   assert.equal(r.recortePropuesto, 0);
+});
+
+// ── BUG BLOQUEANTE (6ª tanda, testdev5) — nombres que terminan en conector ───
+// "...dudo entre 200000, 300000 o 150000" (candidatas de precio de una meta
+// sin decidir) se colaba como DOS ítems de gasto: {"dudo entre": 200000} y
+// {"o": 150000} — el detalle de gastos se recalculaba mal (BUG 1: el detalle
+// manda sobre el agregado) sobre datos que NUNCA fueron gastos.
+
+test("parseExpenseList: 'dudo entre X, Y o Z' NO se confunde con una lista de gastos", () => {
+  const msg = "y ademas estoy pensando en comprar una casa, dudo entre 200000, 300000 o 150000";
+  assert.deepEqual(parseExpenseList(msg), []);
+});
+
+test("parseExpenseList: nombres reales que SÍ terminan en palabra normal siguen funcionando", () => {
+  const msg = "netflix 15, luz 80, agua 30";
+  const items = parseExpenseList(msg);
+  assert.equal(items.length, 3);
+  assert.deepEqual(items.map((i) => i.amount).sort((a, b) => a - b), [15, 30, 80]);
+});
+
+test("parseExpenseList: 'compras en supermercado 400, luz 50' — el nombre puede contener una preposición EN MEDIO", () => {
+  // La exclusión es solo cuando el nombre TERMINA en conector — "en
+  // supermercado" no termina en preposición, sigue siendo un nombre válido.
+  const items = parseExpenseList("compras en supermercado 400, luz 50");
+  const supermercado = items.find((i) => i.name.includes("supermercado"));
+  assert.ok(supermercado, `debería reconocer el nombre con preposición interna: ${JSON.stringify(items)}`);
+  assert.equal(supermercado?.amount, 400);
 });
