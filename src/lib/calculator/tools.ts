@@ -5,8 +5,8 @@
 
 import type { ToolDef } from "../llm";
 import type { Language } from "../language";
-import { classifyExpenses, type ExpenseItem } from "./expenses";
-import { extractScenarioDelta, type ScenarioState, type CreditoState, type MetaState } from "./scenario";
+import { classifyExpenses, classifyExpense, type ExpenseItem } from "./expenses";
+import { extractScenarioDelta, type ScenarioState, type CreditoState, type MetaState, type GastoItemEntry } from "./scenario";
 import { TAE_REFERENCIA } from "./orchestrator";
 
 /**
@@ -134,6 +134,12 @@ export function toolArgsToScenarioDelta(args: Record<string, unknown>): Partial<
         desconocidos: cls.desconocidos.total,
       };
       delta.gastos_es_detalle = true;
+      // PIEZA 5 (8ª tanda) — conserva cada partida individual también cuando
+      // viene por tool_call, no solo por el fallback regex. `turn: 0` es un
+      // placeholder — `mergeScenario` lo reescribe al acumular.
+      delta.gastos_items = items.map(
+        (i): GastoItemEntry => ({ name: i.name, amount: i.amount, category: classifyExpense(i.name), source: "tool", turn: 0 }),
+      );
     }
   }
 

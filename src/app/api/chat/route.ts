@@ -28,6 +28,7 @@ import {
   numerosCandidatos,
   notaFaltaDesglose,
   detectarEventosICA,
+  analizarExtraccion,
   type ScenarioState,
 } from '@/lib/calculator/scenario'
 import { registrarDatosFinancieros, resolveDelta, buildToolResult } from '@/lib/calculator/tools'
@@ -387,8 +388,15 @@ export async function POST(request: Request) {
   // resto del delta (ingreso, crédito, meta…) se persiste igualmente.
   const huerfanos = detectarNumerosHuerfanos(cleanMessage, delta)
   const discrepancia = detectarDiscrepanciaGastos(delta)
-  const extraccionAmbigua = huerfanos.extraccionIncompleta || discrepancia.discrepancia
-  const notaAmbigua = extraccionAmbigua ? notaExtraccionAmbigua(huerfanos, discrepancia) : null
+  // PIEZA 1/3 (8ª tanda) — honestidad de la extracción: además de huérfanos y
+  // discrepancia, ¿hay un ítem de la lista de gastos sospechoso de pegado
+  // ("60 100" leído como 60.100)? `extraction_status` resume las cuatro
+  // señales en un solo valor para telemetría/depuración — no sustituye a
+  // ninguna, solo las agrupa (ver `analizarExtraccion`).
+  const analisis = analizarExtraccion(cleanMessage, delta)
+  const itemSospechoso = analisis.itemSospechoso
+  const extraccionAmbigua = huerfanos.extraccionIncompleta || discrepancia.discrepancia || !!itemSospechoso
+  const notaAmbigua = extraccionAmbigua ? notaExtraccionAmbigua(huerfanos, discrepancia, itemSospechoso) : null
 
   if (extraccionAmbigua) {
     console.warn('[chat] extraccion_ambigua', JSON.stringify({
@@ -397,6 +405,8 @@ export async function POST(request: Request) {
       carril,
       numeros_huerfanos: huerfanos.numerosHuerfanos,
       discrepancia_gastos: discrepancia.discrepancia,
+      item_sospechoso: itemSospechoso,
+      extraction_status: analisis.extraction_status,
     }))
   }
 
@@ -408,6 +418,9 @@ export async function POST(request: Request) {
   // el cálculo entero.
   const deltaAPersistir = deltaSinGastosPorDiscrepancia(delta, discrepancia)
   const scenario = mergeScenario(seed, deltaAPersistir)
+  // PIEZA 1 (8ª tanda) — se expone en el estado, no solo en el resultado de
+  // esta llamada: el turno SIGUIENTE puede ver si el anterior fue dudoso.
+  scenario.extraction_status = analisis.extraction_status
   // Todo número candidato del mensaje (no solo los huérfanos) queda autorizado
   // para el guardarraíl de cifras: el modelo necesita poder citar cualquiera
   // de ellos al preguntar ("¿tu ingreso ronda los 2.000 € o los 2.500 €?",
@@ -746,6 +759,15 @@ export async function POST(request: Request) {
       extraccionIncompleta: huerfanos.extraccionIncompleta,
       numerosHuerfanos: huerfanos.numerosHuerfanos,
       discrepanciaGastos: discrepancia.discrepancia,
+      // PIEZA 7 (8ª tanda) — telemetría de depuración de extracción: cierra el
+      // bucle de "arreglar a ciegas" dejando ver, por turno real, qué devolvió
+      // la extracción y cómo cambió el escenario. `deltaAPersistir` (no el
+      // `delta` crudo) porque es lo que de verdad se usó este turno.
+      extractionStatus: analisis.extraction_status,
+      deltaRaw: deltaAPersistir as unknown as Record<string, unknown>,
+      previousScenario: seed as unknown as Record<string, unknown>,
+      mergedScenario: scenarioAPersistir as unknown as Record<string, unknown>,
+      expenseItems: (deltaAPersistir.gastos_items ?? null) as unknown as Array<Record<string, unknown>> | null,
     },
   })
 

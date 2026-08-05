@@ -9,7 +9,7 @@
 // extrae — mejor no tocar el estado que corromperlo. Código PURO, edge-safe.
 
 import { parseDigitAmount, findNumberMentions, dedupeOverlaps, type NumberMention } from "../guardrail/numbers";
-import { parseExpenseList, classifyExpenses } from "./expenses";
+import { parseExpenseList, parseExpenseListDetallado, classifyExpenses, classifyExpense, type ItemSospechoso } from "./expenses";
 import type { Language } from "../language";
 import { tieneSenalFinanciera, type Carril } from "../guardrail/turn-classifier";
 
@@ -18,6 +18,45 @@ export interface GastosDetalle {
   noVitales: number;
   desconocidos: number;
 }
+
+/**
+ * PIEZA 5 (8ª tanda) — evidencia INDIVIDUAL de cada partida de gasto, para no
+ * perder la trazabilidad que `gastos_detalle` (solo totales por grupo) no
+ * conserva. Se AÑADE, no sustituye: `gastos_detalle` sigue existiendo con la
+ * misma forma porque el orquestador y la calculadora lo consumen tal cual.
+ * Flujo correcto: items → clasificación → buckets (nunca al revés).
+ */
+export interface GastoItemEntry {
+  name: string;
+  amount: number;
+  category: "vital" | "no_vital" | "desconocido";
+  /** De dónde vino este ítem este turno: regex determinista o tool_call del LLM. */
+  source: "regex" | "tool";
+  /** Turno (1-indexado) en el que se aportó, para poder auditar cuándo se dijo qué. */
+  turn: number;
+}
+
+/**
+ * PIEZA 1 (8ª tanda) — honestidad del extractor sobre su propia confianza.
+ * NUNCA degrada globalmente: la afectación es SIEMPRE por campo (ver
+ * `notaExtraccionAmbigua`/`deltaSinGastosPorDiscrepancia` — huérfanos y
+ * discrepancias ya solo tocan el campo implicado, no el turno entero).
+ *   COMPLETE   — todo número relevante quedó asignado, 0 huérfanos relevantes.
+ *   PARTIAL    — hay campos extraídos con confianza Y huérfanos relevantes sin
+ *                asignar. Los campos extraídos SÍ se usan (V1); se pregunta
+ *                por los huérfanos citándolos.
+ *   AMBIGUOUS  — un número podría ir a ≥2 campos, o hay un ítem sospechoso de
+ *                pegado. El campo afectado no se cierra sin confirmar — pero
+ *                en una lista de gastos, con una lectura estructural
+ *                plausible, el ítem SÍ se usa (mismo principio V1, aplicado a
+ *                nivel de partida): el eco solo pregunta.
+ *   INVALID    — valor imposible (cero de placeholder, negativo). Ese campo
+ *                queda MISSING y se pregunta.
+ */
+export type ExtractionStatus = "COMPLETE" | "PARTIAL" | "AMBIGUOUS" | "INVALID";
+
+/** PIEZA 6 (8ª tanda) — confianza por campo. Ver `actualizarFactStatus`. */
+export type FactStatus = "MISSING" | "PARSED" | "CONFIRMED";
 
 export interface CreditoState {
   /**
@@ -154,6 +193,22 @@ export interface ScenarioState {
    * RECORTE (qué partida bajar y cuánto) — nunca para calcular viabilidad.
    */
   tiene_detalle_gastos?: boolean;
+  /**
+   * PIEZA 5 (8ª tanda) — evidencia acumulada de cada partida de gasto vista en
+   * cualquier turno (se ACUMULA, nunca se pisa). `gastos_detalle` (buckets)
+   * sigue siendo lo que consume el orquestador; esto es la traza de origen.
+   */
+  gastos_items?: GastoItemEntry[];
+  /** PIEZA 1 (8ª tanda) — honestidad del último turno de extracción. No degrada nada por sí solo. */
+  extraction_status?: ExtractionStatus;
+  /** PIEZA 6 (8ª tanda) — confianza por campo (ver `FactStatus`). */
+  factStatus?: Record<string, FactStatus>;
+  /**
+   * PIEZA 6 (8ª tanda) — campos que el ECO de este turno enunció, para que el
+   * merge del turno SIGUIENTE sepa qué promover a CONFIRMED si el usuario no
+   * lo corrige.
+   */
+  eco_pendiente?: { fields: string[] };
   /** Qué falta para completar el playbook activo. Recalculado en cada merge. */
   missing: string[];
 }
@@ -187,7 +242,12 @@ const GASTO_CTX = /\b(gasto|gastos|gasta|despesas?|spend|expenses?)\b/;
 // directamente el primer ítem del detalle, sin agregado propio — caso A).
 const GASTO_AGREGADO_DETALLE_RE = /\b(?:gastos?|despesas?|expenses?)\b\s*[:=]?\s*(\d[\d.,]*)\s*:/;
 const PRECIO_CTX = /\b(precio|cuesta|vale|financiar|credito|prestamo|emprestimo|loan|financ|carro|coche|auto|casa|piso|vivienda)\b/;
-const AMOUNT = /(\d[\d.,]*)/;
+// PIEZA 3 (8ª tanda) — misma convención de miles-con-espacio que el parser
+// general (`guardrail/numbers.ts`, DIGIT_RE): "2 500" es 2500, no "2" seguido
+// de un huérfano "500" (caso 10 — NO se toca la regla general, solo se hace
+// que esta cifra la use también). La alternativa de espacio va PRIMERO
+// (probada antes que el dígito llano) y exige grupos de EXACTAMENTE 3 dígitos.
+const AMOUNT = /(\d{1,3}(?: \d{3})+(?:,\d+)?|\d[\d.,]*)/;
 
 // PIEZA 1 (5ª tanda) — MARCADOR ANUAL. "gano 27600 al año" NO es "gano 27600
 // al mes": asumir mensual sin más es exactamente el tipo de suposición que el
@@ -215,12 +275,22 @@ function esCifraAnual(n: string, ctxRe: RegExp, matchAmount: RegExpExecArray): b
 // de los dos se asigna: ambos quedan como huérfanos genuinos para que el
 // detector (más abajo) pida cuál es el correcto.
 const RANGO_AFTER_RE = /^\s*(?:-|y|o|a|to|or|hasta)\s*\d/;
+// PIEZA 1 (8ª tanda) — caso 12: "gasto 2200 y 450" NO es un rango — es un
+// agregado limpio (2200) seguido de un número suelto (450, huérfano
+// genuino). Sin este marcador de apertura, CUALQUIER "número CONECTOR
+// número" tras la keyword se leía como rango y descartaba AMBOS valores —
+// incluido el agregado, que sí se sabe con confianza. Un rango real siempre
+// se ABRE con "entre"/"desde"/"between" ("gano ENTRE 2000 y 2500"); sin esa
+// apertura, la "y"/"o" que sigue es solo el resto de la frase.
+const RANGO_ABRE_RE = /\b(?:entre|desde|between|from)\s*$/i;
 
-/** ¿El número capturado es la primera mitad de un rango ("X y/a/o/- Y")? */
+/** ¿El número capturado es la primera mitad de un rango ("entre X y/a/o/- Y")? */
 function esRango(n: string, ctxRe: RegExp, matchAmount: RegExpExecArray): boolean {
   const base = n.search(ctxRe);
-  const after = n.slice(base + matchAmount.index + matchAmount[0].length, base + matchAmount.index + matchAmount[0].length + 20);
-  return RANGO_AFTER_RE.test(after);
+  const matchStart = base + matchAmount.index;
+  const after = n.slice(matchStart + matchAmount[0].length, matchStart + matchAmount[0].length + 20);
+  const before = n.slice(Math.max(0, matchStart - 15), matchStart);
+  return RANGO_AFTER_RE.test(after) && RANGO_ABRE_RE.test(before);
 }
 
 // Meta.
@@ -271,6 +341,19 @@ function toMonths(value: number, unit: string): number {
   const u = norm(unit);
   if (/^(a[ñn]os?|anos?|years?)$/.test(u)) return Math.round(value * 12);
   return Math.round(value);
+}
+
+/**
+ * PIEZA 5 (8ª tanda) — envuelve ítems ya parseados (por regex o por la tool
+ * del LLM) como `GastoItemEntry` para este turno. `turn` queda en 0: es un
+ * placeholder que `mergeScenario` SIEMPRE reescribe al acumular (necesita ver
+ * el historial previo para saber qué turno toca).
+ */
+function itemsAGastoItemEntries(
+  items: Array<{ name: string; amount: number }>,
+  source: "regex" | "tool",
+): GastoItemEntry[] {
+  return items.map((i) => ({ name: i.name, amount: i.amount, category: classifyExpense(i.name), source, turn: 0 }));
 }
 
 /**
@@ -373,6 +456,7 @@ export function extractScenarioDelta(
         desconocidos: cls.desconocidos.total,
       };
       delta.gastos_es_detalle = true;
+      delta.gastos_items = itemsAGastoItemEntries(detailItems, "regex");
     }
   } else if (esLista) {
     // Lista desglosada: gastos_detalle con totales por grupo. NO se toca
@@ -384,6 +468,10 @@ export function extractScenarioDelta(
       desconocidos: cls.desconocidos.total,
     };
     delta.gastos_es_detalle = true;
+    // PIEZA 5 (8ª tanda) — conserva cada partida individual (name, amount,
+    // categoría), no solo los totales por grupo. Flujo: items → clasificación
+    // → buckets (los buckets de arriba se derivan de los mismos `listItems`).
+    delta.gastos_items = itemsAGastoItemEntries(listItems, "regex");
   } else if (GASTO_CTX.test(n)) {
     // Agregado en una sola cifra ("mis gastos son 1500").
     const a = AMOUNT.exec(n.slice(n.search(GASTO_CTX)));
@@ -444,10 +532,15 @@ export function extractScenarioDelta(
 // ("3 hijos", "2 personas"). "años"/"meses" YA quedan fuera vía duración
 // (unidad de tiempo, ver TIEMPO_AFTER_RE) — ni un plazo de crédito ni una edad
 // son dinero.
+//
+// PIEZA 2 (8ª tanda) — vocabulario ampliado: horas, kg, m²/m2, habitaciones,
+// edad, grados (ES/PT/EN). Test obligatorio (caso 11): "gano 2300, tengo 43
+// años, 2 hijos, gasto 2200" → COMPLETE, sin preguntar por 43 ni 2 — sin este
+// vocabulario el sistema se paraliza pidiendo la edad.
 const SUSTANTIVO_NO_MONETARIO_AFTER_RE =
-  /^\s*(?:hijos?|hijas?|filhos?|filhas?|kids?|child(?:ren)?|ni[ñn]os?|personas?|people|veces|times)\b/;
+  /^\s*(?:hijos?|hijas?|filhos?|filhas?|kids?|child(?:ren)?|ni[ñn]os?|personas?|people|veces|times|kg|kgs|kilos?|m2|m²|habitaciones?|hab|quartos?|rooms?|edad|idade|age|grados?|graus|degrees?)\b/;
 const TIEMPO_AFTER_RE =
-  /^\s*(?:a[ñn]os?|anos?|years?|meses|mes|months?|d[ií]as?|days?|semanas?|weeks?)\b/;
+  /^\s*(?:a[ñn]os?|anos?|years?|meses|mes|months?|d[ií]as?|days?|semanas?|weeks?|horas?|hours?)\b/;
 
 /** ¿`m` es un enumerador de lista ("1. Ajustar…")? Mismo criterio que validate.ts. */
 function esEnumeradorDeLista(text: string, m: NumberMention): boolean {
@@ -521,6 +614,22 @@ function valoresAsignadosEnDelta(message: string, delta: Partial<ScenarioState>)
 export interface ExtraccionIncompletaResult {
   extraccionIncompleta: boolean;
   numerosHuerfanos: number[];
+  /**
+   * PIEZA 2 (8ª tanda) — números del mensaje que el detector VIO pero
+   * CLASIFICÓ como NO RELEVANTES (edad, nº de hijos, duración, unidades…):
+   * se ignoran y NUNCA degradan `extraction_status` — informativo, para
+   * telemetría/depuración, no para preguntar por ellos.
+   */
+  numerosNoRelevantes: number[];
+}
+
+/** ¿Por qué `m` NO es una cifra financiera candidata? `null` si SÍ lo es. */
+function razonNoRelevante(text: string, m: NumberMention): "tiempo" | "sustantivo" | null {
+  if (esEnumeradorDeLista(text, m)) return null; // ni siquiera es un número candidato real.
+  const after = text.slice(m.end, m.end + 20);
+  if (TIEMPO_AFTER_RE.test(after)) return "tiempo";
+  if (SUSTANTIVO_NO_MONETARIO_AFTER_RE.test(after)) return "sustantivo";
+  return null;
 }
 
 /**
@@ -535,7 +644,10 @@ export function detectarNumerosHuerfanos(
   const candidatos = numerosCandidatos(message);
   const asignados = valoresAsignadosEnDelta(message, delta);
   const numerosHuerfanos = candidatos.filter((v) => !coincideConAsignado(v, asignados));
-  return { extraccionIncompleta: numerosHuerfanos.length > 0, numerosHuerfanos };
+  const numerosNoRelevantes = dedupeOverlaps(findNumberMentions(message))
+    .filter((m) => razonNoRelevante(message, m) !== null)
+    .map((m) => m.value);
+  return { extraccionIncompleta: numerosHuerfanos.length > 0, numerosHuerfanos, numerosNoRelevantes };
 }
 
 // ── PIEZA 2 (5ª tanda) — RECONCILIACIÓN ARITMÉTICA ───────────────────────────
@@ -591,6 +703,7 @@ export function detectarDiscrepanciaGastos(delta: Partial<ScenarioState>): Discr
 export function notaExtraccionAmbigua(
   huerfanos: ExtraccionIncompletaResult,
   discrepancia: DiscrepanciaGastosResult,
+  itemSospechoso?: ItemSospechoso | null,
 ): string | null {
   if (discrepancia.discrepancia) {
     return (
@@ -598,6 +711,17 @@ export function notaExtraccionAmbigua(
       `el detalle suma ${discrepancia.suma} €. Pregunta cuál es el correcto antes de dar una cifra de ` +
       "gastos o cualquier derivada que dependa de ellos (sobrante, capacidad, viabilidad de una cuota). " +
       "El resto de los datos que ya tienes (ingreso, meta, crédito…) SÍ los puedes usar con normalidad."
+    );
+  }
+  // PIEZA 6 (8ª tanda) — ítem sospechoso de pegado: más concreto que un
+  // huérfano genérico (ya sabemos EXACTAMENTE qué partida dudar), así que
+  // tiene prioridad sobre el aviso genérico de huérfanos. El resto de
+  // partidas SÍ se usan con normalidad (V1) — solo se pregunta por esta.
+  if (itemSospechoso) {
+    return (
+      `POSIBLE CIFRA PEGADA: ${itemSospechoso.sugerencia} Pregunta con calidez para confirmar la lectura ` +
+      "correcta antes de dar por cerrado el desglose de gastos. El resto de las partidas que sí quedaron " +
+      "claras las puedes usar con normalidad."
     );
   }
   if (huerfanos.extraccionIncompleta) {
@@ -610,6 +734,91 @@ export function notaExtraccionAmbigua(
     );
   }
   return null;
+}
+
+// ── PIEZA 1 (8ª tanda) — EXTRACTION_STATUS ───────────────────────────────────
+//
+// "Antes de decir que el usuario se contradijo, el sistema debe preguntarse si
+// lo leyó bien." Resume en UN valor cuál de las señales ya existentes (huérfanos,
+// discrepancia, ítem sospechoso, valor inválido) aplica a este turno — NUNCA
+// degrada nada por sí solo: la afectación real ya la deciden esas mismas
+// piezas (huérfanos no descartan el delta — V1; discrepancia solo retiene
+// gastos; item_sospechoso solo pregunta, el ítem se usa igual).
+
+// Campos con contexto de alta confianza donde un CERO explícito es un
+// placeholder rechazable (V8), no un dato real. No cubre negativos: el
+// parser de montos (`AMOUNT`) no captura signo, así que un negativo nunca
+// llega a `delta` — no hace falta detectarlo aparte.
+const CAMPOS_CON_CONTEXTO_CERO: Array<[string, RegExp]> = [
+  ["ingreso_mensual", INGRESO_CTX],
+  ["gastos_mensuales", GASTO_CTX],
+];
+
+/**
+ * PIEZA 1 — campos con un CERO explícito mencionado en contexto financiero
+ * ("gano 0", "gasto 0 este mes"). Un cero así NUNCA se persiste (V8, ya
+ * vigente vía los filtros `> 0` de `extractScenarioDelta`) — esto solo hace
+ * VISIBLE por qué ese campo se quedó sin asignar, en vez de fallar en
+ * silencio como un huérfano genérico.
+ */
+export function detectarValoresInvalidos(message: string): string[] {
+  const n = norm(message);
+  const invalidos: string[] = [];
+  for (const [campo, ctxRe] of CAMPOS_CON_CONTEXTO_CERO) {
+    if (!ctxRe.test(n)) continue;
+    const m = AMOUNT.exec(n.slice(n.search(ctxRe)));
+    if (!m) continue;
+    const v = parseDigitAmount(m[1]);
+    if (Number.isFinite(v) && v <= 0) invalidos.push(campo);
+  }
+  return invalidos;
+}
+
+export interface ExtractionStatusInputs {
+  huerfanos: ExtraccionIncompletaResult;
+  discrepancia: DiscrepanciaGastosResult;
+  itemSospechoso: ItemSospechoso | null;
+  camposInvalidos: string[];
+}
+
+/**
+ * PIEZA 1 — el resumen de una línea que el resto del sistema (eco, telemetría)
+ * puede leer sin tener que re-derivar las cuatro señales. Prioridad: INVALID
+ * (un campo quedó MISSING por un valor imposible) > AMBIGUOUS (discrepancia o
+ * pegado — más concreto) > PARTIAL (huérfanos genéricos) > COMPLETE.
+ */
+export function computeExtractionStatus(inputs: ExtractionStatusInputs): ExtractionStatus {
+  if (inputs.camposInvalidos.length > 0) return "INVALID";
+  if (inputs.discrepancia.discrepancia || inputs.itemSospechoso) return "AMBIGUOUS";
+  if (inputs.huerfanos.extraccionIncompleta) return "PARTIAL";
+  return "COMPLETE";
+}
+
+export interface AnalisisExtraccion {
+  extraction_status: ExtractionStatus;
+  huerfanos: ExtraccionIncompletaResult;
+  discrepancia: DiscrepanciaGastosResult;
+  itemSospechoso: ItemSospechoso | null;
+  camposInvalidos: string[];
+}
+
+/**
+ * PIEZA 1 — punto de entrada ÚNICO para analizar la honestidad de la
+ * extracción de este turno: corre las cuatro señales (huérfanos,
+ * discrepancia, ítem sospechoso de pegado, valores inválidos) y resume el
+ * resultado en `extraction_status`. Puro; no muta nada — el llamante
+ * (route.ts) decide qué hacer con cada señal (igual que ya hacía antes de
+ * existir esta función, que solo las agrupa).
+ */
+export function analizarExtraccion(message: string, delta: Partial<ScenarioState>): AnalisisExtraccion {
+  const huerfanos = detectarNumerosHuerfanos(message, delta);
+  const discrepancia = detectarDiscrepanciaGastos(delta);
+  const itemSospechoso = delta.gastos_es_detalle
+    ? parseExpenseListDetallado(message, delta.gastos_mensuales).itemSospechoso
+    : null;
+  const camposInvalidos = detectarValoresInvalidos(message);
+  const extraction_status = computeExtractionStatus({ huerfanos, discrepancia, itemSospechoso, camposInvalidos });
+  return { extraction_status, huerfanos, discrepancia, itemSospechoso, camposInvalidos };
 }
 
 /**
@@ -688,6 +897,79 @@ function round2(n: number): number {
   return Math.round((n + Number.EPSILON) * 100) / 100;
 }
 
+// ── PIEZA 6 (8ª tanda) — FACT_STATUS: EL ECO COMO PROMOTOR DE CONFIANZA ──────
+//
+// Por campo: MISSING (nunca se ha visto) → PARSED (extraído, confianza media)
+// → CONFIRMED (el eco lo enunció y el usuario NO lo corrigió el turno
+// siguiente). El eco YA EXISTE (`renderDatosRecienEntendidos`); esto lo
+// convierte en el MECANISMO de promoción — el sistema entrega los datos, la
+// frase la redacta el modelo. CONFLICT/ASSUMED/SUPERSEDED son de la tanda
+// siguiente: aquí solo hay ida (PARSED→CONFIRMED) y reset ante una corrección
+// (un valor nuevo y distinto vuelve a PARSED, nunca se queda CONFIRMED a
+// ciegas).
+
+/** Los ocho campos escalares que llevan fact_status. */
+function valorCampo(s: Partial<ScenarioState> | undefined, campo: string): unknown {
+  switch (campo) {
+    case "ingreso_mensual": return s?.ingreso_mensual;
+    case "gastos_mensuales": return s?.gastos_mensuales;
+    case "credito_monto": return s?.credito?.monto;
+    case "credito_plazo": return s?.credito?.plazo_meses;
+    case "credito_tae": return s?.credito?.tae_pct;
+    case "meta_monto": return s?.meta?.monto;
+    case "meta_plazo": return s?.meta?.plazo_meses;
+    case "meta_titulo": return s?.meta?.titulo;
+    default: return undefined;
+  }
+}
+
+/** ¿Qué campos escalares trae EXPLÍCITAMENTE este delta (para fact_status y para el eco_pendiente del turno)? */
+function camposDelDelta(delta: Partial<ScenarioState>): string[] {
+  const campos: string[] = [];
+  if (delta.ingreso_mensual !== undefined) campos.push("ingreso_mensual");
+  if (delta.gastos_mensuales !== undefined) campos.push("gastos_mensuales");
+  if (delta.credito?.monto !== undefined) campos.push("credito_monto");
+  if (delta.credito?.plazo_meses !== undefined) campos.push("credito_plazo");
+  if (delta.credito?.tae_pct !== undefined) campos.push("credito_tae");
+  if (delta.meta?.monto !== undefined) campos.push("meta_monto");
+  if (delta.meta?.plazo_meses !== undefined) campos.push("meta_plazo");
+  if (delta.meta?.titulo !== undefined) campos.push("meta_titulo");
+  return campos;
+}
+
+/**
+ * Calcula el `factStatus` tras este merge. `base` ya tiene los valores
+ * FINALES resueltos (para poder comparar "¿sigue siendo el mismo dato que ya
+ * estaba CONFIRMED?"); `prev`/`delta` traen el ANTES y lo que llegó este turno.
+ */
+function actualizarFactStatus(
+  prev: Partial<ScenarioState> | undefined,
+  delta: Partial<ScenarioState>,
+  base: ScenarioState,
+): Record<string, FactStatus> {
+  const status: Record<string, FactStatus> = { ...(prev?.factStatus ?? {}) };
+  const camposTocados = camposDelDelta(delta);
+
+  // Promoción: un campo que el ECO del turno anterior enunció (`eco_pendiente`)
+  // y que este turno NO trajo un valor nuevo para él → el usuario no lo
+  // corrigió → sube de PARSED a CONFIRMED.
+  for (const campo of prev?.eco_pendiente?.fields ?? []) {
+    if (status[campo] === "PARSED" && !camposTocados.includes(campo)) {
+      status[campo] = "CONFIRMED";
+    }
+  }
+
+  // Extracción nueva este turno → PARSED, salvo que sea una REAFIRMACIÓN
+  // exacta de un valor ya CONFIRMED (entonces se queda CONFIRMED — repetir lo
+  // ya confirmado no es una corrección).
+  for (const campo of camposTocados) {
+    const yaConfirmado = status[campo] === "CONFIRMED" && valorCampo(prev, campo) === valorCampo(base, campo);
+    if (!yaConfirmado) status[campo] = "PARSED";
+  }
+
+  return status;
+}
+
 /**
  * Fusiona el estado previo con un delta. Merge por campo, ÚLTIMO gana. El crédito
  * se fusiona a nivel de subcampo (una TAE nueva no borra el monto). Si llega una
@@ -739,6 +1021,17 @@ export function mergeScenario(
     base.gastos_mensuales = round2(
       delta.gastos_detalle.vitales + delta.gastos_detalle.noVitales + delta.gastos_detalle.desconocidos,
     );
+  }
+
+  // PIEZA 5 (8ª tanda) — gastos_items se ACUMULA (nunca se pisa): cada turno
+  // que aporta partidas se ANOTA con su propio número de turno, para poder
+  // auditar cuándo se dijo qué. El turno es 1-indexado y se deriva del máximo
+  // ya visto — `extractScenarioDelta`/`toolArgsToScenarioDelta` no conocen el
+  // historial, así que dejan `turn: 0` como placeholder.
+  if (delta.gastos_items !== undefined && delta.gastos_items.length > 0) {
+    const turnoAnterior = base.gastos_items?.reduce((max, i) => Math.max(max, i.turn), 0) ?? 0;
+    const nuevos = delta.gastos_items.map((item) => ({ ...item, turn: turnoAnterior + 1 }));
+    base.gastos_items = [...(base.gastos_items ?? []), ...nuevos];
   }
 
   // ── PIEZA 6 — META ACTIVA ÚNICA ─────────────────────────────────────────────
@@ -825,6 +1118,14 @@ export function mergeScenario(
   // recortar), y el prompt no debe adivinar cuál de las dos tiene.
   base.tiene_agregado_gastos = base.gastos_mensuales !== undefined;
   base.tiene_detalle_gastos = base.gastos_detalle !== undefined;
+
+  // PIEZA 6 (8ª tanda) — FACT_STATUS: el eco como promotor de confianza. Se
+  // calcula al final, con `base` ya resuelto (necesita el valor FINAL de cada
+  // campo para poder comparar "¿es el mismo dato que ya estaba confirmado, o
+  // uno nuevo que aún no se confirmó?").
+  base.factStatus = actualizarFactStatus(prev, delta, base);
+  const camposTocados = camposDelDelta(delta);
+  base.eco_pendiente = camposTocados.length > 0 ? { fields: camposTocados } : undefined;
 
   base.missing = computeMissing(base);
   return base;
