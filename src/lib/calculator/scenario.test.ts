@@ -3,6 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
+import { toolArgsToScenarioDelta } from "./tools";
 import {
   extractScenarioDelta,
   mergeScenario,
@@ -21,6 +22,8 @@ import {
   pideRecorte,
   notaFaltaDesglose,
   detectarEventosICA,
+  analizarExtraccion,
+  computeExtractionStatus,
 } from "./scenario";
 
 test("merge: TAE 9% real sobre un crédito previo → recalcula tae_es_referencia", () => {
@@ -773,4 +776,126 @@ test("detectarEventosICA: TAE real nueva (antes de referencia) → tae_declarada
 test("detectarEventosICA: antes undefined (primer turno de la conversación) no rompe", () => {
   const despues = mergeScenario({}, { ingreso_mensual: 2300 });
   assert.deepEqual(detectarEventosICA(undefined, despues), ["dato_ingreso"]);
+});
+
+// ── PIEZA 1 (8ª tanda, testdev7) — EXTRACTION_STATUS: casos de aceptación ────
+// "Antes de decir que el usuario se contradijo, el sistema debe preguntarse
+// si lo leyó bien." Estos son los 9 casos obligatorios del encargo, a nivel
+// del pipeline completo (extractScenarioDelta → analizarExtraccion). Los
+// casos puramente de parseo de listas (9, 10, 13, 14, 15, 16) también tienen
+// cobertura directa en expenses.test.ts.
+
+test("caso 9 (pipeline): 'Telecomunicaciones_Necesario 60 100 Pañales_Bebe_Vital' → AMBIGUOUS", () => {
+  const msg = "Telecomunicaciones_Necesario 60 100 Pañales_Bebe_Vital";
+  const delta = extractScenarioDelta(msg);
+  const analisis = analizarExtraccion(msg, delta);
+  assert.equal(analisis.extraction_status, "AMBIGUOUS");
+  assert.ok(analisis.itemSospechoso, "debe exponer el ítem sospechoso de pegado");
+  assert.equal(analisis.discrepancia.discrepancia, false, "AMBIGUOUS por pegado, no por discrepancia aritmética");
+});
+
+test("caso 10 (regresión): 'gasto 2 500 €' → 2500, COMPLETE (miles con espacio, no romper)", () => {
+  const msg = "gasto 2 500 €";
+  const delta = extractScenarioDelta(msg);
+  assert.equal(delta.gastos_mensuales, 2500);
+  const analisis = analizarExtraccion(msg, delta);
+  assert.equal(analisis.extraction_status, "COMPLETE");
+});
+
+test("caso 11: 'gano 2300, tengo 43 años, 2 hijos, gasto 2200' → COMPLETE, NO pregunta por 43 ni 2", () => {
+  const msg = "gano 2300, tengo 43 años, 2 hijos, gasto 2200";
+  const delta = extractScenarioDelta(msg);
+  assert.equal(delta.ingreso_mensual, 2300);
+  assert.equal(delta.gastos_mensuales, 2200);
+  const analisis = analizarExtraccion(msg, delta);
+  assert.equal(analisis.extraction_status, "COMPLETE", `no debería preguntar por la edad ni los hijos: ${JSON.stringify(analisis)}`);
+  assert.deepEqual(analisis.huerfanos.numerosHuerfanos, []);
+  assert.deepEqual(analisis.huerfanos.numerosNoRelevantes.sort((a, b) => a - b), [2, 43], "43 (edad) y 2 (hijos) se CLASIFICAN, no se ignoran en silencio");
+});
+
+test("caso 12: 'gano 2300 y gasto 2200 y 450' → PARTIAL, usa 2300 y 2200, pregunta por 450", () => {
+  const msg = "gano 2300 y gasto 2200 y 450";
+  const delta = extractScenarioDelta(msg);
+  assert.equal(delta.ingreso_mensual, 2300, "el ingreso se usa con confianza (V1)");
+  assert.equal(delta.gastos_mensuales, 2200, "el gasto se usa con confianza (V1)");
+  const analisis = analizarExtraccion(msg, delta);
+  assert.equal(analisis.extraction_status, "PARTIAL");
+  assert.deepEqual(analisis.huerfanos.numerosHuerfanos, [450]);
+});
+
+// Caso 16 a nivel de escenario completo: el mensaje real produce gastos_items
+// con las 15 partidas y buckets coherentes tras el merge (no solo el parser
+// aislado — ver expenses.test.ts para esa capa).
+const MENSAJE_REAL_TESTDEV7_SCENARIO =
+  "Diezmo_Vital 225, 700 Casa_Vital Supermercado_Vital 450, 120 Servicios_Vitales, " +
+  "Telecomunicaciones_Necesario 60 100 Pañales_Bebe_Vital, Colegio_Niño_Necesario 150 " +
+  "Transporte_Necesario 100, 80 Ropa_Posible, Ocio_Familiar 60 40 Farmacia_Vital, " +
+  "Suscripciones_Ocio 25 40 Gimnasio_Necesario, 60 Ahorro_Posible Gastos_Varios_Posible 40";
+
+test("caso 16 (pipeline): mensaje real testdev7 → scenario.gastos_items 15 entradas, turno 1, suma 2250", () => {
+  const delta = extractScenarioDelta(MENSAJE_REAL_TESTDEV7_SCENARIO);
+  assert.equal(delta.gastos_es_detalle, true);
+  const s = mergeScenario(undefined, delta);
+  assert.equal(s.gastos_items?.length, 15, `esperaba 15 items: ${JSON.stringify(s.gastos_items)}`);
+  assert.ok(s.gastos_items?.every((i) => i.turn === 1), "primer turno de la conversación → turn 1 en todos los items");
+  assert.equal(s.gastos_items?.reduce((a, i) => a + i.amount, 0), 2250);
+  assert.equal(s.gastos_mensuales, 2250, "el agregado se deriva de la suma del desglose (BUG 1, invariante ya vigente)");
+});
+
+test("caso 17 (regresión): crédito con monto y SIN plazo → plazo_meses queda MISSING, nunca 0", () => {
+  // extractScenarioDelta (fallback regex) solo captura crédito cuando monto Y
+  // plazo llegan JUNTOS en el mismo mensaje — un monto sin plazo llega por la
+  // tool del LLM (toolArgsToScenarioDelta), que sí soporta campos parciales.
+  const s = mergeScenario(undefined, toolArgsToScenarioDelta({ credito_monto: 30000 }));
+  assert.equal(s.credito?.monto, 30000, "el monto sobrevive el guardarraíl");
+  assert.equal(s.credito?.plazo_meses, undefined, "el plazo NUNCA es 0 — queda MISSING");
+  assert.ok(s.missing.includes("plazo"), "se pregunta por el plazo explícitamente");
+});
+
+test("computeExtractionStatus: prioridad INVALID > AMBIGUOUS > PARTIAL > COMPLETE", () => {
+  const limpio = { huerfanos: { extraccionIncompleta: false, numerosHuerfanos: [], numerosNoRelevantes: [] }, discrepancia: { discrepancia: false }, itemSospechoso: null, camposInvalidos: [] };
+  assert.equal(computeExtractionStatus(limpio), "COMPLETE");
+  assert.equal(computeExtractionStatus({ ...limpio, huerfanos: { ...limpio.huerfanos, extraccionIncompleta: true, numerosHuerfanos: [450] } }), "PARTIAL");
+  assert.equal(computeExtractionStatus({ ...limpio, discrepancia: { discrepancia: true, agregado: 1000, suma: 850 } }), "AMBIGUOUS");
+  assert.equal(computeExtractionStatus({ ...limpio, itemSospechoso: { name: "x", amount: 60100, sugerencia: "?" } }), "AMBIGUOUS");
+  assert.equal(computeExtractionStatus({ ...limpio, camposInvalidos: ["ingreso_mensual"] }), "INVALID");
+});
+
+// ── PIEZA 6 (8ª tanda) — FACT_STATUS: el eco como promotor de confianza ──────
+
+test("factStatus: dato recién extraído → PARSED (no CONFIRMED todavía)", () => {
+  const s = mergeScenario(undefined, { ingreso_mensual: 2300 });
+  assert.equal(s.factStatus?.ingreso_mensual, "PARSED");
+  assert.deepEqual(s.eco_pendiente?.fields, ["ingreso_mensual"]);
+});
+
+test("factStatus: el usuario NO corrige el turno siguiente → PARSED sube a CONFIRMED", () => {
+  const t1 = mergeScenario(undefined, { ingreso_mensual: 2300 });
+  assert.equal(t1.factStatus?.ingreso_mensual, "PARSED");
+  // Turno 2: el usuario aporta OTRO dato (gastos) — no toca el ingreso, no lo corrige.
+  const t2 = mergeScenario(t1, { gastos_mensuales: 1500 });
+  assert.equal(t2.factStatus?.ingreso_mensual, "CONFIRMED", "el eco lo enunció en T1 y no se corrigió en T2 → CONFIRMED");
+  assert.equal(t2.factStatus?.gastos_mensuales, "PARSED", "gastos es la extracción NUEVA de este turno");
+});
+
+test("factStatus: el usuario SÍ corrige con un valor distinto → vuelve a PARSED, no se queda CONFIRMED a ciegas", () => {
+  const t1 = mergeScenario(undefined, { ingreso_mensual: 2300 });
+  const t2 = mergeScenario(t1, {}); // nada nuevo → promueve a CONFIRMED
+  assert.equal(t2.factStatus?.ingreso_mensual, "CONFIRMED");
+  const t3 = mergeScenario(t2, { ingreso_mensual: 2500 }); // corrección real
+  assert.equal(t3.factStatus?.ingreso_mensual, "PARSED", "un valor NUEVO y distinto reabre la confianza");
+  assert.equal(t3.ingreso_mensual, 2500);
+});
+
+test("factStatus: reafirmar EXACTAMENTE el mismo valor ya CONFIRMED se queda CONFIRMED", () => {
+  const t1 = mergeScenario(undefined, { ingreso_mensual: 2300 });
+  const t2 = mergeScenario(t1, {}); // promueve a CONFIRMED
+  assert.equal(t2.factStatus?.ingreso_mensual, "CONFIRMED");
+  const t3 = mergeScenario(t2, { ingreso_mensual: 2300 }); // el usuario repite el mismo dato
+  assert.equal(t3.factStatus?.ingreso_mensual, "CONFIRMED", "repetir lo ya confirmado no es una corrección");
+});
+
+test("factStatus: campo nunca visto → ausente (MISSING implícito, no aparece en el mapa)", () => {
+  const s = mergeScenario(undefined, { ingreso_mensual: 2300 });
+  assert.equal(s.factStatus?.gastos_mensuales, undefined);
 });

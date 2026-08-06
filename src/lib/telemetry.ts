@@ -50,6 +50,18 @@ export interface ResponseTelemetryPayload {
    * logs del servidor, invisible para la revisión nocturna (G1b).
    */
   scenarioPersistFailed: boolean | null
+  /**
+   * PIEZA 7 (8ª tanda) — telemetría de depuración de extracción (migración
+   * 019_telemetry_extraction.sql). Cierra el bucle de "arreglar a ciegas":
+   * permite reconstruir, para un turno real, qué devolvió la extracción, en
+   * qué estado estaba el escenario antes y después del merge, y qué ítems de
+   * gasto se leyeron. Todas nullable — no afectan turnos que no las pasen.
+   */
+  extractionStatus?: string | null
+  deltaRaw?: Record<string, unknown> | null
+  previousScenario?: Record<string, unknown> | null
+  mergedScenario?: Record<string, unknown> | null
+  expenseItems?: Array<Record<string, unknown>> | null
 }
 
 /**
@@ -94,6 +106,11 @@ export async function logResponseTelemetry(
       numeros_huerfanos: payload.numerosHuerfanos,
       discrepancia_gastos: payload.discrepanciaGastos,
       scenario_persist_failed: payload.scenarioPersistFailed,
+      extraction_status: payload.extractionStatus ?? null,
+      delta_raw: payload.deltaRaw ?? null,
+      previous_scenario: payload.previousScenario ?? null,
+      merged_scenario: payload.mergedScenario ?? null,
+      expense_items: payload.expenseItems ?? null,
     })
     if (error) throw new Error(error.message)
     return true

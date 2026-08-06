@@ -13,8 +13,15 @@
 // commandment_violations) se CONSERVA íntegro — son las que alimentan D5
 // (métricas) y no contienen texto libre. Ver docs/TELEMETRIA_RETENCION.md.
 //
-// Idempotente: una fila ya purgada (response_raw Y response_final ya NULL) no
-// vuelve a aparecer en el filtro — re-ejecutar el mismo día no hace nada.
+// PIEZA 7 (8ª tanda, AG08) — migración 019_telemetry_extraction.sql añadió
+// `delta_raw`/`previous_scenario`/`merged_scenario`/`expense_items` (jsonb):
+// a diferencia de las métricas de arriba, estos SÍ llevan texto/cifras
+// literales del usuario (nombres de partidas, montos, metas) — misma clase de
+// sensibilidad que `response_raw`/`response_final`, así que entran en la
+// MISMA purga de 30 días, no en la retención indefinida de las métricas.
+//
+// Idempotente: una fila ya purgada (las cinco columnas ya NULL) no vuelve a
+// aparecer en el filtro — re-ejecutar el mismo día no hace nada.
 
 import type { SupabaseClient } from '@supabase/supabase-js'
 
@@ -32,16 +39,26 @@ interface PurgeCandidateRow {
   id: string
   response_raw: string | null
   response_final: string | null
+  delta_raw: unknown
+  previous_scenario: unknown
+  merged_scenario: unknown
+  expense_items: unknown
 }
 
 function byteLength(s: string | null): number {
   return s ? Buffer.byteLength(s, 'utf8') : 0
 }
 
+function jsonByteLength(v: unknown): number {
+  if (v === null || v === undefined) return 0
+  return Buffer.byteLength(JSON.stringify(v), 'utf8')
+}
+
 /**
- * Pone a NULL `response_raw`/`response_final` en las filas de
- * `response_telemetry` con `created_at` anterior al corte (30 días por
- * defecto). Con `dryRun:true` solo cuenta y estima MB — no escribe nada.
+ * Pone a NULL `response_raw`/`response_final` y los jsonb de depuración de
+ * extracción (PIEZA 7, 8ª tanda) en las filas de `response_telemetry` con
+ * `created_at` anterior al corte (30 días por defecto). Con `dryRun:true`
+ * solo cuenta y estima MB — no escribe nada.
  */
 export async function purgeTelemetryText(
   admin: SupabaseClient,
@@ -54,15 +71,25 @@ export async function purgeTelemetryText(
 
   const { data, error } = await admin
     .from('response_telemetry')
-    .select('id, response_raw, response_final')
+    .select('id, response_raw, response_final, delta_raw, previous_scenario, merged_scenario, expense_items')
     .lt('created_at', cutoffIso)
-    .or('response_raw.not.is.null,response_final.not.is.null')
+    .or(
+      'response_raw.not.is.null,response_final.not.is.null,delta_raw.not.is.null,' +
+        'previous_scenario.not.is.null,merged_scenario.not.is.null,expense_items.not.is.null',
+    )
 
   if (error) throw new Error(`purgeTelemetryText (select): ${error.message}`)
 
   const rows = (data ?? []) as PurgeCandidateRow[]
   const bytesFreedEstimate = rows.reduce(
-    (acc, r) => acc + byteLength(r.response_raw) + byteLength(r.response_final),
+    (acc, r) =>
+      acc +
+      byteLength(r.response_raw) +
+      byteLength(r.response_final) +
+      jsonByteLength(r.delta_raw) +
+      jsonByteLength(r.previous_scenario) +
+      jsonByteLength(r.merged_scenario) +
+      jsonByteLength(r.expense_items),
     0,
   )
 
@@ -73,7 +100,14 @@ export async function purgeTelemetryText(
   const ids = rows.map((r) => r.id)
   const { error: updateError } = await admin
     .from('response_telemetry')
-    .update({ response_raw: null, response_final: null })
+    .update({
+      response_raw: null,
+      response_final: null,
+      delta_raw: null,
+      previous_scenario: null,
+      merged_scenario: null,
+      expense_items: null,
+    })
     .in('id', ids)
 
   if (updateError) throw new Error(`purgeTelemetryText (update): ${updateError.message}`)
