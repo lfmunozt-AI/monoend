@@ -220,7 +220,7 @@ function esNombreValido(nameRaw: string): boolean {
 
 interface Tok {
   raw: string;
-  kind: "num" | "word";
+  kind: "num" | "word" | "boundary";
   /** ¿El token original terminaba en ":" ("Alquiler:")? Ver `emparejarNombreMonto`. */
   hadColon?: boolean;
 }
@@ -337,6 +337,21 @@ function emparejarNombreMonto(tokens: Tok[]): ExpenseItem[] {
   for (let idx = 0; idx < tokens.length; idx++) {
     const tok = tokens[idx];
 
+    // FIX V13 (10ª tanda) — un token FRONTERA (número ya reclamado por un
+    // campo declarativo, o palabra de ingreso) resetea el emparejamiento en
+    // seco: lo que hubiera pendiente se descarta SIN validarlo contra
+    // NO_ES_GASTO. Es la diferencia con la implementación anterior (que
+    // ELIMINABA el token): eliminar fusionaba los fragmentos vecinos ("gano"
+    // + "y pago arriendo" pasaban a validarse JUNTOS, y "gano" los
+    // invalidaba a los tres, perdiendo la partida entera). Con la frontera
+    // PRESENTE (nunca se quita del array), "gano" se descarta AQUÍ, antes de
+    // poder fusionarse con nada — "arriendo" arranca un nombre limpio.
+    if (tok.kind === "boundary") {
+      pendingName = [];
+      pendingAmount = undefined;
+      continue;
+    }
+
     // PIEZA 4 (forma "Alquiler: 700") — un ":" pegado a la palabra es una
     // promesa de valor inmediato. Si SÍ va seguido de un número, la palabra
     // arranca un nombre fresco (descarta cualquier prefijo acumulado antes,
@@ -409,6 +424,16 @@ function mediana(valores: number[]): number {
 // condición. Con agregado conocido, se añade además un suelo absoluto: un
 // ítem por debajo de 3× el agregado total es un gasto grande PLAUSIBLE
 // (vivienda, no un error de tecleo) y no se marca aunque supere la mediana.
+//
+// NOTA (10ª tanda, revisión adversarial 2026-08-06) — el contrato
+// `docs/CONTRATO_TRUTH_ENGINE.md` §5.2 sigue diciendo literalmente "10 ×
+// mediana". Esta calibración a 50× está APROBADA por Luis y se queda como
+// está en este PR — la enmienda formal del texto del contrato (§5.2) la
+// hace AG05 en un PR de documentación aparte, no aquí. Con 10× (el valor
+// literal del contrato) una hipoteca de 1.200 € entre gastos de 40-60 €
+// (mediana ≈90, ratio ≈13×) se marcaría como pegado y bloquearía al usuario
+// con una pregunta sin sentido; con 50× ese caso NO se marca y el pegado
+// real (60100, ratio ≈668×) se sigue detectando con margen amplio.
 const UMBRAL_MEDIANA_MULTIPLICADOR = 50;
 const SUELO_AGREGADO_MULTIPLICADOR = 3;
 
@@ -461,6 +486,7 @@ export function parseExpenseListDetallado(
   message: string,
   agregado?: number,
   excluirValores?: ReadonlySet<number>,
+  fronteraPalabras?: ReadonlySet<string>,
 ): ParseExpenseListResult {
   const segmentos = message.split(/[,\n]|(?<=[.!?])\s+/);
   const items: ExpenseItem[] = [];
@@ -469,13 +495,26 @@ export function parseExpenseListDetallado(
   for (const seg of segmentos) {
     let tokens = tokenizeSegment(seg);
     if (tokens.length === 0) continue;
-    // FIX 1 (9ª tanda, V13) — un número ya RECLAMADO por un campo declarativo
-    // ("gano 2300", "gasto 2000") no puede convertirse en ítem de lista. Se
-    // descarta el token ENTERO (no un placeholder) — así "gasto aproximadamente
-    // 2000 entre vivienda..." no deja ningún monto disponible para que
-    // "vivienda"/"aproximadamente" lo reclamen.
-    if (excluirValores && excluirValores.size > 0) {
-      tokens = tokens.filter((t) => t.kind !== "num" || !excluirValores.has(parseDigitAmount(t.raw)));
+    // FIX V13 (10ª tanda) — un número ya RECLAMADO por un campo declarativo
+    // ("gano 2300", "gasto 2000") no puede convertirse en ítem de lista, pero
+    // el token NUNCA SE ELIMINA del array (eliminarlo fusiona los nombres
+    // vecinos — bug real: "gano 700 y pago arriendo 650" perdía el 650
+    // entero porque "gano"+"y pago arriendo" se validaban JUNTOS tras borrar
+    // el 700). Se convierte en un token FRONTERA: sigue presente, pero
+    // `emparejarNombreMonto` lo trata como un reset duro (como una coma),
+    // nunca como nombre ni monto. La PALABRA de ingreso que originó el
+    // reclamo ("gano", "sueldo"…) recibe el mismo tratamiento, para que no
+    // quede acumulada en un nombre que se valide junto a lo que sigue.
+    if ((excluirValores && excluirValores.size > 0) || (fronteraPalabras && fronteraPalabras.size > 0)) {
+      tokens = tokens.map((t): Tok => {
+        if (t.kind === "num" && excluirValores?.has(parseDigitAmount(t.raw))) {
+          return { raw: t.raw, kind: "boundary" };
+        }
+        if (t.kind === "word" && fronteraPalabras?.has(norm(t.raw))) {
+          return { raw: t.raw, kind: "boundary" };
+        }
+        return t;
+      });
     }
     if (tokens.length === 0) continue;
     const { tokens: resueltos, pares } = resolverPegado(tokens);

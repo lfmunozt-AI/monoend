@@ -401,6 +401,14 @@ export function extractScenarioDelta(
   // VALOR (no por posición): más simple, y suficiente para los casos reales —
   // ver limitación documentada en `analizarExtraccion`/informe de esta tanda.
   const claimed = new Set<number>();
+  // FIX V13 (10ª tanda) — no solo el NÚMERO queda reclamado: la PALABRA de
+  // contexto que lo reclamó (gano/sueldo/salario/gasto…) también, para que
+  // no quede libre para fusionarse con el nombre de una partida vecina en el
+  // mismo segmento ("gano 700 y pago arriendo 650" — sin esto, "gano" podía
+  // sobrevivir como parte de un nombre combinado inválido que se tragaba el
+  // 650 entero). Ver `parseExpenseListDetallado` (expenses.ts) — el token se
+  // convierte en FRONTERA, nunca se elimina.
+  const fronteraPalabras = new Set<string>();
 
   // ── Tasa real (TAE) — porcentaje en contexto de interés/banco ─────────────
   if (RATE_CONTEXT.test(n)) {
@@ -410,6 +418,8 @@ export function extractScenarioDelta(
       if (Number.isFinite(tae) && tae > 0 && tae < 100) {
         delta.credito = { tae_pct: tae, tae_es_referencia: false };
         claimed.add(tae);
+        const rateWord = RATE_CONTEXT.exec(n);
+        if (rateWord) fronteraPalabras.add(norm(rateWord[0]));
       }
     }
   }
@@ -448,6 +458,8 @@ export function extractScenarioDelta(
         };
         claimed.add(monto);
         claimed.add(meses);
+        const creditoWord = PRECIO_CTX.exec(n);
+        if (creditoWord) fronteraPalabras.add(norm(creditoWord[0]));
       }
     }
   }
@@ -463,6 +475,12 @@ export function extractScenarioDelta(
       if (Number.isFinite(v) && v > 0) {
         delta.ingreso_mensual = v;
         claimed.add(v);
+        // FIX V13 — la PALABRA de ingreso ("gano", "sueldo", "salario"…)
+        // también queda fuera del alcance del parser de listas, no solo su
+        // número. Caso real: "gano 700 y pago arriendo 650..." — sin esto,
+        // "gano" podía sobrevivir en un nombre combinado inválido.
+        const ingresoWord = INGRESO_CTX.exec(n);
+        if (ingresoWord) fronteraPalabras.add(norm(ingresoWord[0]));
       }
     }
   }
@@ -511,21 +529,27 @@ export function extractScenarioDelta(
     //     el candidato SÍ se reclama, y su exclusión hace que ese único par
     //     espurio tampoco se forme.
     let gastoDeclaradoSimple: number | undefined;
+    let gastoWord: string | undefined;
     if (GASTO_CTX.test(n)) {
       const a = AMOUNT.exec(n.slice(n.search(GASTO_CTX)));
       if (a && !esCifraAnual(n, GASTO_CTX, a) && !esRango(n, GASTO_CTX, a)) {
         const v = parseDigitAmount(a[1]);
         if (Number.isFinite(v) && v > 0) gastoDeclaradoSimple = v;
       }
+      gastoWord = GASTO_CTX.exec(n)?.[0];
     }
 
-    let listResult = parseExpenseListDetallado(message, gastoDeclaradoSimple, claimed);
+    // La "prueba probatoria" (¿ya hay lista real SIN reclamar el candidato?)
+    // corre con la palabra de gasto TODAVÍA NO marcada como frontera —
+    // exactamente el mismo criterio que con el valor (ver comentario arriba).
+    let listResult = parseExpenseListDetallado(message, gastoDeclaradoSimple, claimed, fronteraPalabras);
     if (gastoDeclaradoSimple !== undefined && listResult.items.length < 2) {
       // Sin el candidato disponible para el emparejamiento espontáneo, NO
       // emergió ninguna lista real → es un valor declarativo genuino: se
-      // reclama y se excluye también de la lista final.
+      // reclama (valor Y palabra) y se excluye también de la lista final.
       claimed.add(gastoDeclaradoSimple);
-      listResult = parseExpenseListDetallado(message, gastoDeclaradoSimple, claimed);
+      if (gastoWord) fronteraPalabras.add(norm(gastoWord));
+      listResult = parseExpenseListDetallado(message, gastoDeclaradoSimple, claimed, fronteraPalabras);
     } else {
       // Ya había ≥2 pares SIN reclamar el candidato — probablemente ES una
       // de las partidas (o es irrelevante). No se reclama.
