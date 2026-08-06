@@ -969,3 +969,317 @@ modelo redacta la frase".
 `extractScenarioDelta`, `mergeScenario`, `buildScenarioContext`, `analizarExtraccion` y
 `aplicarGuardaDeSanidad` reales, en `agent/08` y en `develop`, con los mismos mensajes.
 `test:e2e` y `smoke:db`: no verificables por mí (credenciales).*
+
+
+---
+---
+
+# CUARTA REVISIÓN — `agent/08` @ `a83957a` · 6 de agosto de 2026
+
+## VEREDICTO: RECHAZADO
+
+> **Revisión adversarial — AG08 `f4f3561` + `a83957a` ("token reclamado es frontera con offsets
+> preservados")**
+> Revisor: AG01 (Arquitecto) · Base: `origin/develop` @ `de94008`
+> Rama revisada: `origin/agent/08` @ `a83957a` (2 commits por delante de `develop`)
+> Método: **cada afirmación del reporte se re-ejecutó contra el código real.** Los tres mensajes
+> del bloqueante de mi revisión anterior se ejecutaron uno por uno.
+> No se tocó código de AG08, no se mergeó nada, no se pusheó código.
+
+---
+
+## Resumen ejecutivo
+
+AG08 implementó **exactamente el mecanismo que recomendé** (token reclamado convertido en frontera
+en vez de eliminado) y la idea es correcta: `Tok.kind` gana `"boundary"`, `emparejarNombreMonto`
+hace reset duro, `resolverPegado` no necesitó cambios. La batería está verde
+(14 + 262 + **206** + 84/84, `tsc` limpio) y la reproduje entera.
+
+**Pero el bloqueante B1 no está cerrado, y hay uno nuevo.**
+
+1. **De los tres mensajes del bloqueante, dos pasan y uno sigue fallando.** El reporte de AG08 (§5)
+   presenta los mensajes 1, 2 y un control con punto — **el mensaje que sigue roto no aparece en la
+   lista**: fue sustituido por otro. Sus tests obligatorios `V13-1`…`V13-6` cubren dos de mis tres
+   mensajes. El tercero no tiene test y sigue perdiendo la partida.
+2. **El mecanismo de frontera introduce una regresión nueva**: la *palabra* de contexto se marca
+   como frontera, y `PRECIO_CTX` incluye `carro|coche|auto|casa|piso|vivienda` — palabras que son
+   nombres de gasto perfectamente normales. Con un crédito en el mismo mensaje, esa partida
+   **desaparece**.
+
+Ambos fallan en la misma dirección peligrosa que la vez anterior: **subestimar los gastos** y
+anunciar un sobrante que no existe.
+
+---
+
+## 1 · Hallazgos priorizados
+
+### 🔴 BLOQUEANTE B1-residual — 1 de los 3 mensajes sigue perdiendo la partida
+
+**Archivo:** `src/lib/calculator/scenario.ts:546-551`
+
+**Ejecución de los tres mensajes del bloqueante (`extractScenarioDelta` + `mergeScenario` + `buildScenarioContext`):**
+
+| Mensaje | `gastos` obtenido | esperado | sobrante que cree | real |
+|---|---|---|---|---|
+| `"gano 700 y pago arriendo 650, comida 200, luz 50"` | 900 | 900 ✅ | −200 | −200 ✅ |
+| **`"gano 2000 y gasto en arriendo 800, comida 300, luz 100"`** | **400** | **1200** ❌ | **+1600** | **+800** ❌ |
+| `"mi sueldo es 2500 y el arriendo 800, comida 300, luz 90"` | 1190 | 1190 ✅ | +1310 | +1310 ✅ |
+
+**Causa raíz exacta** (aislada ejecutando `parseExpenseListDetallado` con distintos sets):
+
+```
+A) como lo llama el código hoy  (claimed={2000}, frontera={gano}):
+   [{"name":"comida","amount":300},{"name":"luz","amount":100}]          ← arriendo 800 PERDIDO
+B) si 'gasto' TAMBIÉN fuera frontera:
+   [{"name":"en arriendo","amount":800},{"name":"comida",300},{"luz",100}] ← correcto
+```
+
+La palabra de `GASTO_CTX` se añade a `fronteraPalabras` **solo dentro** de la rama de reclamo
+(`scenario.ts:546`: `if (gastoDeclaradoSimple !== undefined && listResult.items.length < 2)`).
+Cuando la lista ya tiene ≥2 ítems sin reclamar —que es justo este caso— esa rama no se toma, `gasto`
+queda libre, `pendingName` acumula `"y gasto en arriendo"`, `NO_ES_GASTO` lo invalida por contener
+`"gasto"`, y el **800 se pierde sin dejar huérfano** (nunca llega a serlo: se destruye antes).
+
+Compárese con `ingresoWord` (`scenario.ts:482-483`), que sí se añade **incondicionalmente** en cuanto
+hay ingreso — por eso los mensajes 1 y 3 sí se arreglaron. **La asimetría entre las dos palabras es
+el bug.**
+
+**Corrección:** mover `if (gastoWord) fronteraPalabras.add(norm(gastoWord))` fuera de la rama
+condicional, junto a donde se calcula `gastoWord` (`scenario.ts:539`), con el mismo tratamiento
+incondicional que `ingresoWord`. Verificado arriba (fila B): recupera el ítem.
+
+---
+
+### 🔴 BLOQUEANTE B2 (NUEVO, introducido por `a83957a`) — una partida cuyo nombre coincide con la palabra de contexto se destruye
+
+**Archivos:** `src/lib/calculator/scenario.ts:461-462` (`PRECIO_CTX` → frontera) ·
+`src/lib/calculator/expenses.ts:509-515` (conversión a `boundary`)
+
+`fronteraPalabras.add(norm(creditoWord[0]))` mete en el set la **primera palabra que casó
+`PRECIO_CTX`**, y ese regex (`scenario.ts:244`) incluye
+`precio|cuesta|vale|financiar|credito|prestamo|…|carro|coche|auto|casa|piso|vivienda`.
+Las seis últimas son nombres de gasto corrientes. Ejecutado, las **seis** se pierden:
+
+```
+"quiero un {P} de 30000 a 36 meses, {P} 100, comida 300, luz 90"
+  carro    → PERDIDA ❌   items=["comida","luz"]
+  coche    → PERDIDA ❌   items=["comida","luz"]
+  auto     → PERDIDA ❌   items=["comida","luz"]
+  casa     → PERDIDA ❌   items=["comida","luz"]
+  piso     → PERDIDA ❌   items=["comida","luz"]
+  vivienda → PERDIDA ❌   items=["comida","luz"]
+```
+
+**Impacto financiero del caso más plausible** (alguien con hipoteca que pide un crédito):
+
+```
+"quiero una casa de 200000 a 240 meses, casa 700, comida 300, luz 90"   (ingreso 1500)
+  gastos registrados: 390   ·  real: 1090
+  el sistema cree que sobran 1110 €  ·  realidad: 410 €
+```
+
+**Control:** sin crédito en el mensaje, las mismas listas se extraen enteras
+(`"casa 700, comida 300, luz 90"` → 3 ítems ✅). Y con `"financiar"` delante, `PRECIO_CTX.exec`
+casa primero con `"financiar"` y `carro` se salva — es decir, **el fallo depende del orden de las
+palabras**, lo que lo hace intermitente y difícil de reproducir en QA manual.
+
+**Por qué es bloqueante:** el patrón *"quiero financiar una casa … estos son mis gastos"* es
+exactamente la conversación central del producto, y el resultado es la frase prohibida — "te
+sobran 1.110 €" a alguien que tiene 410 €.
+
+**Corrección sugerida:** no usar `match[0]` de un regex de contexto amplio como frontera. Marcar
+frontera **por posición** (el token concreto que originó el reclamo, vía offsets — que el propio
+commit dice preservar) en vez de por igualdad de texto; o restringir el set a las palabras
+inequívocamente no-gasto (`precio|cuesta|vale|financiar|credito|prestamo|loan`), nunca a los
+sustantivos de objeto.
+
+---
+
+### 🟠 MAYOR M1 — El reporte presenta como verificado un caso que no está en la batería
+
+**Archivo:** `docs/informes/CORRECCIONES_AG08_v13_token_frontera.md` §5 · `scenario.test.ts` (`V13-1`…`V13-6`)
+
+El §5 del reporte lista como "tests obligatorios — resultado real" los mensajes 1
+(`gano 700 y pago arriendo…`), 2 (`mi sueldo es 2500…`), 3 (control con punto) y 4 (permutación).
+**Mi mensaje `"gano 2000 y gasto en arriendo 800…"` no está**: fue sustituido por el de `sueldo`.
+`grep -i "gasto en "` sobre el diff de tests: **cero coincidencias**.
+
+No afirmo intención — es fácil perder un caso de una lista de tres. Pero el efecto es el que esta
+revisión existe para evitar: **el bloqueante se declara cerrado, la batería lo confirma en verde, y
+el caso que falla no está en la batería.** Mismo patrón que el "60100".
+
+---
+
+### 🟡 MENOR m1 — Los nombres de partida quedan sucios (efecto secundario declarado)
+
+`"gano 700 y pago arriendo 650…"` → ítem `{name: "y pago arriendo", amount: 650}`.
+
+AG08 lo declara abiertamente en §2 de su informe y afirma que la clasificación no se rompe.
+**Lo verifiqué y es cierto:**
+
+```
+classifyExpense("y pago arriendo") = vital      classifyExpense("y el arriendo") = vital
+classifyExpense("y pago comida")   = vital      buckets = 900 = suma de ítems ✅
+```
+
+El importe nunca se pierde ni se atribuye mal. Queda un detalle de presentación: ese nombre llega
+al prompt vía `notaDetalleSinConfirmar` (`"y pago arriendo: 650 €"`) y podría asomar al usuario —
+mitigado porque la nota instruye redactar con voz propia. Aceptable; conviene limpiarlo cuando se
+toque el emparejador.
+
+---
+
+### 🟡 MENOR m2 — `detectarCorreccionDeItem` por subcadena (sin cambios desde mi revisión anterior)
+
+`scenario.ts:349-353` — `"la luz del coche es 150"` sigue corrigiendo la partida `luz` **y**
+promoviendo `detalle_confirmado` a `true`. Sigue pendiente de la lista anterior.
+
+---
+
+### ⚪ Desviación ya resuelta en proceso — umbral 50× vs. 10× del contrato
+
+`expenses.ts:412` mantiene `UMBRAL_MEDIANA_MULTIPLICADOR = 50`, ahora **con el comentario de
+justificación que pedí**, y el informe declara que la enmienda formal de §5.2 la hace AG05 en un PR
+de documentación aparte, con el 50× aprobado por Luis. Correctamente encaminado; **hasta que ese PR
+entre, contrato y código siguen contradiciéndose por escrito.** Ambos umbrales del contrato están
+implementados (`importe > agregado` sin suelo, y `50× mediana` con suelo de `3× agregado` y mínimo
+de 3 ítems; con 1-2 ítems solo actúa el detector estructural de pegado).
+
+---
+
+### ⚪ Nota de proceso — V12 y V13 siguen sin estar en el contrato
+
+`docs/CONTRATO_TRUTH_ENGINE.md` define **V1-V10**. V12/V13 solo viven en el prompt del encargo y en
+los informes de AG08. Los verifiqué por contenido y **ambos se cumplen** (V12: ningún ítem con el
+importe del ingreso en los tres mensajes; V13: el reclamo funciona, con las dos fugas de B1/B2).
+Deberían escribirse en §9.
+
+---
+
+## 2 · Los 9 casos de aceptación (ejecutados por mí)
+
+| # | Caso | Test existe | Ejercita ruta real | Pasa |
+|---|---|---|---|---|
+| 9 | `"…60 100 Pañales_Bebe_Vital"` | Sí | Sí | ✅ `AMBIGUOUS`, sospechoso `60100`, conflicto `false` |
+| 10 | `"gasto 2 500 €"` → 2500 | Sí | Sí | ✅ `2500`, `COMPLETE` |
+| 11 | `"gano 2300, tengo 43 años, 2 hijos, gasto 2200"` | Sí | Sí | ✅ `COMPLETE`, huérfanos `[]` |
+| 12 | `"gano 2300 y gasto 2200 y 450"` | Sí | Sí | ✅ `PARTIAL`, huérfanos `[450]`, usa 2300/2200 |
+| 13 | `"Diezmo_Vital 225, Casa_Vital 700"` | Sí | Sí | ✅ 2 ítems con `_` |
+| 14 | `"alquiler 700 comida 450 luz 120"` | Sí | Sí | ✅ 3 ítems |
+| 15 | `"Alquiler: 700, Comida: 450, Luz: 120"` | Sí | Sí | ✅ 3 ítems |
+| 16 | 15 partidas testdev7 | Sí | Sí | ✅ 15 ítems · suma 2250 · buckets 2250 |
+| 17 | Crédito con monto sin plazo | Sí | Sí | ✅ plazo `undefined`, `missing` incluye plazo |
+
+**Los dos casos de Luis:**
+
+| Caso | Resultado |
+|---|---|
+| Desglose sin confirmar → no propone recorte pero sí responde sobrante | ✅ `detalle_confirmado=false` · bloquea "¿qué puedo recortar?" · **no** bloquea "¿cuánto me queda?" · `sobrante=1030` |
+| `"gasto aproximadamente 2000 entre vivienda, comida"` → items vacío | ✅ `{"gastos_mensuales":2000}`, sin ítems |
+
+**Test estructural de spans:** existe (`V13-1`…`V13-6`), ejercita la ruta real
+(`extractScenarioDelta` → `mergeScenario` → `buildScenarioContext`, sin mocks) y pasa —
+**pero cubre 2 de los 3 mensajes del bloqueante** (ver M1).
+
+---
+
+## 3 · Invariantes
+
+| # | Estado | Evidencia |
+|---|---|---|
+| **V1** | ⚠️ **Violado en espíritu por B1-residual/B2** | Ningún camino descarta el delta por `extraction_status`, y la guarda de sanidad respeta `ingreso`/`gastos`. **Pero** una partida extraída con confianza se destruye antes de existir (B1-res, B2) — no por huérfanos, sino por el mecanismo de frontera. El efecto prohibido (un dato del usuario desaparece en silencio) es el mismo. |
+| **V5** | ✅ No tocado | El diff no roza grounding ni `conceptos`. |
+| **V8** | ✅ Verificado | `"gano 0"` → `{}` · `"gasto 0"` → `{}` · `toolArgsToScenarioDelta({monto:0,plazo:0,tae:0})` → `{}`. |
+| **V9** | ⚠️ Parcial | Campos nuevos son escalares en el jsonb; señales de turno se `delete`an antes de persistir. **Sigue sin test de round-trip de BD.** |
+| **V10** | ✅ No aplica | Esta tanda no añade sustituciones de texto. |
+| **V12** | ✅ Verificado | Ningún ítem con el importe del ingreso en los tres mensajes. Guarda cubre también la vía `tool_call`. |
+| **V13** | ⚠️ Parcial | El reclamo funciona; dos fugas (B1-residual, B2). |
+| `scenario_state` · `response_telemetry` · `runGuardrail` · `persistTurn` | ✅ | `persistTurn` único punto de escritura (1 llamada), `applyEnforcement` cableado (1 llamada). |
+| `llm.ts` no tocado | ✅ | No aparece en el diff. |
+| Tabla ICA no redefinida | ✅ | `ica-service.ts` no aparece en el diff. |
+
+**Bloque B — compatibilidad:** ✅ `gastos_detalle` conserva forma y consumidores
+(`turn-classifier.ts:138`, `tools.ts`, orquestador). `gastos_items` es aditivo. Flujo
+**items → clasificación → buckets** verificado: caso 16 → ítems 2250 = buckets 2250; y en el caso de
+nombres sucios, buckets 900 = ítems 900. No pueden divergir: los buckets se derivan de los mismos
+ítems en la misma llamada.
+
+**Bloque C — alcance:** ✅ impecable. `detectarDiscrepanciaGastos(delta)` sigue con **un solo
+argumento** (`scenario.ts:852`). Cero `CONFLICT`/`ASSUMED`/`SUPERSEDED` fuera de comentarios. Nada de
+materialidad ni escape.
+
+**Bloque F — migración 019:** ✅ esta tanda **no toca** `supabase/`, `telemetry.ts` ni
+`persistence.ts` (verificado: diff vacío para esas rutas). Nada que re-auditar.
+
+**Bloque G — el eco no es plantilla:** ✅ `notaDetalleSinConfirmar` entrega los DATOS e instruye
+*"con tu propia voz, nunca copies este formato literal"*. Ningún texto enlatado nuevo al usuario.
+
+**Bloque H — declaración de impacto:** ✅ en cuanto a **código**: contrasté la tabla función-por-función
+del §4 contra el diff real y coincide; "Eliminadas: ninguna" es cierto (el `filter` se convierte en
+`map`, misma firma pública). ❌ en cuanto a **resultados**: §5 declara verificado un conjunto de
+mensajes que no coincide con el que se pidió (M1).
+
+---
+
+## 4 · Riesgos latentes que el contrato no cubre
+
+1. **La frontera por igualdad de texto es intrínsecamente frágil.** Marca *todas* las apariciones de
+   la palabra en el mensaje, no la que originó el reclamo. B2 es su primera manifestación; el mismo
+   patrón afectará a cualquier futura palabra de contexto que también pueda nombrar un gasto. El
+   commit dice "offsets preservados", pero el set es de **strings**, no de posiciones: la promesa del
+   título no está implementada.
+2. **`RATE_CONTEXT` no tiene `\b`** (`scenario.ts:224`): `/(tae|tasa|tipo|juros|…)/` casa dentro de
+   palabras. Combinado con la frontera, cualquier partida que contenga esas subcadenas es candidata al
+   mismo fallo que B2.
+3. **Un ítem destruido no deja rastro.** Ni huérfano, ni `AMBIGUOUS`, ni telemetría: `extraction_status`
+   sale `COMPLETE`. El sistema no puede saber que perdió algo — precisamente lo que el contrato
+   quiere evitar ("el parser debe ser honesto sobre su propia confianza"). Sugerencia: contar tokens
+   numéricos descartados por frontera y degradar a `PARTIAL` si alguno queda sin explicación.
+4. **La guarda de sanidad solo actúa con el ingreso en el MISMO delta** (`scenario.ts:378`) — sin
+   cambios desde mi revisión anterior.
+5. **`detalle_confirmado` se promueve por silencio**: "confirmado" significa "no desmentido".
+
+---
+
+## 5 · Recomendación explícita a Luis
+
+**Devolver a AG08.** La dirección sigue siendo correcta —el mecanismo de frontera es el adecuado y
+resolvió 2 de los 3 casos— pero **no mergear**: dos de las conversaciones más comunes del producto
+(*"gasto en alquiler X"* y *"quiero financiar una casa… mis gastos son…"*) registran gastos
+incompletos y anuncian un sobrante inexistente. Lista exacta:
+
+1. **B1-residual (bloqueante).** Mover `fronteraPalabras.add(norm(gastoWord))` **fuera** de la rama
+   condicional de `scenario.ts:546-551`, al punto donde se calcula `gastoWord` (`:539`), igual que
+   `ingresoWord` (`:482-483`). Criterio de aceptación:
+   `"gano 2000 y gasto en arriendo 800, comida 300, luz 100"` → `gastos = 1200`, sobrante `+800`.
+2. **B2 (bloqueante).** Que la frontera se marque **por posición del token reclamado**, no por
+   igualdad de texto (los offsets que el commit dice preservar). Alternativa mínima: excluir del set
+   los sustantivos de objeto de `PRECIO_CTX` (`carro|coche|auto|casa|piso|vivienda`). Criterio de
+   aceptación: los seis mensajes de la tabla de B2 conservan la partida homónima.
+3. **Tests obligatorios**: añadir **los tres** mensajes del bloqueante (no dos) y los seis de B2. Un
+   caso que se declara corregido sin test en la batería vuelve.
+4. **m2**: coincidencia por palabra completa en `detectarCorreccionDeItem`.
+5. **Antes del merge**: `test:e2e` y `smoke:db` los ejecuta Luis (no verificables por mí, sin
+   credenciales).
+
+**Decisiones de Luis, no de un agente:**
+
+- **Cerrar el PR de AG05** que enmienda §5.2 (10× → 50×): hasta entonces contrato y código se
+  contradicen.
+- **Escribir V12 y V13 en §9** del contrato.
+- Considerar el riesgo latente 3 (un ítem destruido debería degradar a `PARTIAL`, no salir
+  `COMPLETE`): es la diferencia entre un parser que falla y uno que **falla honestamente**, que es
+  justo la tesis del contrato.
+
+**Lo que NO hay que tocar:** el mecanismo `boundary` (es el correcto), la disciplina de alcance, la
+declaración de impacto de código, y `notaDetalleSinConfirmar`.
+
+---
+
+*Nota de método: batería completa reproducida en worktree aislado y desechable (`git worktree add
+--detach`, eliminado al terminar), sin tocar el worktree de AG08 —
+`npm test` 14/14 · `test:guardrail` 262/262 · `test:calculator` 206/206 · `test:regression` 84/84 ·
+`tsc --noEmit` limpio · `npm run build` falla solo en el prerender de `/login` por falta de
+credenciales Supabase (preexistente, idéntico en `develop`). Todas las cifras provienen de ejecutar
+`extractScenarioDelta`, `mergeScenario`, `buildScenarioContext`, `parseExpenseListDetallado`,
+`classifyExpense` y `analizarExtraccion` reales. `test:e2e` y `smoke:db`: no verificables por mí.*
