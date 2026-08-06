@@ -1063,3 +1063,101 @@ test("notaDetalleSinConfirmar: null si no se pide recorte (sobrante/capacidad si
   const t1 = mergeScenario(undefined, extractScenarioDelta("arriendo 700, comida 450, luz 120"));
   assert.equal(notaDetalleSinConfirmar(t1, "¿cuánto me queda al mes?"), null);
 });
+
+// ── FIX V13 (10ª tanda) — TOKEN RECLAMADO = FRONTERA, NUNCA SE ELIMINA ───────
+// Regresión bloqueante real: eliminar el token reclamado del array fusionaba
+// los fragmentos de nombre vecinos ("gano"+"y pago arriendo" se validaban
+// JUNTOS y NO_ES_GASTO los rechazaba enteros, perdiendo la partida). El
+// disparador exacto: un ítem de gasto comparte SEGMENTO DE COMA con la
+// palabra de ingreso (con punto ya funcionaba, porque el punto ya separa en
+// segmentos distintos).
+
+test("TEST OBLIGATORIO V13-1: 'gano 700 y pago arriendo 650, comida 200, luz 50' → ingreso 700, gastos 900, DÉFICIT", () => {
+  const delta = extractScenarioDelta("gano 700 y pago arriendo 650, comida 200, luz 50");
+  assert.equal(delta.ingreso_mensual, 700);
+  // gastos_mensuales se DERIVA en el merge (suma del detalle — BUG 1, el
+  // detalle manda), no viaja directo en el delta cuando es una lista.
+  const s = mergeScenario(undefined, delta);
+  assert.equal(s.gastos_mensuales, 900, `V1: el arriendo (650) no debe perderse: ${JSON.stringify(delta)}`);
+  const sobrante = (s.ingreso_mensual ?? 0) - (s.gastos_mensuales ?? 0);
+  assert.equal(sobrante, -200, "DÉFICIT, nunca superávit");
+  assert.ok(delta.gastos_items?.some((i) => i.amount === 650 && i.name.toLowerCase().includes("arriendo")), "la partida de 650 (arriendo) no puede perderse");
+  assert.ok(delta.gastos_items?.some((i) => i.amount === 200), "comida (200) presente");
+  assert.ok(delta.gastos_items?.some((i) => i.amount === 50), "luz (50) presente");
+  assert.ok(!delta.gastos_items?.some((i) => i.amount === 700), "V12: el ingreso (700) nunca como ítem de gasto");
+});
+
+test("TEST OBLIGATORIO V13-2: 'mi sueldo es 2500 y el arriendo 800, comida 300, luz 90' → ingreso 2500, gastos 1190, sobrante +1310", () => {
+  const delta = extractScenarioDelta("mi sueldo es 2500 y el arriendo 800, comida 300, luz 90");
+  assert.equal(delta.ingreso_mensual, 2500);
+  const s = mergeScenario(undefined, delta);
+  assert.equal(s.gastos_mensuales, 1190, `800 + 300 + 90: ${JSON.stringify(delta)}`);
+  assert.equal((s.ingreso_mensual ?? 0) - (s.gastos_mensuales ?? 0), 1310);
+  assert.ok(delta.gastos_items?.some((i) => i.amount === 800 && i.name.toLowerCase().includes("arriendo")));
+  assert.ok(!delta.gastos_items?.some((i) => i.amount === 2500), "V12: el ingreso (2500) nunca como ítem de gasto");
+});
+
+test("TEST OBLIGATORIO V13-3 (control, ya funcionaba): 'gano 700. pago arriendo 650, comida 200, luz 50' → idéntico", () => {
+  const delta = extractScenarioDelta("gano 700. pago arriendo 650, comida 200, luz 50");
+  assert.equal(delta.ingreso_mensual, 700);
+  const s = mergeScenario(undefined, delta);
+  assert.equal(s.gastos_mensuales, 900);
+  assert.equal(delta.gastos_items?.length, 3);
+  assert.equal(delta.gastos_items?.find((i) => i.name.includes("arriendo"))?.amount, 650);
+});
+
+test("TEST OBLIGATORIO V13-4 (no-destructividad de spans, permutación distinta): 'gano 1500 y pago comida 300, luz 80, agua 40'", () => {
+  // Mismo patrón estructural que V13-1/V13-2 (ingreso + lista en el MISMO
+  // segmento de coma) con nombres/montos distintos — prueba que el mecanismo
+  // generaliza y no es un parche memorizado sobre esas cadenas exactas.
+  const delta = extractScenarioDelta("gano 1500 y pago comida 300, luz 80, agua 40");
+  assert.equal(delta.ingreso_mensual, 1500);
+  assert.equal(delta.gastos_items?.length, 3, `ninguna partida debe fusionarse/perderse: ${JSON.stringify(delta.gastos_items)}`);
+  const s = mergeScenario(undefined, delta);
+  assert.equal(s.gastos_mensuales, 420, "300 + 80 + 40 — ninguna partida perdida ni el ingreso colado como gasto");
+  assert.ok(delta.gastos_items?.some((i) => i.amount === 300 && i.name.toLowerCase().includes("comida")));
+  assert.ok(delta.gastos_items?.some((i) => i.amount === 80 && i.name === "luz"), "luz no debe fusionarse con nada del fragmento anterior");
+  assert.ok(delta.gastos_items?.some((i) => i.amount === 40 && i.name === "agua"));
+});
+
+test("TEST OBLIGATORIO V13-5 (regresión V12): ningún ítem con el mismo importe que el ingreso, en ninguno de los casos de esta tanda", () => {
+  for (const msg of [
+    "gano 700 y pago arriendo 650, comida 200, luz 50",
+    "mi sueldo es 2500 y el arriendo 800, comida 300, luz 90",
+    "gano 1500 y pago comida 300, luz 80, agua 40",
+  ]) {
+    const delta = extractScenarioDelta(msg);
+    assert.ok(
+      !delta.gastos_items?.some((i) => i.amount === delta.ingreso_mensual),
+      `V12 violado en "${msg}": ${JSON.stringify(delta)}`,
+    );
+  }
+});
+
+test("TEST OBLIGATORIO V13-6 (regresión, los 6 mensajes obligatorios de la tanda anterior siguen verdes)", () => {
+  const d1 = extractScenarioDelta("gano 2300 y gasto aproximadamente 2000 entre vivienda, comida, servicios, ocio");
+  assert.equal(d1.ingreso_mensual, 2300);
+  assert.equal(d1.gastos_mensuales, 2000);
+  assert.ok(!d1.gastos_items || d1.gastos_items.length === 0);
+
+  const d3 = extractScenarioDelta("gano 2300 y gasto 2200");
+  assert.equal(d3.ingreso_mensual, 2300);
+  assert.equal(d3.gastos_mensuales, 2200);
+
+  const d4 = extractScenarioDelta("arriendo 700, comida 450, luz 120");
+  assert.equal(d4.gastos_items?.length, 3);
+
+  const real =
+    "Diezmo_Vital 225, 700 Casa_Vital Supermercado_Vital 450, 120 Servicios_Vitales, " +
+    "Telecomunicaciones_Necesario 60 100 Pañales_Bebe_Vital, Colegio_Niño_Necesario 150 " +
+    "Transporte_Necesario 100, 80 Ropa_Posible, Ocio_Familiar 60 40 Farmacia_Vital, " +
+    "Suscripciones_Ocio 25 40 Gimnasio_Necesario, 60 Ahorro_Posible Gastos_Varios_Posible 40";
+  const d5 = extractScenarioDelta(real);
+  assert.equal(d5.gastos_items?.length, 15);
+  assert.equal(d5.gastos_items?.reduce((a, i) => a + i.amount, 0), 2250);
+
+  const d6 = extractScenarioDelta("gano 2500, gasto 1800: arriendo 900, comida 500, luz 400");
+  assert.equal(d6.ingreso_mensual, 2500);
+  assert.equal(d6.gastos_mensuales, 1800);
+  assert.equal(d6.gastos_items?.length, 3);
+});
