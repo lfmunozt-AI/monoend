@@ -3,7 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { classifyExpense, classifyExpenses, parseExpenseList, parseExpenseListDetallado } from "./expenses";
+import { classifyExpense, classifyExpenses, parseExpenseList, parseExpenseListDetallado, detectarItemSospechosoPorMagnitud } from "./expenses";
 
 test("clasificación ES: vitales, no vitales, desconocido", () => {
   assert.equal(classifyExpense("luz"), "vital");
@@ -203,6 +203,41 @@ const MENSAJE_REAL_TESTDEV7 =
   "Telecomunicaciones_Necesario 60 100 Pañales_Bebe_Vital, Colegio_Niño_Necesario 150 " +
   "Transporte_Necesario 100, 80 Ropa_Posible, Ocio_Familiar 60 40 Farmacia_Vital, " +
   "Suscripciones_Ocio 25 40 Gimnasio_Necesario, 60 Ahorro_Posible Gastos_Varios_Posible 40";
+
+// ── CALIBRACIÓN (revisión adversarial AG01, 2026-08-06) — riesgo de falso
+// positivo señalado explícitamente: una hipoteca grande entre gastos
+// pequeños NO es un pegado, es un presupuesto real. El umbral literal de
+// "10 × mediana" del encargo original SÍ la marcaba (1200 > 10×47.5=475);
+// se calibró a 50× tras medir ambos casos reales (ver expenses.ts).
+test("detectarItemSospechosoPorMagnitud: hipoteca 1200 entre gastos 40-60 → NO sospechoso (riesgo de falso positivo)", () => {
+  const items = [
+    { name: "hipoteca", amount: 1200 },
+    { name: "luz", amount: 50 },
+    { name: "agua", amount: 40 },
+    { name: "telefono", amount: 60 },
+    { name: "internet", amount: 45 },
+  ];
+  assert.equal(detectarItemSospechosoPorMagnitud(items), null);
+});
+
+test("detectarItemSospechosoPorMagnitud: una cifra ~600× la mediana SÍ se marca (caso real 60100)", () => {
+  const items = [
+    { name: "a", amount: 90 }, { name: "b", amount: 85 }, { name: "c", amount: 95 },
+    { name: "glued", amount: 60100 },
+  ];
+  const r = detectarItemSospechosoPorMagnitud(items);
+  assert.equal(r?.name, "glued");
+});
+
+test("detectarItemSospechosoPorMagnitud: con agregado conocido, un ítem < 3× el agregado no se marca aunque supere la mediana", () => {
+  // Suelo absoluto: 1200 < 3 × 2000 (agregado) → gasto grande plausible.
+  const items = [
+    { name: "hipoteca", amount: 1200 },
+    { name: "luz", amount: 50 },
+    { name: "agua", amount: 40 },
+  ];
+  assert.equal(detectarItemSospechosoPorMagnitud(items, 2000), null);
+});
 
 test("caso 16: mensaje real testdev7 → 15 ítems, suma 2250, buckets coherentes", () => {
   const r = parseExpenseListDetallado(MENSAJE_REAL_TESTDEV7);

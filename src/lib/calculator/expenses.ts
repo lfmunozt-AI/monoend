@@ -387,6 +387,19 @@ function mediana(valores: number[]): number {
  * supera el agregado declarado, o si supera 10× la mediana de los DEMÁS
  * ítems (con ≥3 ítems en la lista — con menos no hay base estadística).
  */
+// PIEZA 3 — CALIBRACIÓN (revisión adversarial AG01, 2026-08-06): el umbral
+// literal "10 × mediana" marca en falso una hipoteca de 1.200 € entre gastos
+// de 40-60 € (mediana ≈47,5 → 10× = 475 → 1200 > 475, falso positivo). Medido
+// contra los dos casos reales:
+//   hipoteca 1200 / mediana 47.5 ≈ 25× (NO debe marcarse)
+//   60100 (pegado real, testdev7) / mediana ~90 ≈ 668× (SÍ debe marcarse)
+// 50× deja margen amplio a ambos lados sin necesitar el agregado como
+// condición. Con agregado conocido, se añade además un suelo absoluto: un
+// ítem por debajo de 3× el agregado total es un gasto grande PLAUSIBLE
+// (vivienda, no un error de tecleo) y no se marca aunque supere la mediana.
+const UMBRAL_MEDIANA_MULTIPLICADOR = 50;
+const SUELO_AGREGADO_MULTIPLICADOR = 3;
+
 export function detectarItemSospechosoPorMagnitud(
   items: ExpenseItem[],
   agregado?: number,
@@ -405,13 +418,13 @@ export function detectarItemSospechosoPorMagnitud(
     for (const item of items) {
       const otros = items.filter((i) => i !== item).map((i) => i.amount);
       const med = mediana(otros);
-      if (med > 0 && item.amount > med * 10) {
-        return {
-          name: item.name,
-          amount: item.amount,
-          sugerencia: `${item.name} (${item.amount}) es muy superior al resto de partidas (mediana ${med}) — ¿son dos cifras pegadas?`,
-        };
-      }
+      if (med <= 0 || item.amount <= med * UMBRAL_MEDIANA_MULTIPLICADOR) continue;
+      if (agregado !== undefined && item.amount < agregado * SUELO_AGREGADO_MULTIPLICADOR) continue;
+      return {
+        name: item.name,
+        amount: item.amount,
+        sugerencia: `${item.name} (${item.amount}) es muy superior al resto de partidas (mediana ${med}) — ¿son dos cifras pegadas?`,
+      };
     }
   }
   return null;

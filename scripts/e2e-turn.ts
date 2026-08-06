@@ -34,6 +34,7 @@ import {
   detectarDiscrepanciaGastos,
   deltaSinGastosPorDiscrepancia,
   detectarEventosICA,
+  analizarExtraccion,
   type ScenarioState,
 } from "../src/lib/calculator/scenario";
 import { toolArgsToScenarioDelta } from "../src/lib/calculator/tools";
@@ -233,6 +234,114 @@ async function main(): Promise<void> {
     assert(!/ingreso mensual\?|cuál es tu ingreso/i.test(nota ?? ""), "afirma 7: la nota NUNCA repregunta el ingreso");
     assert(/desglose|reparten/i.test(nota ?? ""), `afirma 7: la nota debe pedir el DESGLOSE: ${nota}`);
     console.log("✓ afirma 7: notaFaltaDesglose pide el desglose citando el agregado, sin re-preguntar ingreso/gastos");
+
+    // ── T4 (8ª tanda, revisión adversarial AG01 §V9) — ROUND-TRIP DE BD para
+    // los campos de "extracción honesta": extraction_status, gastos_items
+    // (conversations.scenario_state) y las 4 columnas jsonb nuevas de
+    // response_telemetry (migración 019_telemetry_extraction.sql). Es el
+    // invariante cuyo incumplimiento dejó scenario_state vacío días sin que
+    // nadie lo notara — afirmar sobre la RE-LECTURA, nunca sobre el objeto
+    // en memoria, es el punto de este turno.
+    //
+    // Requiere la migración 019 APLICADA para la parte de response_telemetry
+    // (columnas nuevas). Si no lo está, `logResponseTelemetry` (fire-and-forget,
+    // nunca lanza) falla en silencio y esta sección se degrada a un aviso
+    // explícito en vez de reventar el script — el resto del E2E (T1-T3) no
+    // depende de la migración y sigue siendo una prueba válida sin ella.
+    const MENSAJE_REAL_TESTDEV7 =
+      "Diezmo_Vital 225, 700 Casa_Vital Supermercado_Vital 450, 120 Servicios_Vitales, " +
+      "Telecomunicaciones_Necesario 60 100 Pañales_Bebe_Vital, Colegio_Niño_Necesario 150 " +
+      "Transporte_Necesario 100, 80 Ropa_Posible, Ocio_Familiar 60 40 Farmacia_Vital, " +
+      "Suscripciones_Ocio 25 40 Gimnasio_Necesario, 60 Ahorro_Posible Gastos_Varios_Posible 40";
+    const delta4 = extractScenarioDelta(MENSAJE_REAL_TESTDEV7, "es", estado);
+    const analisis4 = analizarExtraccion(MENSAJE_REAL_TESTDEV7, delta4);
+    const discrepancia4 = detectarDiscrepanciaGastos(delta4);
+    const deltaAPersistir4 = deltaSinGastosPorDiscrepancia(delta4, discrepancia4);
+    const scenario4 = mergeScenario(estado, deltaAPersistir4);
+    scenario4.extraction_status = analisis4.extraction_status;
+    assert(scenario4.gastos_items?.length === 15, `T4 (en memoria) debería tener 15 gastos_items (fueron ${scenario4.gastos_items?.length})`);
+    assert(scenario4.tiene_detalle_gastos === true, "T4 (en memoria) tiene_detalle_gastos debe ser true");
+
+    const persistResult4 = await persistTurn(db, {
+      userId,
+      conversationId: convId,
+      scenarioState: scenario4,
+      goal: null,
+      icaEventos: detectarEventosICA(estado, scenario4),
+      telemetry: {
+        userId,
+        conversationId: convId,
+        messageId: null,
+        carril: "FINANCIERO",
+        model: MARCA,
+        tokensUsed: 0,
+        toolCallUsed: false,
+        latencyGenerationMs: 0,
+        latencyValidationMs: 0,
+        latencyTotalMs: 0,
+        calculatorConceptos: {},
+        scenarioMissing: scenario4.missing,
+        responseRaw: MARCA,
+        responseFinal: MARCA,
+        mutations: [],
+        commandmentViolations: [],
+        guardrailIntervened: false,
+        enforcementMode: "full",
+        extraccionIncompleta: analisis4.huerfanos.extraccionIncompleta,
+        numerosHuerfanos: analisis4.huerfanos.numerosHuerfanos,
+        discrepanciaGastos: analisis4.discrepancia.discrepancia,
+        // PIEZA 7 — los 4 campos de la migración 019.
+        extractionStatus: analisis4.extraction_status,
+        deltaRaw: deltaAPersistir4 as unknown as Record<string, unknown>,
+        previousScenario: estado as unknown as Record<string, unknown>,
+        mergedScenario: scenario4 as unknown as Record<string, unknown>,
+        expenseItems: (deltaAPersistir4.gastos_items ?? null) as unknown as Array<Record<string, unknown>> | null,
+      },
+    });
+    assert(persistResult4.scenarioStateOk, `T4 scenario_state debe escribirse: ${JSON.stringify(persistResult4)}`);
+    console.log("✓ T4: persistTurn ejecutado (mensaje real testdev7, 15 partidas)");
+
+    // Re-lectura desde conversations — columnas ya existentes, siempre verificable.
+    const read4 = await db.from("conversations").select("scenario_state").eq("id", convId).single();
+    if (read4.error) throw new Error(`re-read T4: ${read4.error.message}`);
+    const scenarioDB4 = (read4.data as { scenario_state: ScenarioState }).scenario_state;
+    assert(scenarioDB4.gastos_items?.length === 15, `[BD] gastos_items debe sobrevivir con las 15 partidas (fueron ${scenarioDB4.gastos_items?.length})`);
+    assert(scenarioDB4.tiene_detalle_gastos === true, "[BD] tiene_detalle_gastos debe ser true tras el desglose");
+    assert(scenarioDB4.extraction_status !== undefined, "[BD] extraction_status debe persistir");
+    console.log(`✓ afirma 11: [BD] gastos_items (15) y extraction_status (${scenarioDB4.extraction_status}) sobreviven a la re-lectura desde conversations`);
+
+    // Re-lectura desde response_telemetry — PENDIENTE de que Luis aplique la
+    // migración 019. Si la escritura falló por columnas ausentes, se avisa
+    // explícitamente en vez de fallar el script entero (ver comentario arriba).
+    if (!persistResult4.telemetryOk) {
+      console.log(
+        "⚠ afirma 12: PENDIENTE DE VERIFICACIÓN POR LUIS — la escritura de telemetría de T4 falló " +
+          "(probable: migración 019_telemetry_extraction.sql no aplicada aún). Aplicar la migración y " +
+          "re-ejecutar `npm run test:e2e` para cerrar esta verificación.",
+      );
+    } else {
+      const telRead4 = await db
+        .from("response_telemetry")
+        .select("extraction_status, expense_items, delta_raw, previous_scenario, merged_scenario")
+        .eq("conversation_id", convId)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .single();
+      if (telRead4.error) throw new Error(`re-read T4 telemetry: ${telRead4.error.message}`);
+      const telDB4 = telRead4.data as {
+        extraction_status: string | null;
+        expense_items: unknown;
+        delta_raw: unknown;
+        previous_scenario: unknown;
+        merged_scenario: unknown;
+      };
+      assert(telDB4.extraction_status === analisis4.extraction_status, `[BD] response_telemetry.extraction_status debe ser '${analisis4.extraction_status}' (fue '${telDB4.extraction_status}')`);
+      assert(Array.isArray(telDB4.expense_items) && (telDB4.expense_items as unknown[]).length === 15, `[BD] response_telemetry.expense_items debe tener 15 entradas: ${JSON.stringify(telDB4.expense_items)}`);
+      assert(telDB4.delta_raw !== null, "[BD] response_telemetry.delta_raw debe persistir");
+      assert(telDB4.previous_scenario !== null, "[BD] response_telemetry.previous_scenario debe persistir");
+      assert(telDB4.merged_scenario !== null, "[BD] response_telemetry.merged_scenario debe persistir");
+      console.log("✓ afirma 12: [BD] response_telemetry.extraction_status/expense_items/delta_raw/previous_scenario/merged_scenario sobreviven a la re-lectura — migración 019 verificada");
+    }
 
     console.log("\n✅ E2E TURNO OK — persistencia real de scenario_state, goals, ica_history y response_telemetry verificada");
   } finally {
