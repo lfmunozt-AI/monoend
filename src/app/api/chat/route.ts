@@ -27,6 +27,7 @@ import {
   renderDatosRecienEntendidos,
   numerosCandidatos,
   notaFaltaDesglose,
+  notaDetalleSinConfirmar,
   detectarEventosICA,
   analizarExtraccion,
   type ScenarioState,
@@ -446,6 +447,10 @@ export async function POST(request: Request) {
   // agregado de gastos (no desglose), se pide el desglose citando lo ya
   // sabido — nunca se re-pregunta ingreso ni el total de gastos.
   const notaDesglose = notaFaltaDesglose(scenario, cleanMessage)
+  // FIX 5 (9ª tanda) — el desglose existe pero aún no está confirmado: se
+  // entregan los datos entendidos para que el modelo pida confirmación antes
+  // de proponer recortes por partida (sobrante/capacidad/cuota siguen igual).
+  const notaDetalleSinConfirmarVal = notaDetalleSinConfirmar(scenario, cleanMessage)
 
   // Paso 5-6: si hubo tool_call, LLAMADA 2 con el paquete verificado como
   // tool_result; si no, se usa el content de la LLAMADA 1 (ahorra latencia).
@@ -458,7 +463,7 @@ export async function POST(request: Request) {
     const toolResult = JSON.stringify(buildToolResult(scenario, verified))
     // PIEZA 1/3 — la nota de ambigüedad y el eco de confirmación van en ESTA
     // llamada (aún no se ha generado nada con el delta de este turno).
-    const systemPrompt2 = [basePrompt, notaDigresion, notaSinCifras, notaAmbigua, notaEco, notaDesglose, notaTonoEmocional, idiomaObligatorio]
+    const systemPrompt2 = [basePrompt, notaDigresion, notaSinCifras, notaAmbigua, notaEco, notaDesglose, notaDetalleSinConfirmarVal, notaTonoEmocional, idiomaObligatorio]
       .filter(Boolean).join('\n\n')
     const messages2 = [
       ...allMessages,
@@ -474,13 +479,13 @@ export async function POST(request: Request) {
     llmResult = { content: call2.content, tokensUsed: call1.tokensUsed + call2.tokensUsed, model: call2.model }
     respondingSystemPrompt = systemPrompt2
     respondingMessages = messages2
-  } else if (notaAmbigua || notaEco || notaDesglose) {
+  } else if (notaAmbigua || notaEco || notaDesglose || notaDetalleSinConfirmarVal) {
     // PIEZA 1/3/7 (sin tool_call) — el contenido de la LLAMADA 1 se generó ANTES
     // de conocer la ambigüedad, el eco o la falta de desglose (todos dependen
     // del delta, resuelto después). Se regenera UNA vez con la nota inyectada —
     // mismo patrón que el REINTENTO ÚNICO ACOTADO de las derivadas de decisión,
     // más abajo.
-    const systemPromptRegen = [basePrompt, `ESTADO ACTUAL CONOCIDO (lo que ya sabemos del usuario):\n${summarizeScenario(seed)}`, notaDigresion, notaSinCifras, notaAmbigua, notaEco, notaDesglose, notaTonoEmocional, idiomaObligatorio]
+    const systemPromptRegen = [basePrompt, `ESTADO ACTUAL CONOCIDO (lo que ya sabemos del usuario):\n${summarizeScenario(seed)}`, notaDigresion, notaSinCifras, notaAmbigua, notaEco, notaDesglose, notaDetalleSinConfirmarVal, notaTonoEmocional, idiomaObligatorio]
       .filter(Boolean).join('\n\n')
     const regen = await callLLMWithTools(
       allMessages,
