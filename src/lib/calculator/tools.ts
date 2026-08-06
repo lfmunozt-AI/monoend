@@ -6,7 +6,7 @@
 import type { ToolDef } from "../llm";
 import type { Language } from "../language";
 import { classifyExpenses, classifyExpense, type ExpenseItem } from "./expenses";
-import { extractScenarioDelta, type ScenarioState, type CreditoState, type MetaState, type GastoItemEntry } from "./scenario";
+import { extractScenarioDelta, aplicarGuardaDeSanidad, type ScenarioState, type CreditoState, type MetaState, type GastoItemEntry } from "./scenario";
 import { TAE_REFERENCIA } from "./orchestrator";
 
 /**
@@ -143,7 +143,11 @@ export function toolArgsToScenarioDelta(args: Record<string, unknown>): Partial<
     }
   }
 
-  return delta;
+  // FIX 4 (9ª tanda) — misma guarda de sanidad que la vía regex (V12: el
+  // ingreso nunca es un ítem de gasto; magnitud absurda respecto al ingreso):
+  // el LLM también puede devolver un desglose inconsistente, y esta función
+  // es la ÚNICA defensa para esa vía.
+  return aplicarGuardaDeSanidad(delta);
 }
 
 // ── Helpers del flujo del route (puros y testables) ──────────────────────────

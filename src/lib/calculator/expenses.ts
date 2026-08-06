@@ -169,14 +169,26 @@ const TERMINA_EN_CONECTOR_RE =
 // {name: "mis", amount: 2000} (el 2000 de "Gano 2000 euros al mes", ya sin
 // "euros"/"al"/"mes" tras el filtro de ruido). Posesivos plurales, no
 // singulares — "mi"/"tu"/"su" ya estaban.
+// FIX 2a (9ª tanda) — "entre"/"sobre"/"e" añadidos: regresión real ("gasto
+// aproximadamente 2000 entre vivienda, comida..." — "entre" nunca es, por sí
+// solo, el nombre de una partida). Defensa SECUNDARIA — la principal es la
+// exclusión por valor RECLAMADO (V13, ver `parseExpenseListDetallado`) y la
+// evidencia estructural obligatoria (FIX 2b): una lista negra de adverbios
+// siempre será incompleta.
 const STOPWORD_NAME_RE =
-  /^(?:a|al|de|del|en|el|la|los|las|un|una|unos|unas|y|o|por|para|con|sin|que|es|son|mi|tu|su|mis|tus|sus|meses?|mes|a[ñn]os?|anos?|d[ií]as?|semanas?|trimestres?|months?|years?|days?|weeks?)$/i;
+  /^(?:a|al|de|del|en|el|la|los|las|un|una|unos|unas|y|e|o|por|para|con|sin|que|es|son|mi|tu|su|mis|tus|sus|entre|sobre|meses?|mes|a[ñn]os?|anos?|d[ií]as?|semanas?|trimestres?|months?|years?|days?|weeks?)$/i;
 
 // PIEZA 4 (8ª tanda) — ruido a ignorar durante el tokenizado: unidades de
 // tiempo/moneda que no son ni nombre ni monto ("al mes", "€", "euros"). Se
 // descartan ANTES de la segmentación de partidas, para que ni acumulen en un
 // nombre ni interrumpan el emparejamiento nombre↔monto.
-const IGNORABLE_WORD_RE = /^(?:eur|euros?|al|por|per|mes|meses|month|months?|mo|semana|semanas)$/i;
+// FIX 2a (9ª tanda) — hedges de cantidad añadidos (aproximadamente, cerca,
+// alrededor, casi, unos/unas, total, mensual(es), cada, dólares): nunca
+// forman parte de un nombre de partida real — "vivienda unos 700" debe leer
+// "vivienda", no "vivienda unos". Se ignoran (no solo se rechazan como
+// nombre-completo) para que no ensucien un nombre válido que sí los rodea.
+const IGNORABLE_WORD_RE =
+  /^(?:eur|euros?|al|por|per|mes|meses|month|months?|mo|semana|semanas|aproximadamente|aprox|cerca|alrededor|casi|unos?|unas?|total|mensuales?|cada|mas|menos|dolares?|dollars?)$/i;
 
 /** ¿`s` tiene forma de monto ("225", "2500,50")? Sin espacios — esos ya se separaron al tokenizar. */
 function isNumberToken(s: string): boolean {
@@ -445,13 +457,26 @@ export interface ParseExpenseListResult {
  * sobre el de MAGNITUD; si no hay ninguno estructural, se corre el de
  * magnitud sobre el total de ítems ya reunidos.
  */
-export function parseExpenseListDetallado(message: string, agregado?: number): ParseExpenseListResult {
+export function parseExpenseListDetallado(
+  message: string,
+  agregado?: number,
+  excluirValores?: ReadonlySet<number>,
+): ParseExpenseListResult {
   const segmentos = message.split(/[,\n]|(?<=[.!?])\s+/);
   const items: ExpenseItem[] = [];
   let sospechosoEstructural: ItemSospechoso | null = null;
 
   for (const seg of segmentos) {
-    const tokens = tokenizeSegment(seg);
+    let tokens = tokenizeSegment(seg);
+    if (tokens.length === 0) continue;
+    // FIX 1 (9ª tanda, V13) — un número ya RECLAMADO por un campo declarativo
+    // ("gano 2300", "gasto 2000") no puede convertirse en ítem de lista. Se
+    // descarta el token ENTERO (no un placeholder) — así "gasto aproximadamente
+    // 2000 entre vivienda..." no deja ningún monto disponible para que
+    // "vivienda"/"aproximadamente" lo reclamen.
+    if (excluirValores && excluirValores.size > 0) {
+      tokens = tokens.filter((t) => t.kind !== "num" || !excluirValores.has(parseDigitAmount(t.raw)));
+    }
     if (tokens.length === 0) continue;
     const { tokens: resueltos, pares } = resolverPegado(tokens);
     const itemsSegmento = emparejarNombreMonto(resueltos);

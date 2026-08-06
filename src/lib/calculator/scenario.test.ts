@@ -21,9 +21,12 @@ import {
   renderDatosRecienEntendidos,
   pideRecorte,
   notaFaltaDesglose,
+  notaDetalleSinConfirmar,
   detectarEventosICA,
   analizarExtraccion,
   computeExtractionStatus,
+  aplicarGuardaDeSanidad,
+  detectarCorreccionDeItem,
 } from "./scenario";
 
 test("merge: TAE 9% real sobre un crédito previo → recalcula tae_es_referencia", () => {
@@ -898,4 +901,165 @@ test("factStatus: reafirmar EXACTAMENTE el mismo valor ya CONFIRMED se queda CON
 test("factStatus: campo nunca visto → ausente (MISSING implícito, no aparece en el mapa)", () => {
   const s = mergeScenario(undefined, { ingreso_mensual: 2300 });
   assert.equal(s.factStatus?.gastos_mensuales, undefined);
+});
+
+// ── FIX 1/2/3 (9ª tanda) — PRECEDENCIA DECLARATIVO > LISTA ───────────────────
+// Regresión bloqueante real: el parser de listas secuestraba números que ya
+// pertenecían a campos declarados. V1 (nunca se descarta un dato con
+// confianza), V12 (el ingreso nunca es gasto), V13 (un número no puede
+// pertenecer a dos campos) — los 6 tests obligatorios del encargo.
+
+test("TEST OBLIGATORIO 1: 'gano 2300 y gasto aproximadamente 2000 entre vivienda, comida, servicios, ocio'", () => {
+  const msg = "gano 2300 y gasto aproximadamente 2000 entre vivienda, comida, servicios, ocio";
+  const delta = extractScenarioDelta(msg);
+  assert.equal(delta.ingreso_mensual, 2300);
+  assert.equal(delta.gastos_mensuales, 2000, `V1: el dato declarativo debe persistir: ${JSON.stringify(delta)}`);
+  assert.ok(!delta.gastos_items || delta.gastos_items.length === 0, `gastos_items debe estar VACÍO: ${JSON.stringify(delta.gastos_items)}`);
+  assert.ok(
+    !delta.gastos_items?.some((i) => i.name.toLowerCase().includes("aproximadamente")),
+    "ningún ítem debe llamarse 'aproximadamente'",
+  );
+  assert.ok(!delta.gastos_items?.some((i) => i.amount === 2300), "V12: el ingreso (2300) NUNCA como gasto");
+});
+
+test("TEST OBLIGATORIO 2: mensaje completo del e2e con 'dudo entre 200000, 300000 o 150000'", () => {
+  const msg =
+    "gano 2300 y gasto aproximadamente 2000 entre vivienda, comida, servicios, ocio, y ademas estoy " +
+    "pensando en comprar una casa, dudo entre 200000, 300000 o 150000";
+  const delta = extractScenarioDelta(msg);
+  assert.equal(delta.ingreso_mensual, 2300);
+  assert.equal(delta.gastos_mensuales, 2000);
+  assert.ok(!delta.gastos_items || delta.gastos_items.length === 0, "sin ítems inventados de la casa");
+  const huerfanos = detectarNumerosHuerfanos(msg, delta);
+  assert.ok(huerfanos.extraccionIncompleta, "PARTIAL: los montos de la casa deben quedar como huérfanos");
+  assert.deepEqual(huerfanos.numerosHuerfanos.sort((a, b) => a - b), [150000, 200000, 300000]);
+});
+
+test("TEST OBLIGATORIO 3 (regresión): 'gano 2300 y gasto 2200' → 2300/2200, sin ítems", () => {
+  const delta = extractScenarioDelta("gano 2300 y gasto 2200");
+  assert.equal(delta.ingreso_mensual, 2300);
+  assert.equal(delta.gastos_mensuales, 2200);
+  assert.ok(!delta.gastos_items || delta.gastos_items.length === 0);
+});
+
+test("TEST OBLIGATORIO 4 (regresión): 'arriendo 700, comida 450, luz 120' → 3 ítems", () => {
+  const delta = extractScenarioDelta("arriendo 700, comida 450, luz 120");
+  assert.equal(delta.gastos_items?.length, 3);
+  assert.equal(delta.gastos_es_detalle, true);
+});
+
+test("TEST OBLIGATORIO 5 (regresión, no romper caso 16): 15 partidas testdev7 → 15 ítems, suma 2250", () => {
+  const real =
+    "Diezmo_Vital 225, 700 Casa_Vital Supermercado_Vital 450, 120 Servicios_Vitales, " +
+    "Telecomunicaciones_Necesario 60 100 Pañales_Bebe_Vital, Colegio_Niño_Necesario 150 " +
+    "Transporte_Necesario 100, 80 Ropa_Posible, Ocio_Familiar 60 40 Farmacia_Vital, " +
+    "Suscripciones_Ocio 25 40 Gimnasio_Necesario, 60 Ahorro_Posible Gastos_Varios_Posible 40";
+  const delta = extractScenarioDelta(real);
+  assert.equal(delta.gastos_items?.length, 15);
+  assert.equal(delta.gastos_items?.reduce((a, i) => a + i.amount, 0), 2250);
+});
+
+test("TEST OBLIGATORIO 6: 'gano 2500, gasto 1800: arriendo 900, comida 500, luz 400' → agregado Y detalle coexisten", () => {
+  const delta = extractScenarioDelta("gano 2500, gasto 1800: arriendo 900, comida 500, luz 400");
+  assert.equal(delta.ingreso_mensual, 2500);
+  assert.equal(delta.gastos_mensuales, 1800);
+  assert.equal(delta.gastos_items?.length, 3);
+  assert.equal(delta.gastos_items?.reduce((a, i) => a + i.amount, 0), 1800);
+});
+
+// ── FIX 4 (9ª tanda) — GUARDA DE SANIDAD ─────────────────────────────────────
+
+test("aplicarGuardaDeSanidad: V12 — un ítem con el mismo importe que el ingreso descarta el detalle entero", () => {
+  const delta = {
+    ingreso_mensual: 2300,
+    gastos_mensuales: 4300,
+    gastos_es_detalle: true,
+    gastos_detalle: { vitales: 2000, noVitales: 0, desconocidos: 2300 },
+    gastos_items: [
+      { name: "aproximadamente", amount: 2300, category: "desconocido" as const, source: "regex" as const, turn: 0 },
+      { name: "vivienda", amount: 2000, category: "vital" as const, source: "regex" as const, turn: 0 },
+    ],
+  };
+  const limpio = aplicarGuardaDeSanidad(delta);
+  assert.equal(limpio.gastos_items, undefined);
+  assert.equal(limpio.gastos_detalle, undefined);
+  assert.equal(limpio.gastos_es_detalle, undefined);
+  assert.equal(limpio.ingreso_mensual, 2300, "V1: el ingreso NUNCA se toca");
+});
+
+test("aplicarGuardaDeSanidad: magnitud absurda (suma > 3× ingreso) descarta el detalle", () => {
+  const delta = {
+    ingreso_mensual: 1000,
+    gastos_es_detalle: true,
+    gastos_items: [
+      { name: "a", amount: 2000, category: "desconocido" as const, source: "regex" as const, turn: 0 },
+      { name: "b", amount: 2000, category: "desconocido" as const, source: "regex" as const, turn: 0 },
+    ],
+  };
+  const limpio = aplicarGuardaDeSanidad(delta);
+  assert.equal(limpio.gastos_items, undefined);
+});
+
+test("aplicarGuardaDeSanidad: detalle normal (sin duplicar ingreso, magnitud razonable) sobrevive intacto", () => {
+  const delta = {
+    ingreso_mensual: 2300,
+    gastos_es_detalle: true,
+    gastos_items: [
+      { name: "arriendo", amount: 700, category: "vital" as const, source: "regex" as const, turn: 0 },
+      { name: "comida", amount: 450, category: "vital" as const, source: "regex" as const, turn: 0 },
+    ],
+  };
+  const limpio = aplicarGuardaDeSanidad(delta);
+  assert.equal(limpio.gastos_items?.length, 2);
+});
+
+// ── FIX 5 (9ª tanda) — DETALLE_CONFIRMADO ────────────────────────────────────
+
+test("FIX 5 — T1 desglose de 3 partidas → detalle_confirmado false, pendiente de eco", () => {
+  const t1 = mergeScenario(undefined, extractScenarioDelta("arriendo 700, comida 450, luz 120"));
+  assert.equal(t1.detalle_confirmado, false);
+  assert.ok(t1.eco_pendiente?.fields.includes("gastos_detalle"));
+});
+
+test("FIX 5 — T2 'sí, correcto' → detalle_confirmado true, ya puede proponer recortes", () => {
+  const t1 = mergeScenario(undefined, extractScenarioDelta("arriendo 700, comida 450, luz 120"));
+  const t2 = mergeScenario(t1, extractScenarioDelta("sí, correcto", "es", t1));
+  assert.equal(t2.detalle_confirmado, true);
+});
+
+test("FIX 5 — T2 'la luz son 150' → corrección aplicada, el resto conservado, y confirma el desglose", () => {
+  const t1 = mergeScenario(undefined, extractScenarioDelta("arriendo 700, comida 450, luz 120"));
+  const t2 = mergeScenario(t1, extractScenarioDelta("la luz son 150", "es", t1));
+  assert.equal(t2.detalle_confirmado, true);
+  const luz = t2.gastos_items?.find((i) => i.name === "luz");
+  assert.equal(luz?.amount, 150);
+  assert.equal(t2.gastos_items?.find((i) => i.name === "arriendo")?.amount, 700, "arriendo se conserva");
+  assert.equal(t2.gastos_items?.find((i) => i.name === "comida")?.amount, 450, "comida se conserva");
+  assert.equal(t2.gastos_mensuales, 1300, "700 + 450 + 150");
+});
+
+test("FIX 5 — T2 sin corregir ni confirmar explícitamente → promoción automática (eco no corregido)", () => {
+  const t1 = mergeScenario(undefined, extractScenarioDelta("arriendo 700, comida 450, luz 120"));
+  const t2 = mergeScenario(t1, extractScenarioDelta("gracias, lo reviso luego", "es", t1));
+  assert.equal(t2.detalle_confirmado, true);
+});
+
+test("detectarCorreccionDeItem: no dispara si el nombre no coincide con ningún ítem previo", () => {
+  const items = [{ name: "arriendo", amount: 700, category: "vital" as const, source: "regex" as const, turn: 1 }];
+  assert.equal(detectarCorreccionDeItem("el gimnasio son 40", items), null);
+});
+
+test("notaDetalleSinConfirmar: bloquea recorte por partida sin confirmar, no bloquea con confirmación", () => {
+  const t1 = mergeScenario(undefined, extractScenarioDelta("arriendo 700, comida 450, luz 120"));
+  const notaSinConfirmar = notaDetalleSinConfirmar(t1, "¿qué puedo recortar?");
+  assert.ok(notaSinConfirmar, "debe pedir confirmación antes de proponer recortes");
+  assert.match(notaSinConfirmar!, /confirm/i);
+
+  const t2 = mergeScenario(t1, extractScenarioDelta("sí, correcto", "es", t1));
+  assert.equal(notaDetalleSinConfirmar(t2, "¿qué puedo recortar?"), null, "ya confirmado, no bloquea");
+});
+
+test("notaDetalleSinConfirmar: null si no se pide recorte (sobrante/capacidad siguen sin bloqueo)", () => {
+  const t1 = mergeScenario(undefined, extractScenarioDelta("arriendo 700, comida 450, luz 120"));
+  assert.equal(notaDetalleSinConfirmar(t1, "¿cuánto me queda al mes?"), null);
 });
