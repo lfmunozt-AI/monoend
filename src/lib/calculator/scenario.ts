@@ -9,7 +9,7 @@
 // extrae — mejor no tocar el estado que corromperlo. Código PURO, edge-safe.
 
 import { parseDigitAmount, findNumberMentions, dedupeOverlaps, type NumberMention } from "../guardrail/numbers";
-import { parseExpenseList, parseExpenseListDetallado, classifyExpenses, classifyExpense, type ItemSospechoso } from "./expenses";
+import { parseExpenseList, parseExpenseListDetallado, classifyExpenses, classifyExpense, type ItemSospechoso, type Rango } from "./expenses";
 import type { Language } from "../language";
 import { tieneSenalFinanciera, type Carril } from "../guardrail/turn-classifier";
 
@@ -391,35 +391,28 @@ export function extractScenarioDelta(
   const delta: Partial<ScenarioState> = {};
   const n = norm(message);
 
-  // FIX 1 (9ª tanda, V13) — PRECEDENCIA DECLARATIVO > LISTA. Un número
-  // reclamado por un patrón declarativo (gano/ingreso X, gasto X, crédito de
-  // X a N meses, TAE X%) no puede, bajo ninguna circunstancia, convertirse
-  // TAMBIÉN en un ítem de la lista de gastos. CASO REAL: "gano 2300 y gasto
-  // aproximadamente 2000 entre vivienda, comida..." — sin este reclamo,
-  // "aproximadamente" se leía como el nombre del ítem de 2300 (el INGRESO,
-  // doble contado como gasto) y "vivienda" como el de 2000. Se reclama por
-  // VALOR (no por posición): más simple, y suficiente para los casos reales —
-  // ver limitación documentada en `analizarExtraccion`/informe de esta tanda.
-  const claimed = new Set<number>();
-  // FIX V13 (10ª tanda) — no solo el NÚMERO queda reclamado: la PALABRA de
-  // contexto que lo reclamó (gano/sueldo/salario/gasto…) también, para que
-  // no quede libre para fusionarse con el nombre de una partida vecina en el
-  // mismo segmento ("gano 700 y pago arriendo 650" — sin esto, "gano" podía
-  // sobrevivir como parte de un nombre combinado inválido que se tragaba el
-  // 650 entero). Ver `parseExpenseListDetallado` (expenses.ts) — el token se
-  // convierte en FRONTERA, nunca se elimina.
-  const fronteraPalabras = new Set<string>();
+  // FIX V14 (11ª tanda) — FRONTERAS POSICIONALES. Un patrón declarativo
+  // (gano/ingreso X, gasto X, crédito de X a N meses, TAE X%) reclama el
+  // RANGO EXACTO de caracteres que consumió (no un valor ni una palabra
+  // sueltos — ver `Rango` en expenses.ts). Un rango es preciso por
+  // construcción: "casa" en la posición del crédito es frontera SOLO ahí;
+  // "casa 700" a 30 caracteres de distancia sigue siendo una partida de
+  // gasto válida. Reemplaza el reclamo por valor/palabra de la 10ª tanda
+  // (`claimed`/`fronteraPalabras`), que convertía una palabra en una regla
+  // GLOBAL — bug real: "casa" del crédito destruía TAMBIÉN "casa 700" en
+  // otra parte del mensaje, sin relación con el crédito.
+  const rangosReclamados: Rango[] = [];
 
   // ── Tasa real (TAE) — porcentaje en contexto de interés/banco ─────────────
   if (RATE_CONTEXT.test(n)) {
+    const rateMatch = RATE_CONTEXT.exec(n);
     const p = PERCENT.exec(n);
-    if (p) {
+    if (rateMatch && p) {
       const tae = parseDigitAmount(p[1]);
       if (Number.isFinite(tae) && tae > 0 && tae < 100) {
         delta.credito = { tae_pct: tae, tae_es_referencia: false };
-        claimed.add(tae);
-        const rateWord = RATE_CONTEXT.exec(n);
-        if (rateWord) fronteraPalabras.add(norm(rateWord[0]));
+        rangosReclamados.push({ start: rateMatch.index, end: rateMatch.index + rateMatch[0].length });
+        rangosReclamados.push({ start: p.index, end: p.index + p[0].length });
       }
     }
   }
@@ -433,7 +426,7 @@ export function extractScenarioDelta(
       const tae = parseDigitAmount(m[1]);
       if (Number.isFinite(tae) && tae > 0 && tae < 100) {
         delta.credito = { tae_pct: tae, tae_es_referencia: false };
-        claimed.add(tae);
+        rangosReclamados.push({ start: m.index, end: m.index + m[0].length });
       }
     }
   }
@@ -442,7 +435,8 @@ export function extractScenarioDelta(
   // El monto se busca DESDE la keyword de crédito/compra, no como primer número
   // global: en "gano 2500 ... carro de 30000 a 36 meses" el monto es 30000.
   if (PRECIO_CTX.test(n)) {
-    const desdeCredito = n.slice(n.search(PRECIO_CTX)).replace(PLAZO, " ");
+    const precioMatch = PRECIO_CTX.exec(n)!;
+    const desdeCredito = n.slice(precioMatch.index).replace(PLAZO, " ");
     const plazo = PLAZO.exec(n);
     const amount = AMOUNT.exec(desdeCredito);
     if (plazo && amount) {
@@ -456,17 +450,21 @@ export function extractScenarioDelta(
           plazo_meses: meses,
           ...(objetoMatch ? { objeto: objetoMatch[1] } : {}),
         };
-        claimed.add(monto);
-        claimed.add(meses);
-        const creditoWord = PRECIO_CTX.exec(n);
-        if (creditoWord) fronteraPalabras.add(norm(creditoWord[0]));
+        // Rango: desde la palabra de contexto ("casa"/"financiar"/…) hasta el
+        // final de lo último que se haya consumido entre monto y plazo — cubre
+        // TODA la frase declarativa ("casa de 200000 a 240 meses"), sea cual
+        // sea el orden en que aparezcan monto/plazo dentro de ella.
+        const amountAbsEnd = precioMatch.index + amount.index + amount[0].length;
+        const plazoAbsEnd = plazo.index + plazo[0].length;
+        rangosReclamados.push({ start: precioMatch.index, end: Math.max(amountAbsEnd, plazoAbsEnd) });
       }
     }
   }
 
   // ── Ingreso — anclado a su keyword ─────────────────────────────────────────
   if (INGRESO_CTX.test(n)) {
-    const a = AMOUNT.exec(n.slice(n.search(INGRESO_CTX)));
+    const ingresoMatch = INGRESO_CTX.exec(n)!;
+    const a = AMOUNT.exec(n.slice(ingresoMatch.index));
     // PIEZA 1 — "27600 al año" NO se asigna como si fuera mensual: el número
     // queda huérfano a propósito (ver MARCADOR_ANUAL_RE arriba). "entre 2000 y
     // 2500" tampoco se asigna: es un rango, no una cifra (ver esRango arriba).
@@ -474,13 +472,10 @@ export function extractScenarioDelta(
       const v = parseDigitAmount(a[1]);
       if (Number.isFinite(v) && v > 0) {
         delta.ingreso_mensual = v;
-        claimed.add(v);
-        // FIX V13 — la PALABRA de ingreso ("gano", "sueldo", "salario"…)
-        // también queda fuera del alcance del parser de listas, no solo su
-        // número. Caso real: "gano 700 y pago arriendo 650..." — sin esto,
-        // "gano" podía sobrevivir en un nombre combinado inválido.
-        const ingresoWord = INGRESO_CTX.exec(n);
-        if (ingresoWord) fronteraPalabras.add(norm(ingresoWord[0]));
+        // Rango: desde la palabra de ingreso ("gano"/"sueldo"/"salario"…)
+        // hasta el final del propio número — cubre toda la frase declarativa.
+        const amountAbsEnd = ingresoMatch.index + a.index + a[0].length;
+        rangosReclamados.push({ start: ingresoMatch.index, end: amountAbsEnd });
       }
     }
   }
@@ -498,7 +493,7 @@ export function extractScenarioDelta(
     const agregado = parseDigitAmount(aggMatch[1]);
     if (Number.isFinite(agregado) && agregado > 0) {
       delta.gastos_mensuales = agregado;
-      claimed.add(agregado);
+      rangosReclamados.push({ start: aggMatch.index, end: aggMatch.index + aggMatch[0].length });
     }
     const restoDesdeColon = message.slice(aggMatch.index + aggMatch[0].length);
     const detailItems = parseExpenseList(restoDesdeColon);
@@ -513,47 +508,64 @@ export function extractScenarioDelta(
       delta.gastos_items = itemsAGastoItemEntries(detailItems, "regex");
     }
   } else {
-    // FIX 1/2b/3 (9ª tanda) — candidato de valor declarativo de "gasto X"
-    // ("gasto aproximadamente 2000 entre..." → 2000). NO se reclama todavía
-    // a ciegas: primero se comprueba si, SIN reclamarlo (solo excluyendo
-    // ingreso/crédito), el mensaje YA forma una lista real de ≥2 pares. Esa
-    // prueba es la que distingue los dos casos reales que colisionan:
+    // FIX 1/2b/3 (9ª tanda) + FIX V14-2 (11ª tanda, SIMETRÍA) — candidato de
+    // valor declarativo de "gasto X" ("gasto aproximadamente 2000 entre..."
+    // → 2000). El NÚMERO no se reclama a ciegas: primero se comprueba si, sin
+    // reclamarlo, el mensaje YA forma una lista real de ≥2 pares. Esa prueba
+    // distingue los dos casos reales que colisionan:
     //   · "gasto= 1000 arriendo 500 servicios 250..." — el "1000" no es un
     //     valor declarativo aislado, es la primera partida (arriendo=1000);
     //     SIN reclamarlo, el emparejador YA lo une a "arriendo" y encuentra
-    //     4 pares — es una lista real, el candidato NUNCA se reclama.
+    //     4 pares — es una lista real, el NÚMERO nunca se reclama.
     //   · "gasto aproximadamente 2000 entre vivienda, comida, servicios,
     //     ocio" — SIN reclamar nada, el emparejador solo logra UN par
-    //     espurio (vivienda=2000, por pura cercanía) y comida/servicios/ocio
-    //     quedan sin número propio — no hay evidencia de lista (<2 pares):
-    //     el candidato SÍ se reclama, y su exclusión hace que ese único par
-    //     espurio tampoco se forme.
+    //     espurio y comida/servicios/ocio quedan sin número propio — no hay
+    //     evidencia de lista (<2 pares): el NÚMERO SÍ se reclama.
+    // La PALABRA "gasto" es DISTINTA: SIEMPRE es frontera, sin condición —
+    // igual que "gano"/"sueldo" en el bloque de ingreso (arriba). BUG
+    // BLOQUEANTE (11ª tanda, revisión adversarial): la versión anterior solo
+    // volvía frontera la palabra "gasto" DENTRO de la rama de reclamación del
+    // número, así que "gano 2000 y gasto en arriendo 800, comida 300, luz
+    // 100" (donde el candidato 800 SÍ resultaba ser parte de una lista, no
+    // declarativo) dejaba "gasto" como palabra suelta — "y gasto en
+    // arriendo" se validaba junto y NO_ES_GASTO lo rechazaba entero,
+    // perdiendo el arriendo (800) en silencio.
     let gastoDeclaradoSimple: number | undefined;
-    let gastoWord: string | undefined;
+    let gastoWordRango: Rango | undefined;
+    let gastoAmountRango: Rango | undefined;
     if (GASTO_CTX.test(n)) {
-      const a = AMOUNT.exec(n.slice(n.search(GASTO_CTX)));
+      const gastoMatch = GASTO_CTX.exec(n)!;
+      gastoWordRango = { start: gastoMatch.index, end: gastoMatch.index + gastoMatch[0].length };
+      const a = AMOUNT.exec(n.slice(gastoMatch.index));
       if (a && !esCifraAnual(n, GASTO_CTX, a) && !esRango(n, GASTO_CTX, a)) {
         const v = parseDigitAmount(a[1]);
-        if (Number.isFinite(v) && v > 0) gastoDeclaradoSimple = v;
+        if (Number.isFinite(v) && v > 0) {
+          gastoDeclaradoSimple = v;
+          const amountAbsStart = gastoMatch.index + a.index;
+          gastoAmountRango = { start: amountAbsStart, end: amountAbsStart + a[0].length };
+        }
       }
-      gastoWord = GASTO_CTX.exec(n)?.[0];
     }
 
-    // La "prueba probatoria" (¿ya hay lista real SIN reclamar el candidato?)
-    // corre con la palabra de gasto TODAVÍA NO marcada como frontera —
-    // exactamente el mismo criterio que con el valor (ver comentario arriba).
-    let listResult = parseExpenseListDetallado(message, gastoDeclaradoSimple, claimed, fronteraPalabras);
+    // Prueba probatoria: ¿ya hay lista real SIN reclamar el NÚMERO candidato?
+    // (la PALABRA "gasto" sí entra aquí ya — es incondicional, ver arriba).
+    const rangosProbatoria = gastoWordRango ? [...rangosReclamados, gastoWordRango] : rangosReclamados;
+    let listResult = parseExpenseListDetallado(message, gastoDeclaradoSimple, rangosProbatoria);
     if (gastoDeclaradoSimple !== undefined && listResult.items.length < 2) {
-      // Sin el candidato disponible para el emparejamiento espontáneo, NO
+      // Sin el número disponible para el emparejamiento espontáneo, NO
       // emergió ninguna lista real → es un valor declarativo genuino: se
-      // reclama (valor Y palabra) y se excluye también de la lista final.
-      claimed.add(gastoDeclaradoSimple);
-      if (gastoWord) fronteraPalabras.add(norm(gastoWord));
-      listResult = parseExpenseListDetallado(message, gastoDeclaradoSimple, claimed, fronteraPalabras);
+      // reclama también su rango y se excluye de la lista final.
+      if (gastoWordRango) rangosReclamados.push(gastoWordRango);
+      if (gastoAmountRango) rangosReclamados.push(gastoAmountRango);
+      listResult = parseExpenseListDetallado(message, gastoDeclaradoSimple, rangosReclamados);
     } else {
-      // Ya había ≥2 pares SIN reclamar el candidato — probablemente ES una
-      // de las partidas (o es irrelevante). No se reclama.
+      // Ya había ≥2 pares SIN reclamar el número — probablemente ES una de
+      // las partidas (o es irrelevante). El número NO se reclama, pero la
+      // PALABRA "gasto" SÍ queda como frontera permanente (simetría con
+      // ingreso) — nunca debe colarse en el nombre de una partida.
       gastoDeclaradoSimple = undefined;
+      if (gastoWordRango) rangosReclamados.push(gastoWordRango);
+      listResult = parseExpenseListDetallado(message, undefined, rangosReclamados);
     }
     const esListaReal = listResult.items.length >= 2;
 
@@ -625,7 +637,19 @@ export function extractScenarioDelta(
     }
   }
 
-  return aplicarGuardaDeSanidad(delta);
+  const limpio = aplicarGuardaDeSanidad(delta);
+
+  // FIX V14-3 (11ª tanda, LEY DE CONSERVACIÓN) — extraction_status SIEMPRE
+  // viene definido en el delta que devuelve esta función, nunca `undefined`.
+  // Antes solo se calculaba en route.ts (vía `analizarExtraccion`, DESPUÉS de
+  // llamar a esta función) — quien probara `extractScenarioDelta` de forma
+  // aislada (como esta misma revisión) nunca veía el estado de honestidad de
+  // la extracción. Se calcula aquí, con el delta YA limpio de la guarda de
+  // sanidad, y route.ts sigue pudiendo recalcularlo/sobreescribirlo sin
+  // problema (mismo resultado, redundante pero inofensivo).
+  limpio.extraction_status = analizarExtraccion(message, limpio).extraction_status;
+
+  return limpio;
 }
 
 // PIEZA FIX 5 — "la luz son 150": corrige UNA partida ya conocida sin
@@ -775,11 +799,19 @@ function coincideConAsignado(v: number, asignados: number[]): boolean {
  * (determinista, sin efectos secundarios).
  */
 function valoresAsignadosEnDelta(message: string, delta: Partial<ScenarioState>): number[] {
+  void message; // se conserva en la firma por compatibilidad; ya no se re-deriva nada de él.
   const vals: number[] = [];
   if (delta.ingreso_mensual !== undefined) vals.push(delta.ingreso_mensual);
   if (delta.gastos_mensuales !== undefined) vals.push(delta.gastos_mensuales);
-  if (delta.gastos_es_detalle) {
-    for (const item of parseExpenseList(message)) vals.push(item.amount);
+  // FIX V14-3 (11ª tanda) — usa los ítems YA ASIGNADOS en `delta.gastos_items`
+  // directamente, en vez de RE-DERIVARLOS con `parseExpenseList(message)` (sin
+  // los rangos reclamados por FIX V14-1). La re-derivación podía producir un
+  // conjunto de ítems DISTINTO al que de verdad se asignó — y, más grave,
+  // ocultaba números que sí quedaron sin destino (ley de conservación, V14):
+  // si `parseExpenseList` "adivinaba" un ítem que `extractScenarioDelta` NUNCA
+  // asignó, ese número se contaba como cubierto sin estarlo.
+  if (delta.gastos_items) {
+    for (const item of delta.gastos_items) vals.push(item.amount);
   }
   if (delta.credito) {
     if (delta.credito.monto) vals.push(delta.credito.monto);
