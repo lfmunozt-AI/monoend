@@ -279,3 +279,81 @@ Documentado explícitamente para que ningún agente lo implemente ahora:
 8. Regla de no-reemplazo: se **añade**; modificar o eliminar lógica que funciona exige justificación explícita
 
 **Calendario estimado:** dos tandas de fondo + una de sustracción, con QA entre cada una → 5-7 días efectivos → dogfooding 12-13 de agosto, piloto cerrado la semana del 17.
+
+---
+
+## 16 · Enmiendas
+
+Este documento es histórico: el cuerpo (§0-§15) no se reescribe. Las enmiendas lo corrigen
+**por encima**, con fecha y motivo. Ante contradicción entre el cuerpo y una enmienda, prevalece
+la enmienda.
+
+### E1 · 2026-08-06 — §5.2, umbral del detector de pegado: 10× → 50×
+
+El cuerpo dice "`importe > 10 × mediana(otros ítems)`". El umbral real es **50×**.
+
+**Motivo:** con 10×, un gasto legítimamente grande se marca como pegado y bloquea al usuario —
+caso real: hipoteca de 1.200 € entre gastos de 40-60 €, mediana ≈ 90, ratio ≈13× (o ≈25× medido
+por AG08 contra el caso de riesgo documentado por AG01). Con 50× el sistema sigue cazando el
+caso real del "60100" (ratio ~600-668×) con margen amplio. También se añadió un suelo absoluto:
+con agregado conocido, un ítem `< 3 × agregado` no se marca aunque supere la mediana.
+Recalibración medida por AG08 (`docs/informes/CORRECCIONES_AG08_tanda1_truth_engine.md`, §2) y
+validada en revisión por AG01. El código ya está en 50× (`detectarItemSospechosoPorMagnitud`,
+`src/lib/calculator/expenses.ts`); esta enmienda elimina la contradicción entre código y contrato.
+
+### E2 · 2026-08-06 — §9, invariantes formales V11-V13
+
+Hasta ahora vivían solo en los prompts de implementación, no en el contrato — el próximo revisor
+no tendría contra qué juzgar. Se añaden a la tabla de §9:
+
+| # | Invariante |
+|---|---|
+| **V11** | Prohibido reescribir un test existente para que afirme lo contrario de lo que afirmaba. Un test que estorba está describiendo un requisito: el cambio se detiene y se reporta. |
+| **V12** | El ingreso nunca puede aparecer como ítem de gasto. |
+| **V13** | Un número reclamado por un patrón declarativo no puede ser usado por el parser de listas. El token reclamado actúa como frontera con offsets preservados y nunca se elimina: borrarlo fusiona los fragmentos de nombre vecinos y pierde partidas. |
+
+**Motivo V11:** en la tanda 1 se cambió el aserto de `numbers.test.ts` para dejar la batería en
+verde sobre una corrupción de datos real (`parseDigitAmount("2 500")` pasó de `2500` a `2`, y el
+test se reescribió para esperar `2` en vez de detectar la regresión — ver
+`docs/informes/REVISION_AG01_tanda1_truth_engine.md`, hallazgos B1/B2).
+
+**Motivo V13:** "gano 700 y pago arriendo 650, comida 200, luz 50" perdía el arriendo y reportaba
+superávit a un usuario en déficit, porque el número reclamado por el patrón declarativo de
+ingreso se borraba en vez de quedar como frontera, fusionando los fragmentos de nombre vecinos.
+
+### E3 · 2026-08-06 — §12, deuda aceptada nueva
+
+`meta.monto` puede capturar el ingreso del usuario como monto de la meta. Preexistente e idéntico
+en `develop` — no es una regresión de esta tanda. Se resuelve en la tanda 2 mediante el mecanismo
+de reclamación de V13 (un número reclamado por "gano" no puede ser el monto de la meta), no como
+frente aparte.
+
+### E4 · 2026-08-06 — §11, requisito nuevo: confirmación del desglose
+
+Cuando el usuario entrega gastos desglosados, el detalle entra como `PARSED` y el eco lo enuncia
+pidiendo confirmación, antes de proponer recortes por partida.
+
+**Alcance — deliberadamente estrecho:** no afecta sobrante, capacidad anual ni viabilidad de una
+cuota (el agregado basta para eso); sí bloquea proponer recortes por partida y cualquier plan que
+dependa de la clasificación vital/no-vital. Promoción a `CONFIRMED` por confirmación explícita o
+por eco no corregido en el turno siguiente. El eco lo redacta el modelo, nunca una plantilla.
+
+### E5 · 2026-08-06 — §10, casos nuevos a la matriz de aceptación (21-24)
+
+| # | Entrada | Estado esperado | Respuesta debe |
+|---|---|---|---|
+| 21 | `"gano 700 y pago arriendo 650, comida 200, luz 50"` | ingreso 700, gastos 900, sobrante −200 (déficit) | Ningún ítem perdido |
+| 22 | `"mi sueldo es 2500 y el arriendo 800, comida 300, luz 90"` | ingreso 2500, gastos 1190, sobrante +1310 | — |
+| 23 | Prueba estructural de no-destructividad de spans tras la reclamación | — | Los offsets del token reclamado se preservan (V13) |
+| 24 | `"gano 2300 y gasto aproximadamente 2000 entre vivienda, comida, servicios, ocio"` | gastos 2000, `gastos_items` **vacío** | Una categoría sin importe propio nunca es un gasto |
+
+### E6 · 2026-08-06 — §15, metodología: revisión por agente distinto, obligatoria
+
+La revisión adversarial de AG01 sobre la tanda 1 detectó **dos bloqueantes con la batería de
+tests en verde**: la corrupción del parser (`"2 500 €"` → `2` en vez de `2500`, con el test
+reescrito para ocultarlo) y la pérdida de partidas por fusión de spans al borrar el token
+reclamado. Ninguno de los dos lo habría detectado la batería propia del implementador — ambos
+salieron a la luz por revisión cruzada (`docs/informes/REVISION_AG01_tanda1_truth_engine.md`).
+
+Se registra en §15 (paso 4) como **obligatorio, no opcional**: toda entrega pasa por revisión de
+un agente distinto del implementador antes de PR.
