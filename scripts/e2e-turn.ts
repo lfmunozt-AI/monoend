@@ -343,6 +343,42 @@ async function main(): Promise<void> {
       console.log("✓ afirma 12: [BD] response_telemetry.extraction_status/expense_items/delta_raw/previous_scenario/merged_scenario sobreviven a la re-lectura — migración 019 verificada");
     }
 
+    // ── T5 (12ª tanda) — RECONCILIACIÓN CROSS-TURNO (Gate G1c) contra BD real.
+    // Caso real de origen de esta tanda: el usuario declara un agregado de
+    // gastos en un turno y entrega un desglose que no cuadra en OTRO — la
+    // afirmación central es que el CONFLICTO sobrevive a la escritura y
+    // RE-LECTURA de `conversations.scenario_state` (nunca al objeto en
+    // memoria), y que resolverlo dos turnos después también se persiste.
+    estado = await ejecutarTurno(db, userId, convId, estado, extractScenarioDelta("Gano 2636 euros al mes y mis gastos son 2200."), "Gano 2636 euros al mes y mis gastos son 2200.");
+    console.log("✓ T5a: persistTurn ejecutado (agregado de gastos 2200)");
+
+    const delta5b = extractScenarioDelta("Mis gastos: arriendo 1200, comida 1050");
+    estado = await ejecutarTurno(db, userId, convId, estado, delta5b, "Mis gastos: arriendo 1200, comida 1050");
+    console.log("✓ T5b: persistTurn ejecutado (desglose 2250 — no cuadra con el agregado)");
+
+    const read5b = await db.from("conversations").select("scenario_state").eq("id", convId).single();
+    if (read5b.error) throw new Error(`re-read T5b: ${read5b.error.message}`);
+    const scenarioDB5b = (read5b.data as { scenario_state: ScenarioState }).scenario_state;
+    assert(scenarioDB5b.gastos_conflict?.agregado === 2200, `[BD] gastos_conflict.agregado debe ser 2200 (fue ${scenarioDB5b.gastos_conflict?.agregado})`);
+    assert(scenarioDB5b.gastos_conflict?.detalle === 2250, `[BD] gastos_conflict.detalle debe ser 2250 (fue ${scenarioDB5b.gastos_conflict?.detalle})`);
+    assert(scenarioDB5b.gastos_conflict?.diff === 50, `[BD] gastos_conflict.diff debe ser +50 (fue ${scenarioDB5b.gastos_conflict?.diff})`);
+    assert(scenarioDB5b.factStatus?.gastos_mensuales === "CONFLICT", `[BD] factStatus.gastos_mensuales debe ser CONFLICT (fue ${scenarioDB5b.factStatus?.gastos_mensuales})`);
+    console.log("✓ afirma 13: [BD] gastos_conflict (agregado 2200, detalle 2250, diff +50) sobrevive a la RE-LECTURA — el conflicto real de origen de esta tanda queda detectado y persistido");
+
+    const delta5c = extractScenarioDelta("eran 2250", "es", estado);
+    assert(delta5c.gastos_resolucion?.valorConfirmado === 2250, `T5c debería detectar la resolución 'eran 2250' (fue ${JSON.stringify(delta5c.gastos_resolucion)})`);
+    estado = await ejecutarTurno(db, userId, convId, estado, delta5c, "eran 2250");
+    console.log("✓ T5c: persistTurn ejecutado (resolución: 'eran 2250')");
+
+    const read5c = await db.from("conversations").select("scenario_state").eq("id", convId).single();
+    if (read5c.error) throw new Error(`re-read T5c: ${read5c.error.message}`);
+    const scenarioDB5c = (read5c.data as { scenario_state: ScenarioState }).scenario_state;
+    assert(scenarioDB5c.gastos_mensuales === 2250, `[BD] gastos_mensuales debe ser 2250 tras la resolución (fue ${scenarioDB5c.gastos_mensuales})`);
+    assert(scenarioDB5c.gastos_conflict === undefined, `[BD] gastos_conflict debe quedar cerrado (fue ${JSON.stringify(scenarioDB5c.gastos_conflict)})`);
+    assert(scenarioDB5c.factStatus?.gastos_mensuales === "CONFIRMED", `[BD] factStatus.gastos_mensuales debe ser CONFIRMED (fue ${scenarioDB5c.factStatus?.gastos_mensuales})`);
+    assert(scenarioDB5c.gastos_superseded?.some((s) => s.valor === 2200 && s.motivo === "USER_CORRECTION"), `[BD] gastos_superseded debe conservar el 2200 perdedor (fue ${JSON.stringify(scenarioDB5c.gastos_superseded)})`);
+    console.log("✓ afirma 14: [BD] resolución (2250 CONFIRMED, 2200 SUPERSEDED) sobrevive a la RE-LECTURA — V7, el valor perdedor nunca se borra");
+
     console.log("\n✅ E2E TURNO OK — persistencia real de scenario_state, goals, ica_history y response_telemetry verificada");
   } finally {
     if (goalIds.length > 0) {

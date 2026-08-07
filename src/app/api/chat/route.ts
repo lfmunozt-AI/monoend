@@ -30,6 +30,8 @@ import {
   notaDetalleSinConfirmar,
   detectarEventosICA,
   analizarExtraccion,
+  detectarResolucionConflicto,
+  notaConflictoGastos,
   type ScenarioState,
 } from '@/lib/calculator/scenario'
 import { registrarDatosFinancieros, resolveDelta, buildToolResult } from '@/lib/calculator/tools'
@@ -374,6 +376,22 @@ export async function POST(request: Request) {
   console.log(`[chat] ${usedTool ? 'toolCall usado' : 'fallback-regex'}`,
     JSON.stringify({ conversation_id: convId, keys: Object.keys(delta), carril }))
 
+  // PIEZA 1/3 (12ª tanda, §2) — resolución de un CONFLICT/ASSUMED activo.
+  // `extractScenarioDelta` ya detecta esto en el carril fallback-regex (mira
+  // `seed.gastos_conflict`/`seed.gastos_assumed` directamente), pero el
+  // carril con tool_call NUNCA pasa por esa función (`toolArgsToScenarioDelta`
+  // no conoce el mensaje) — así que una resolución en lenguaje natural ("usa
+  // 2250", "eran 2250") se perdía si el modelo decidía llamar a la tool en
+  // vez de dejar el fallback. Se recalcula aquí, SIEMPRE, sobre el delta ya
+  // resuelto — sin pisar lo que el fallback ya haya puesto.
+  if (seed.gastos_conflict && delta.gastos_resolucion === undefined) {
+    const resolucion = detectarResolucionConflicto(cleanMessage, seed.gastos_conflict)
+    if (resolucion) delta.gastos_resolucion = resolucion
+  }
+  if (seed.gastos_assumed && esConfirmacionCorta(cleanMessage)) {
+    delta.gastos_assumed_confirmado = true
+  }
+
   // PIEZA 1 (6ª tanda) — HUÉRFANOS MARCAN, NUNCA DESCARTAN. "Ningún dato entra
   // al estado sin que el usuario lo vea" sigue siendo el principio, pero un
   // huérfano (un número suelto que no encaja en ningún campo) es SOLO una
@@ -451,6 +469,9 @@ export async function POST(request: Request) {
   // entregan los datos entendidos para que el modelo pida confirmación antes
   // de proponer recortes por partida (sobrante/capacidad/cuota siguen igual).
   const notaDetalleSinConfirmarVal = notaDetalleSinConfirmar(scenario, cleanMessage)
+  // PIEZA 7 (12ª tanda, §2/§6) — CONFLICT/ASSUMED de gastos: datos crudos al
+  // modelo, la frase la redacta él (PROHIBIDO texto enlatado — ver la nota).
+  const notaConflicto = notaConflictoGastos(scenario)
 
   // Paso 5-6: si hubo tool_call, LLAMADA 2 con el paquete verificado como
   // tool_result; si no, se usa el content de la LLAMADA 1 (ahorra latencia).
@@ -463,7 +484,7 @@ export async function POST(request: Request) {
     const toolResult = JSON.stringify(buildToolResult(scenario, verified))
     // PIEZA 1/3 — la nota de ambigüedad y el eco de confirmación van en ESTA
     // llamada (aún no se ha generado nada con el delta de este turno).
-    const systemPrompt2 = [basePrompt, notaDigresion, notaSinCifras, notaAmbigua, notaEco, notaDesglose, notaDetalleSinConfirmarVal, notaTonoEmocional, idiomaObligatorio]
+    const systemPrompt2 = [basePrompt, notaDigresion, notaSinCifras, notaAmbigua, notaEco, notaDesglose, notaDetalleSinConfirmarVal, notaConflicto, notaTonoEmocional, idiomaObligatorio]
       .filter(Boolean).join('\n\n')
     const messages2 = [
       ...allMessages,
@@ -479,13 +500,13 @@ export async function POST(request: Request) {
     llmResult = { content: call2.content, tokensUsed: call1.tokensUsed + call2.tokensUsed, model: call2.model }
     respondingSystemPrompt = systemPrompt2
     respondingMessages = messages2
-  } else if (notaAmbigua || notaEco || notaDesglose || notaDetalleSinConfirmarVal) {
+  } else if (notaAmbigua || notaEco || notaDesglose || notaDetalleSinConfirmarVal || notaConflicto) {
     // PIEZA 1/3/7 (sin tool_call) — el contenido de la LLAMADA 1 se generó ANTES
     // de conocer la ambigüedad, el eco o la falta de desglose (todos dependen
     // del delta, resuelto después). Se regenera UNA vez con la nota inyectada —
     // mismo patrón que el REINTENTO ÚNICO ACOTADO de las derivadas de decisión,
     // más abajo.
-    const systemPromptRegen = [basePrompt, `ESTADO ACTUAL CONOCIDO (lo que ya sabemos del usuario):\n${summarizeScenario(seed)}`, notaDigresion, notaSinCifras, notaAmbigua, notaEco, notaDesglose, notaDetalleSinConfirmarVal, notaTonoEmocional, idiomaObligatorio]
+    const systemPromptRegen = [basePrompt, `ESTADO ACTUAL CONOCIDO (lo que ya sabemos del usuario):\n${summarizeScenario(seed)}`, notaDigresion, notaSinCifras, notaAmbigua, notaEco, notaDesglose, notaDetalleSinConfirmarVal, notaConflicto, notaTonoEmocional, idiomaObligatorio]
       .filter(Boolean).join('\n\n')
     const regen = await callLLMWithTools(
       allMessages,
@@ -773,6 +794,21 @@ export async function POST(request: Request) {
       previousScenario: seed as unknown as Record<string, unknown>,
       mergedScenario: scenarioAPersistir as unknown as Record<string, unknown>,
       expenseItems: (deltaAPersistir.gastos_items ?? null) as unknown as Array<Record<string, unknown>> | null,
+      // PIEZA 7 (12ª tanda, §2/§6/§8) — telemetría de la reconciliación
+      // cross-turno (migración 020_telemetry_conflict.sql). Columnas de
+      // primera clase para no tener que parsear `merged_scenario` al medir
+      // la tasa real de conflictos/supuestos.
+      conflictStatus: scenarioAPersistir.gastos_conflict
+        ? 'CONFLICT'
+        : scenarioAPersistir.gastos_assumed
+          ? 'ASSUMED'
+          : null,
+      conflictField: scenarioAPersistir.gastos_conflict || scenarioAPersistir.gastos_assumed
+        ? 'gastos_mensuales'
+        : null,
+      conflictDiff: scenarioAPersistir.gastos_conflict?.diff ?? null,
+      conflictAttempts: scenarioAPersistir.gastos_conflict?.attempts ?? null,
+      assumedFields: scenarioAPersistir.gastos_assumed ? ['gastos_mensuales'] : [],
     },
   })
 
