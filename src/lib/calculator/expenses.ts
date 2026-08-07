@@ -223,6 +223,24 @@ interface Tok {
   kind: "num" | "word" | "boundary";
   /** ¿El token original terminaba en ":" ("Alquiler:")? Ver `emparejarNombreMonto`. */
   hadColon?: boolean;
+  /** FIX V14 (11ª tanda) — posición ABSOLUTA (en `message`, no en el segmento) de este token. */
+  start: number;
+  end: number;
+}
+
+/**
+ * FIX V14 (11ª tanda) — un RANGO de caracteres [start, end) en el mensaje
+ * original. Sustituye al reclamo por VALOR/PALABRA (10ª tanda): ese mecanismo
+ * convertía una palabra ("casa", "gasto"…) en una regla GLOBAL — cualquier
+ * ocurrencia homónima en CUALQUIER posición del mensaje quedaba destruida,
+ * aunque fuera una partida de gasto legítima y sin relación con la primera
+ * ("quiero una casa de 200000 a 240 meses, casa 700, comida 300" perdía la
+ * partida "casa 700" porque "casa" ya era frontera por culpa del crédito). Un
+ * RANGO es preciso: solo esa aparición exacta queda fuera de juego.
+ */
+export interface Rango {
+  start: number;
+  end: number;
 }
 
 // PIEZA 2/4 (8ª tanda) — mismo vocabulario que `SUSTANTIVO_NO_MONETARIO_AFTER_RE`
@@ -239,20 +257,31 @@ const UNIDAD_NO_MONETARIA_RE =
  * fragmento sin comas) por espacios simples. Nunca reagrupa dígitos separados
  * por espacio como si fueran miles — eso es exactamente lo que
  * `resolverPegado` (más abajo) decide caso por caso, no el tokenizador.
+ *
+ * FIX V14 (11ª tanda) — `segmentStart` es la posición ABSOLUTA de este
+ * segmento dentro del `message` original: cada token que produce lleva su
+ * propio `start`/`end` absolutos, para poder comparar contra los `Rango[]`
+ * reclamados por los patrones declarativos (ver `parseExpenseListDetallado`).
  */
-function tokenizeSegment(segment: string): Tok[] {
-  const raw = segment.trim().split(/\s+/).filter(Boolean);
+function tokenizeSegment(segment: string, segmentStart: number): Tok[] {
   const toks: Tok[] = [];
-  for (const r of raw) {
+  const WORD_RE = /\S+/g;
+  let m: RegExpExecArray | null;
+  while ((m = WORD_RE.exec(segment)) !== null) {
+    const r = m[0];
+    const localStart = m.index;
     const hadColon = r.endsWith(":");
+    const leadStrip = r.match(/^[.,;:()€$=]+/)?.[0].length ?? 0;
     const stripped = r.replace(/^[.,;:()€$=]+|[.,;:()€$=]+$/g, "");
     if (!stripped) continue;
+    const start = segmentStart + localStart + leadStrip;
+    const end = start + stripped.length;
     if (isNumberToken(stripped)) {
-      toks.push({ raw: stripped, kind: "num" });
+      toks.push({ raw: stripped, kind: "num", start, end });
     } else if (IGNORABLE_WORD_RE.test(stripped)) {
       continue; // ruido (unidad de tiempo/moneda) — no es nombre ni monto.
     } else if (isWordToken(stripped)) {
-      toks.push({ raw: stripped, kind: "word", hadColon });
+      toks.push({ raw: stripped, kind: "word", hadColon, start, end });
     }
     // cualquier otro símbolo suelto se descarta.
   }
@@ -304,7 +333,7 @@ function resolverPegado(tokens: Tok[]): { tokens: Tok[]; pares: Array<[Tok, Tok]
       const after = tokens[i + 2];
       const hayNombreDespues = !!after && after.kind === "word";
       if (!hayNombreDespues) {
-        out.push({ raw: `${t.raw} ${next.raw}`, kind: "num" });
+        out.push({ raw: `${t.raw} ${next.raw}`, kind: "num", start: t.start, end: next.end });
         i += 2;
         continue;
       }
@@ -473,6 +502,29 @@ export interface ParseExpenseListResult {
 }
 
 /**
+ * FIX V14 (11ª tanda) — segmenta `message` (comas, saltos, fin de frase, el
+ * MISMO patrón que antes) pero conservando la posición ABSOLUTA de cada
+ * segmento, para que `tokenizeSegment` pueda calcular offsets reales.
+ */
+function segmentarConOffset(message: string): Array<{ text: string; start: number }> {
+  const DELIM_RE = /[,\n]|(?<=[.!?])\s+/g;
+  const segmentos: Array<{ text: string; start: number }> = [];
+  let lastEnd = 0;
+  let m: RegExpExecArray | null;
+  while ((m = DELIM_RE.exec(message)) !== null) {
+    segmentos.push({ text: message.slice(lastEnd, m.index), start: lastEnd });
+    lastEnd = m.index + m[0].length;
+  }
+  segmentos.push({ text: message.slice(lastEnd), start: lastEnd });
+  return segmentos;
+}
+
+/** ¿El rango [a.start, a.end) se solapa con [b.start, b.end)? */
+function seSolapan(a: Rango, b: Rango): boolean {
+  return a.start < b.end && b.start < a.end;
+}
+
+/**
  * PIEZA 4 — LÍMITES PRIMERO, NÚMEROS DESPUÉS: segmenta el mensaje en partidas
  * (comas, saltos, fin de frase) ANTES de tocar un solo dígito. Cada partida se
  * tokeniza por espacios (nunca por el regex de miles-con-espacio del parser
@@ -481,39 +533,42 @@ export interface ParseExpenseListResult {
  * (`emparejarNombreMonto`). El sospechoso ESTRUCTURAL (pegado) tiene prioridad
  * sobre el de MAGNITUD; si no hay ninguno estructural, se corre el de
  * magnitud sobre el total de ítems ya reunidos.
+ *
+ * FIX V14 (11ª tanda) — `excluirRangos` sustituye a los antiguos
+ * `excluirValores`/`fronteraPalabras` (por VALOR/PALABRA, 10ª tanda): esos
+ * mecanismos convertían una palabra o un número en una regla GLOBAL — CUALQUIER
+ * ocurrencia homónima en cualquier punto del mensaje quedaba destruida, no
+ * solo la que de verdad pertenecía al campo declarativo ("casa" en el crédito
+ * volvía frontera TAMBIÉN la "casa 700" de la lista de gastos, en otra parte
+ * del mensaje por completo). Un `Rango` es la posición EXACTA que consumió el
+ * patrón declarativo — nada fuera de esos caracteres se toca.
  */
 export function parseExpenseListDetallado(
   message: string,
   agregado?: number,
-  excluirValores?: ReadonlySet<number>,
-  fronteraPalabras?: ReadonlySet<string>,
+  excluirRangos?: ReadonlyArray<Rango>,
 ): ParseExpenseListResult {
-  const segmentos = message.split(/[,\n]|(?<=[.!?])\s+/);
+  const segmentos = segmentarConOffset(message);
   const items: ExpenseItem[] = [];
   let sospechosoEstructural: ItemSospechoso | null = null;
 
   for (const seg of segmentos) {
-    let tokens = tokenizeSegment(seg);
+    let tokens = tokenizeSegment(seg.text, seg.start);
     if (tokens.length === 0) continue;
-    // FIX V13 (10ª tanda) — un número ya RECLAMADO por un campo declarativo
-    // ("gano 2300", "gasto 2000") no puede convertirse en ítem de lista, pero
-    // el token NUNCA SE ELIMINA del array (eliminarlo fusiona los nombres
-    // vecinos — bug real: "gano 700 y pago arriendo 650" perdía el 650
-    // entero porque "gano"+"y pago arriendo" se validaban JUNTOS tras borrar
-    // el 700). Se convierte en un token FRONTERA: sigue presente, pero
-    // `emparejarNombreMonto` lo trata como un reset duro (como una coma),
-    // nunca como nombre ni monto. La PALABRA de ingreso que originó el
-    // reclamo ("gano", "sueldo"…) recibe el mismo tratamiento, para que no
-    // quede acumulada en un nombre que se valide junto a lo que sigue.
-    if ((excluirValores && excluirValores.size > 0) || (fronteraPalabras && fronteraPalabras.size > 0)) {
+    // FIX V13/V14 — un carácter ya RECLAMADO por un campo declarativo ("gano
+    // 2300", "gasto 2000", "casa" del crédito) no puede convertirse en parte
+    // de un ítem de lista, pero el token NUNCA SE ELIMINA del array
+    // (eliminarlo fusiona los nombres vecinos — bug real de la 10ª tanda:
+    // "gano 700 y pago arriendo 650" perdía el 650 entero porque "gano"+"y
+    // pago arriendo" se validaban JUNTOS tras borrar el 700). Se convierte en
+    // un token FRONTERA: sigue presente, pero `emparejarNombreMonto` lo trata
+    // como un reset duro (como una coma), nunca como nombre ni monto. Al ser
+    // POSICIONAL (no por valor/palabra), una "casa" en otra parte del mensaje
+    // que NO cae dentro del rango reclamado sigue siendo un token normal.
+    if (excluirRangos && excluirRangos.length > 0) {
       tokens = tokens.map((t): Tok => {
-        if (t.kind === "num" && excluirValores?.has(parseDigitAmount(t.raw))) {
-          return { raw: t.raw, kind: "boundary" };
-        }
-        if (t.kind === "word" && fronteraPalabras?.has(norm(t.raw))) {
-          return { raw: t.raw, kind: "boundary" };
-        }
-        return t;
+        const enRangoExcluido = excluirRangos.some((r) => seSolapan(t, r));
+        return enRangoExcluido ? { raw: t.raw, kind: "boundary", start: t.start, end: t.end } : t;
       });
     }
     if (tokens.length === 0) continue;
