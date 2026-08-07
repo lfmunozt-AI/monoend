@@ -37,3 +37,30 @@
 2. Revisión por agente distinto (AG01), obligatoria desde la enmienda E6.
 3. Arranque de tanda 2 (G1c) sobre `develop` una vez la corrección de spans
    esté mergeada.
+
+## Nota de proceso — reconstrucción de `CLAUDE.md` (esta entrega)
+
+Al arrancar esta sesión, `origin/develop` tenía `CLAUDE.md` fechado
+2026-05-19 — dos meses y medio desatrasado. Un commit local de AG05
+(`5014d58`, 8 de julio, "documentación integral sprint — ADN, términos,
+guardrail, proceso") nunca se pusheó a `origin/agent/05` y quedó huérfano al
+ejecutar el reset del protocolo estándar (`git reset --hard
+origin/develop`). Antes de descartarlo se respaldó en dos ramas remotas:
+
+- `backup/ag05-docs-5014d58` — el commit huérfano completo (CLAUDE.md v2.1,
+  PROJECT_LOG, `docs/GUARDRAIL.md` v1, informes).
+- `backup/ag05-mayo` — los 4 commits de finales de mayo que tenía
+  `origin/agent/05` y que el `--force-with-lease` de esta entrega sobrescribe
+  (contenido ya reflejado en `develop` vía merges anteriores).
+
+El bloque `---ADN---` y la terminología ("Reserva de Imprevistos", "The
+Consigliere", ICA, prohibición absoluta de "soberanía/soberano") se
+**re-aplicaron manualmente** sobre el `CLAUDE.md` actual de `develop` — no se
+hizo cherry-pick de `5014d58`, porque el archivo evolucionó de forma
+incompatible en dos meses. `docs/GUARDRAIL.md` se **reescribió** (no se
+reaplicó tal cual) porque la arquitectura de guardarraíl cambió de fondo
+desde julio: `runGuardrail` ya no vive en `index.ts` sino en `run.ts` y se
+orquesta desde `pipeline.ts::applyEnforcement()` (ver
+`docs/PIPELINE_CONTRACT.md`); `src/lib/llm/router.ts` (LLM Router agnóstico,
+documentado como "existe pero no cableado") **ya no está en el árbol** —
+dominio de AG08, se documenta como ausente, no como pendiente.
