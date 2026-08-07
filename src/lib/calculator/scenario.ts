@@ -9,7 +9,7 @@
 // extrae — mejor no tocar el estado que corromperlo. Código PURO, edge-safe.
 
 import { parseDigitAmount, findNumberMentions, dedupeOverlaps, type NumberMention } from "../guardrail/numbers";
-import { parseExpenseList, parseExpenseListDetallado, classifyExpenses, classifyExpense, type ItemSospechoso } from "./expenses";
+import { parseExpenseList, parseExpenseListDetallado, classifyExpenses, classifyExpense, type ItemSospechoso, type Rango } from "./expenses";
 import type { Language } from "../language";
 import { tieneSenalFinanciera, type Carril } from "../guardrail/turn-classifier";
 
@@ -209,6 +209,27 @@ export interface ScenarioState {
    * lo corrige.
    */
   eco_pendiente?: { fields: string[] };
+  /**
+   * FIX 5 (9ª tanda) — el desglose de gastos entra como PARSED: el eco lo
+   * enuncia pidiendo confirmación antes de usarse para PROPONER RECORTES POR
+   * PARTIDA. Sobrante/capacidad/viabilidad de cuota/brecha NO dependen de
+   * esto — el agregado basta y se responde con normalidad sin importar este
+   * flag. Promoción: confirmación explícita del usuario, o el eco enunciado
+   * sin corrección en el turno siguiente (ver `mergeScenario`).
+   */
+  detalle_confirmado?: boolean;
+  /**
+   * FIX 5 (9ª tanda) — señal DEL TURNO (no se persiste tal cual): el usuario
+   * confirmó explícitamente el desglose pendiente ("sí, correcto"), o corrigió
+   * una partida concreta. Se consume en `mergeScenario` y se descarta.
+   */
+  detalle_confirmado_explicito?: boolean;
+  /**
+   * FIX 5 (9ª tanda) — señal DEL TURNO: el usuario corrigió UNA partida
+   * concreta del desglose ya conocido ("la luz son 150") sin repetir el
+   * resto. `mergeScenario` sustituye SOLO ese ítem, conserva los demás.
+   */
+  gastos_item_correccion?: { name: string; amount: number };
   /** Qué falta para completar el playbook activo. Recalculado en cada merge. */
   missing: string[];
 }
@@ -370,19 +391,28 @@ export function extractScenarioDelta(
   const delta: Partial<ScenarioState> = {};
   const n = norm(message);
 
-  // Defecto B: si el mensaje es una LISTA de gastos, se trata aparte — NUNCA se
-  // deja que la extracción por keyword tome un ítem individual (netflix 15) como
-  // el gasto mensual agregado.
-  const listItems = parseExpenseList(message);
-  const esLista = listItems.length >= 2;
+  // FIX V14 (11ª tanda) — FRONTERAS POSICIONALES. Un patrón declarativo
+  // (gano/ingreso X, gasto X, crédito de X a N meses, TAE X%) reclama el
+  // RANGO EXACTO de caracteres que consumió (no un valor ni una palabra
+  // sueltos — ver `Rango` en expenses.ts). Un rango es preciso por
+  // construcción: "casa" en la posición del crédito es frontera SOLO ahí;
+  // "casa 700" a 30 caracteres de distancia sigue siendo una partida de
+  // gasto válida. Reemplaza el reclamo por valor/palabra de la 10ª tanda
+  // (`claimed`/`fronteraPalabras`), que convertía una palabra en una regla
+  // GLOBAL — bug real: "casa" del crédito destruía TAMBIÉN "casa 700" en
+  // otra parte del mensaje, sin relación con el crédito.
+  const rangosReclamados: Rango[] = [];
 
   // ── Tasa real (TAE) — porcentaje en contexto de interés/banco ─────────────
   if (RATE_CONTEXT.test(n)) {
+    const rateMatch = RATE_CONTEXT.exec(n);
     const p = PERCENT.exec(n);
-    if (p) {
+    if (rateMatch && p) {
       const tae = parseDigitAmount(p[1]);
       if (Number.isFinite(tae) && tae > 0 && tae < 100) {
         delta.credito = { tae_pct: tae, tae_es_referencia: false };
+        rangosReclamados.push({ start: rateMatch.index, end: rateMatch.index + rateMatch[0].length });
+        rangosReclamados.push({ start: p.index, end: p.index + p[0].length });
       }
     }
   }
@@ -396,6 +426,7 @@ export function extractScenarioDelta(
       const tae = parseDigitAmount(m[1]);
       if (Number.isFinite(tae) && tae > 0 && tae < 100) {
         delta.credito = { tae_pct: tae, tae_es_referencia: false };
+        rangosReclamados.push({ start: m.index, end: m.index + m[0].length });
       }
     }
   }
@@ -404,7 +435,8 @@ export function extractScenarioDelta(
   // El monto se busca DESDE la keyword de crédito/compra, no como primer número
   // global: en "gano 2500 ... carro de 30000 a 36 meses" el monto es 30000.
   if (PRECIO_CTX.test(n)) {
-    const desdeCredito = n.slice(n.search(PRECIO_CTX)).replace(PLAZO, " ");
+    const precioMatch = PRECIO_CTX.exec(n)!;
+    const desdeCredito = n.slice(precioMatch.index).replace(PLAZO, " ");
     const plazo = PLAZO.exec(n);
     const amount = AMOUNT.exec(desdeCredito);
     if (plazo && amount) {
@@ -418,19 +450,33 @@ export function extractScenarioDelta(
           plazo_meses: meses,
           ...(objetoMatch ? { objeto: objetoMatch[1] } : {}),
         };
+        // Rango: desde la palabra de contexto ("casa"/"financiar"/…) hasta el
+        // final de lo último que se haya consumido entre monto y plazo — cubre
+        // TODA la frase declarativa ("casa de 200000 a 240 meses"), sea cual
+        // sea el orden en que aparezcan monto/plazo dentro de ella.
+        const amountAbsEnd = precioMatch.index + amount.index + amount[0].length;
+        const plazoAbsEnd = plazo.index + plazo[0].length;
+        rangosReclamados.push({ start: precioMatch.index, end: Math.max(amountAbsEnd, plazoAbsEnd) });
       }
     }
   }
 
   // ── Ingreso — anclado a su keyword ─────────────────────────────────────────
   if (INGRESO_CTX.test(n)) {
-    const a = AMOUNT.exec(n.slice(n.search(INGRESO_CTX)));
+    const ingresoMatch = INGRESO_CTX.exec(n)!;
+    const a = AMOUNT.exec(n.slice(ingresoMatch.index));
     // PIEZA 1 — "27600 al año" NO se asigna como si fuera mensual: el número
     // queda huérfano a propósito (ver MARCADOR_ANUAL_RE arriba). "entre 2000 y
     // 2500" tampoco se asigna: es un rango, no una cifra (ver esRango arriba).
     if (a && !esCifraAnual(n, INGRESO_CTX, a) && !esRango(n, INGRESO_CTX, a)) {
       const v = parseDigitAmount(a[1]);
-      if (Number.isFinite(v) && v > 0) delta.ingreso_mensual = v;
+      if (Number.isFinite(v) && v > 0) {
+        delta.ingreso_mensual = v;
+        // Rango: desde la palabra de ingreso ("gano"/"sueldo"/"salario"…)
+        // hasta el final del propio número — cubre toda la frase declarativa.
+        const amountAbsEnd = ingresoMatch.index + a.index + a[0].length;
+        rangosReclamados.push({ start: ingresoMatch.index, end: amountAbsEnd });
+      }
     }
   }
 
@@ -439,13 +485,16 @@ export function extractScenarioDelta(
   // ":") seguido de un desglose: "gasto 1000: 500 arriendo 250 carro 100
   // ropa". Se extraen AMBOS — agregado Y detalle — sin elegir uno en
   // silencio; la reconciliación (detectarDiscrepanciaGastos, más abajo) decide
-  // si coinciden. Tiene PRIORIDAD sobre `esLista`: sin ella, el fallback
-  // monto-primero de `parseExpenseList` ya habría troceado el mensaje entero
-  // en detalle y el agregado nunca habría quedado registrado aparte.
+  // si coinciden. Tiene PRIORIDAD sobre la lista: sin ella, el parser de listas
+  // ya habría troceado el mensaje entero en detalle y el agregado nunca habría
+  // quedado registrado aparte.
   const aggMatch = GASTO_AGREGADO_DETALLE_RE.exec(n);
   if (aggMatch) {
     const agregado = parseDigitAmount(aggMatch[1]);
-    if (Number.isFinite(agregado) && agregado > 0) delta.gastos_mensuales = agregado;
+    if (Number.isFinite(agregado) && agregado > 0) {
+      delta.gastos_mensuales = agregado;
+      rangosReclamados.push({ start: aggMatch.index, end: aggMatch.index + aggMatch[0].length });
+    }
     const restoDesdeColon = message.slice(aggMatch.index + aggMatch[0].length);
     const detailItems = parseExpenseList(restoDesdeColon);
     if (detailItems.length >= 2) {
@@ -458,26 +507,85 @@ export function extractScenarioDelta(
       delta.gastos_es_detalle = true;
       delta.gastos_items = itemsAGastoItemEntries(detailItems, "regex");
     }
-  } else if (esLista) {
-    // Lista desglosada: gastos_detalle con totales por grupo. NO se toca
-    // gastos_mensuales (el merge conserva el agregado previo — defecto B).
-    const cls = classifyExpenses(listItems);
-    delta.gastos_detalle = {
-      vitales: cls.vitales.total,
-      noVitales: cls.noVitales.total,
-      desconocidos: cls.desconocidos.total,
-    };
-    delta.gastos_es_detalle = true;
-    // PIEZA 5 (8ª tanda) — conserva cada partida individual (name, amount,
-    // categoría), no solo los totales por grupo. Flujo: items → clasificación
-    // → buckets (los buckets de arriba se derivan de los mismos `listItems`).
-    delta.gastos_items = itemsAGastoItemEntries(listItems, "regex");
-  } else if (GASTO_CTX.test(n)) {
-    // Agregado en una sola cifra ("mis gastos son 1500").
-    const a = AMOUNT.exec(n.slice(n.search(GASTO_CTX)));
-    if (a && !esCifraAnual(n, GASTO_CTX, a) && !esRango(n, GASTO_CTX, a)) {
-      const v = parseDigitAmount(a[1]);
-      if (Number.isFinite(v) && v > 0) delta.gastos_mensuales = v;
+  } else {
+    // FIX 1/2b/3 (9ª tanda) + FIX V14-2 (11ª tanda, SIMETRÍA) — candidato de
+    // valor declarativo de "gasto X" ("gasto aproximadamente 2000 entre..."
+    // → 2000). El NÚMERO no se reclama a ciegas: primero se comprueba si, sin
+    // reclamarlo, el mensaje YA forma una lista real de ≥2 pares. Esa prueba
+    // distingue los dos casos reales que colisionan:
+    //   · "gasto= 1000 arriendo 500 servicios 250..." — el "1000" no es un
+    //     valor declarativo aislado, es la primera partida (arriendo=1000);
+    //     SIN reclamarlo, el emparejador YA lo une a "arriendo" y encuentra
+    //     4 pares — es una lista real, el NÚMERO nunca se reclama.
+    //   · "gasto aproximadamente 2000 entre vivienda, comida, servicios,
+    //     ocio" — SIN reclamar nada, el emparejador solo logra UN par
+    //     espurio y comida/servicios/ocio quedan sin número propio — no hay
+    //     evidencia de lista (<2 pares): el NÚMERO SÍ se reclama.
+    // La PALABRA "gasto" es DISTINTA: SIEMPRE es frontera, sin condición —
+    // igual que "gano"/"sueldo" en el bloque de ingreso (arriba). BUG
+    // BLOQUEANTE (11ª tanda, revisión adversarial): la versión anterior solo
+    // volvía frontera la palabra "gasto" DENTRO de la rama de reclamación del
+    // número, así que "gano 2000 y gasto en arriendo 800, comida 300, luz
+    // 100" (donde el candidato 800 SÍ resultaba ser parte de una lista, no
+    // declarativo) dejaba "gasto" como palabra suelta — "y gasto en
+    // arriendo" se validaba junto y NO_ES_GASTO lo rechazaba entero,
+    // perdiendo el arriendo (800) en silencio.
+    let gastoDeclaradoSimple: number | undefined;
+    let gastoWordRango: Rango | undefined;
+    let gastoAmountRango: Rango | undefined;
+    if (GASTO_CTX.test(n)) {
+      const gastoMatch = GASTO_CTX.exec(n)!;
+      gastoWordRango = { start: gastoMatch.index, end: gastoMatch.index + gastoMatch[0].length };
+      const a = AMOUNT.exec(n.slice(gastoMatch.index));
+      if (a && !esCifraAnual(n, GASTO_CTX, a) && !esRango(n, GASTO_CTX, a)) {
+        const v = parseDigitAmount(a[1]);
+        if (Number.isFinite(v) && v > 0) {
+          gastoDeclaradoSimple = v;
+          const amountAbsStart = gastoMatch.index + a.index;
+          gastoAmountRango = { start: amountAbsStart, end: amountAbsStart + a[0].length };
+        }
+      }
+    }
+
+    // Prueba probatoria: ¿ya hay lista real SIN reclamar el NÚMERO candidato?
+    // (la PALABRA "gasto" sí entra aquí ya — es incondicional, ver arriba).
+    const rangosProbatoria = gastoWordRango ? [...rangosReclamados, gastoWordRango] : rangosReclamados;
+    let listResult = parseExpenseListDetallado(message, gastoDeclaradoSimple, rangosProbatoria);
+    if (gastoDeclaradoSimple !== undefined && listResult.items.length < 2) {
+      // Sin el número disponible para el emparejamiento espontáneo, NO
+      // emergió ninguna lista real → es un valor declarativo genuino: se
+      // reclama también su rango y se excluye de la lista final.
+      if (gastoWordRango) rangosReclamados.push(gastoWordRango);
+      if (gastoAmountRango) rangosReclamados.push(gastoAmountRango);
+      listResult = parseExpenseListDetallado(message, gastoDeclaradoSimple, rangosReclamados);
+    } else {
+      // Ya había ≥2 pares SIN reclamar el número — probablemente ES una de
+      // las partidas (o es irrelevante). El número NO se reclama, pero la
+      // PALABRA "gasto" SÍ queda como frontera permanente (simetría con
+      // ingreso) — nunca debe colarse en el nombre de una partida.
+      gastoDeclaradoSimple = undefined;
+      if (gastoWordRango) rangosReclamados.push(gastoWordRango);
+      listResult = parseExpenseListDetallado(message, undefined, rangosReclamados);
+    }
+    const esListaReal = listResult.items.length >= 2;
+
+    if (esListaReal) {
+      const cls = classifyExpenses(listResult.items);
+      delta.gastos_detalle = {
+        vitales: cls.vitales.total,
+        noVitales: cls.noVitales.total,
+        desconocidos: cls.desconocidos.total,
+      };
+      delta.gastos_es_detalle = true;
+      // PIEZA 5 (8ª tanda) — conserva cada partida individual (name, amount,
+      // categoría), no solo los totales por grupo. Flujo: items → clasificación
+      // → buckets (los buckets de arriba se derivan de los mismos ítems).
+      delta.gastos_items = itemsAGastoItemEntries(listResult.items, "regex");
+    } else if (gastoDeclaradoSimple !== undefined) {
+      // FIX 3 (9ª tanda) — sin lista real, el agregado declarado MANDA. Nunca
+      // se sustituye por un detalle parcial o inventado; `gastos_es_detalle`
+      // queda sin tocar (no hay desglose que ofrecer).
+      delta.gastos_mensuales = gastoDeclaradoSimple;
     }
   }
 
@@ -511,7 +619,105 @@ export function extractScenarioDelta(
     delta.plan_confirmado = true;
   }
 
-  return delta;
+  // ── FIX 5 (9ª tanda) — confirmación/corrección del desglose pendiente ──────
+  // Solo si el turno ANTERIOR ecoó un desglose sin confirmar todavía
+  // (`eco_pendiente.fields` incluye 'gastos_detalle') y este turno NO trajo
+  // uno nuevo (si trajera uno nuevo, `delta.gastos_es_detalle` ya lo reinicia
+  // a PARSED en `mergeScenario` — no hay nada que confirmar/corregir aquí).
+  const detalleEsperandoConfirmacion = !!prev?.eco_pendiente?.fields.includes("gastos_detalle") && !delta.gastos_es_detalle;
+  if (detalleEsperandoConfirmacion) {
+    if (esConfirmacionCorta(message)) {
+      delta.detalle_confirmado_explicito = true;
+    } else if (prev?.gastos_items) {
+      const correccion = detectarCorreccionDeItem(message, prev.gastos_items);
+      if (correccion) {
+        delta.gastos_item_correccion = correccion;
+        delta.detalle_confirmado_explicito = true;
+      }
+    }
+  }
+
+  const limpio = aplicarGuardaDeSanidad(delta);
+
+  // FIX V14-3 (11ª tanda, LEY DE CONSERVACIÓN) — extraction_status SIEMPRE
+  // viene definido en el delta que devuelve esta función, nunca `undefined`.
+  // Antes solo se calculaba en route.ts (vía `analizarExtraccion`, DESPUÉS de
+  // llamar a esta función) — quien probara `extractScenarioDelta` de forma
+  // aislada (como esta misma revisión) nunca veía el estado de honestidad de
+  // la extracción. Se calcula aquí, con el delta YA limpio de la guarda de
+  // sanidad, y route.ts sigue pudiendo recalcularlo/sobreescribirlo sin
+  // problema (mismo resultado, redundante pero inofensivo).
+  limpio.extraction_status = analizarExtraccion(message, limpio).extraction_status;
+
+  return limpio;
+}
+
+// PIEZA FIX 5 — "la luz son 150": corrige UNA partida ya conocida sin
+// reescribir el resto del desglose. Solo dispara si el nombre mencionado
+// coincide con un ítem YA existente (`itemsPrevios`) — de lo contrario no es
+// una corrección, es una frase cualquiera con un número.
+const CORRECCION_ITEM_RE =
+  /\b(?:la|el|los|las)?\s*([\p{L}][\p{L}_.-]*(?:\s+[\p{L}][\p{L}_.-]*){0,2})\s+(?:es|son|cuestan?|valen?)\s+(\d[\d.,]*)\b/iu;
+
+export function detectarCorreccionDeItem(
+  message: string,
+  itemsPrevios: GastoItemEntry[],
+): { name: string; amount: number } | null {
+  if (itemsPrevios.length === 0) return null;
+  const m = CORRECCION_ITEM_RE.exec(message);
+  if (!m) return null;
+  const amount = parseDigitAmount(m[2]);
+  if (!Number.isFinite(amount) || amount <= 0) return null;
+  const nombreMencionado = norm(m[1].trim());
+  const encontrado = itemsPrevios.find((i) => {
+    const n2 = norm(i.name);
+    return n2 === nombreMencionado || n2.includes(nombreMencionado) || nombreMencionado.includes(n2);
+  });
+  if (!encontrado) return null;
+  return { name: encontrado.name, amount };
+}
+
+// ── FIX 4 (9ª tanda) — GUARDA DE SANIDAD (defensa en profundidad) ───────────
+//
+// El reclamo por valor (FIX 1) cierra el agujero en la vía regex, pero NO
+// protege la vía tool_call (el LLM puede, en teoría, devolver un desglose
+// donde una partida repita el ingreso, o cuya suma sea absurda respecto al
+// ingreso) — de ahí que esta guarda sea una función aparte, invocada tanto
+// aquí como en `toolArgsToScenarioDelta`, y no solo lógica interna del
+// parser regex.
+const MULTIPLICADOR_MAGNITUD_ABSURDA = 3;
+
+/**
+ * V12 — el ingreso NUNCA puede aparecer como ítem de gasto. Magnitud absurda
+ * — la suma del detalle no puede superar 3× el ingreso del MISMO delta (un
+ * desglose que "cuesta" más que el triple de lo que se gana es indicio de
+ * error de lectura, no de un presupuesto real). Ante cualquiera de las dos,
+ * el detalle (buckets + items) se descarta ENTERO — nunca a medias, para no
+ * dejar buckets que ya no cuadran con los items — pero `gastos_mensuales` /
+ * `ingreso_mensual` NUNCA se tocan (V1): solo se retira lo que es dudoso.
+ */
+export function aplicarGuardaDeSanidad(delta: Partial<ScenarioState>): Partial<ScenarioState> {
+  if (!delta.gastos_items || delta.gastos_items.length === 0) return delta;
+  if (delta.ingreso_mensual === undefined) return delta;
+
+  const ingresoDuplicado = delta.gastos_items.some((i) => i.amount === delta.ingreso_mensual);
+  const suma = delta.gastos_items.reduce((acc, i) => acc + i.amount, 0);
+  const magnitudAbsurda = suma > delta.ingreso_mensual * MULTIPLICADOR_MAGNITUD_ABSURDA;
+
+  if (!ingresoDuplicado && !magnitudAbsurda) return delta;
+
+  console.warn("[guardaDeSanidad] detalle de gastos descartado", JSON.stringify({
+    motivo: ingresoDuplicado ? "ingreso_duplicado_como_gasto" : "magnitud_absurda",
+    ingreso_mensual: delta.ingreso_mensual,
+    suma_items: suma,
+    items: delta.gastos_items,
+  }));
+
+  const limpio = { ...delta };
+  delete limpio.gastos_items;
+  delete limpio.gastos_detalle;
+  delete limpio.gastos_es_detalle;
+  return limpio;
 }
 
 // ── PIEZA 1 (5ª tanda) — DETECTOR DE NÚMEROS HUÉRFANOS ───────────────────────
@@ -593,11 +799,19 @@ function coincideConAsignado(v: number, asignados: number[]): boolean {
  * (determinista, sin efectos secundarios).
  */
 function valoresAsignadosEnDelta(message: string, delta: Partial<ScenarioState>): number[] {
+  void message; // se conserva en la firma por compatibilidad; ya no se re-deriva nada de él.
   const vals: number[] = [];
   if (delta.ingreso_mensual !== undefined) vals.push(delta.ingreso_mensual);
   if (delta.gastos_mensuales !== undefined) vals.push(delta.gastos_mensuales);
-  if (delta.gastos_es_detalle) {
-    for (const item of parseExpenseList(message)) vals.push(item.amount);
+  // FIX V14-3 (11ª tanda) — usa los ítems YA ASIGNADOS en `delta.gastos_items`
+  // directamente, en vez de RE-DERIVARLOS con `parseExpenseList(message)` (sin
+  // los rangos reclamados por FIX V14-1). La re-derivación podía producir un
+  // conjunto de ítems DISTINTO al que de verdad se asignó — y, más grave,
+  // ocultaba números que sí quedaron sin destino (ley de conservación, V14):
+  // si `parseExpenseList` "adivinaba" un ítem que `extractScenarioDelta` NUNCA
+  // asignó, ese número se contaba como cubierto sin estarlo.
+  if (delta.gastos_items) {
+    for (const item of delta.gastos_items) vals.push(item.amount);
   }
   if (delta.credito) {
     if (delta.credito.monto) vals.push(delta.credito.monto);
@@ -1034,6 +1248,18 @@ export function mergeScenario(
     base.gastos_items = [...(base.gastos_items ?? []), ...nuevos];
   }
 
+  // FIX 5 (9ª tanda) — corrección de UNA partida ("la luz son 150"): sustituye
+  // solo ese ítem (conserva turno y categoría original salvo el importe) y
+  // recalcula buckets/agregado a partir del desglose YA corregido — nunca se
+  // reescribe el resto de partidas.
+  if (delta.gastos_item_correccion && base.gastos_items) {
+    const { name, amount } = delta.gastos_item_correccion;
+    base.gastos_items = base.gastos_items.map((i) => (i.name === name ? { ...i, amount } : i));
+    const cls = classifyExpenses(base.gastos_items);
+    base.gastos_detalle = { vitales: cls.vitales.total, noVitales: cls.noVitales.total, desconocidos: cls.desconocidos.total };
+    base.gastos_mensuales = round2(cls.vitales.total + cls.noVitales.total + cls.desconocidos.total);
+  }
+
   // ── PIEZA 6 — META ACTIVA ÚNICA ─────────────────────────────────────────────
   // La meta activa es UNA. Un delta de meta solo puede:
   //   · ABRIR una meta nueva si no hay ninguna activa del usuario, si la activa
@@ -1125,6 +1351,31 @@ export function mergeScenario(
   // uno nuevo que aún no se confirmó?").
   base.factStatus = actualizarFactStatus(prev, delta, base);
   const camposTocados = camposDelDelta(delta);
+
+  // FIX 5 (9ª tanda) — detalle_confirmado: mismo mecanismo de promoción
+  // (PARSED → CONFIRMED) que fact_status, pero como su propio booleano —
+  // exigido explícitamente por nombre para poder bloquear "recortes por
+  // partida" sin tener que leer un mapa genérico.
+  const detallePendienteAntes = !!prev?.eco_pendiente?.fields.includes("gastos_detalle");
+  if (delta.gastos_es_detalle) {
+    // Desglose NUEVO este turno → arranca sin confirmar (PARSED).
+    base.detalle_confirmado = false;
+    camposTocados.push("gastos_detalle");
+  } else if (delta.detalle_confirmado_explicito) {
+    // Confirmación explícita ("sí, correcto") o corrección de una partida —
+    // ambas son formas de que el usuario revisó el desglose activamente.
+    base.detalle_confirmado = true;
+  } else if (detallePendienteAntes) {
+    // El eco lo enunció el turno anterior y este turno NO lo corrigió ni
+    // trajo uno nuevo → sube a CONFIRMED.
+    base.detalle_confirmado = true;
+  } else {
+    base.detalle_confirmado = prev?.detalle_confirmado ?? false;
+  }
+  // Señales del turno, nunca persistidas.
+  delete base.detalle_confirmado_explicito;
+  delete base.gastos_item_correccion;
+
   base.eco_pendiente = camposTocados.length > 0 ? { fields: camposTocados } : undefined;
 
   base.missing = computeMissing(base);
@@ -1294,6 +1545,34 @@ export function notaFaltaDesglose(
     "PROHIBIDO volver a preguntar el ingreso o el total de gastos, ya están en DATOS VERIFICADOS. " +
     "Pide el DESGLOSE por partida (vivienda, comida, transporte, ocio…) citando el total que ya sabes, " +
     "para poder decir exactamente qué recortar."
+  );
+}
+
+/**
+ * FIX 5 (9ª tanda) — el desglose SÍ existe pero aún no está CONFIRMED: el
+ * usuario pide recortar por partida y el sistema entrega los DATOS del
+ * desglose entendido para que el modelo los enuncie (con su propia voz,
+ * nunca una plantilla — §0/§11 del contrato) pidiendo confirmación, en vez
+ * de proponer directamente qué partida recortar. Sobrante/capacidad/cuota/
+ * brecha NO se bloquean — el agregado basta para esas y se responden con
+ * normalidad (alcance deliberadamente estrecho, para no dejar a monoem mudo).
+ */
+export function notaDetalleSinConfirmar(
+  s: Partial<ScenarioState> | undefined,
+  message: string,
+): string | null {
+  if (!s) return null;
+  if (!s.tiene_detalle_gastos || s.detalle_confirmado) return null;
+  if (!pideRecorte(message)) return null;
+  const items = s.gastos_items ?? [];
+  const listaItems = items.length > 0 ? items.map((i) => `${i.name}: ${i.amount} €`).join(", ") : null;
+  return (
+    "El usuario pide un plan de recorte, pero el desglose por partida TODAVÍA NO ESTÁ CONFIRMADO. " +
+    (listaItems ? `Esto es lo que entendiste: ${listaItems}. ` : "") +
+    "Tu respuesta debe ENUNCIAR ese desglose (con tu propia voz, nunca copies este formato literal) y " +
+    "pedir que lo confirme o corrija — PROHIBIDO nombrar una partida concreta a reducir, o cualquier plan " +
+    "que dependa de la clasificación vital/no-vital, hasta que el usuario confirme. Sobrante, capacidad, " +
+    "viabilidad de una cuota y brecha SÍ los puedes responder con normalidad — el agregado ya basta para eso."
   );
 }
 
