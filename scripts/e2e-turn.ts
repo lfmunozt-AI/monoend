@@ -130,6 +130,11 @@ async function main(): Promise<void> {
 
   let convId: string | undefined;
   let goalIds: string[] = [];
+  // Correcciones tanda 2 (revisión AG01) — BLOQUEANTE 2: dos conversaciones
+  // APARTE para el caso bidireccional con detalle PARTIAL (necesitan
+  // `scenario_state` propios, uno por cada orden de los mismos dos hechos).
+  let convIdPartialA: string | undefined;
+  let convIdPartialB: string | undefined;
   try {
     // ── setup: conversación propia, vacía ─────────────────────────────────
     const ins = await db.from("conversations")
@@ -379,6 +384,53 @@ async function main(): Promise<void> {
     assert(scenarioDB5c.gastos_superseded?.some((s) => s.valor === 2200 && s.motivo === "USER_CORRECTION"), `[BD] gastos_superseded debe conservar el 2200 perdedor (fue ${JSON.stringify(scenarioDB5c.gastos_superseded)})`);
     console.log("✓ afirma 14: [BD] resolución (2250 CONFIRMED, 2200 SUPERSEDED) sobrevive a la RE-LECTURA — V7, el valor perdedor nunca se borra");
 
+    // ── T6 (correcciones tanda 2, BLOQUEANTE 2) — Gate G1c bidireccional con
+    // desglose PARTIAL, contra BD real. Mismos dos hechos (agregado 2500,
+    // desglose con un huérfano genuino sin asignar) en los DOS órdenes
+    // posibles, cada uno en su propia conversación — RE-LECTURA desde
+    // `conversations.scenario_state` debe dar el mismo `detalleCompleta`
+    // (false) y, tras dos intentos sin resolver, el mismo resultado: el
+    // conflicto sigue activo, NUNCA escapa a ASSUMED.
+    const MSG_DETALLE_PARTIAL = "Mis gastos: arriendo 1200, comida 1050. Quizas 300 o 400 mas, no estoy seguro.";
+    const deltaDetallePartial = extractScenarioDelta(MSG_DETALLE_PARTIAL);
+    assert(deltaDetallePartial.extraction_status === "PARTIAL", `T6 precondición: el desglose debe ser PARTIAL (fue ${deltaDetallePartial.extraction_status})`);
+
+    const insA = await db.from("conversations").insert({ user_id: userId, title: `${MARCA}-partial-A`, scenario_state: {} }).select("id").single();
+    if (insA.error) throw new Error(`insert conversación T6-A: ${insA.error.message}`);
+    convIdPartialA = (insA.data as { id: string }).id;
+
+    let estadoA = await ejecutarTurno(db, userId, convIdPartialA, { missing: [] }, deltaDetallePartial, MSG_DETALLE_PARTIAL);
+    estadoA = await ejecutarTurno(db, userId, convIdPartialA, estadoA, extractScenarioDelta("Gano 2636 euros al mes y mis gastos son 2500."), "Gano 2636 euros al mes y mis gastos son 2500.");
+    estadoA = await ejecutarTurno(db, userId, convIdPartialA, estadoA, extractScenarioDelta("no lo se", "es", estadoA), "no lo se");
+    estadoA = await ejecutarTurno(db, userId, convIdPartialA, estadoA, extractScenarioDelta("no estoy seguro todavia", "es", estadoA), "no estoy seguro todavia");
+    console.log("✓ T6 sentido A: detalle PARTIAL (T1) → agregado (T2) → 2 intentos sin resolver, persistido");
+
+    const insB = await db.from("conversations").insert({ user_id: userId, title: `${MARCA}-partial-B`, scenario_state: {} }).select("id").single();
+    if (insB.error) throw new Error(`insert conversación T6-B: ${insB.error.message}`);
+    convIdPartialB = (insB.data as { id: string }).id;
+
+    let estadoB = await ejecutarTurno(db, userId, convIdPartialB, { missing: [] }, extractScenarioDelta("Gano 2636 euros al mes y mis gastos son 2500."), "Gano 2636 euros al mes y mis gastos son 2500.");
+    estadoB = await ejecutarTurno(db, userId, convIdPartialB, estadoB, deltaDetallePartial, MSG_DETALLE_PARTIAL);
+    estadoB = await ejecutarTurno(db, userId, convIdPartialB, estadoB, extractScenarioDelta("no lo se", "es", estadoB), "no lo se");
+    estadoB = await ejecutarTurno(db, userId, convIdPartialB, estadoB, extractScenarioDelta("no estoy seguro todavia", "es", estadoB), "no estoy seguro todavia");
+    console.log("✓ T6 sentido B: agregado (T1) → detalle PARTIAL (T2) → 2 intentos sin resolver, persistido");
+
+    const readA = await db.from("conversations").select("scenario_state").eq("id", convIdPartialA).single();
+    if (readA.error) throw new Error(`re-read T6-A: ${readA.error.message}`);
+    const scenarioDBA = (readA.data as { scenario_state: ScenarioState }).scenario_state;
+    const readB = await db.from("conversations").select("scenario_state").eq("id", convIdPartialB).single();
+    if (readB.error) throw new Error(`re-read T6-B: ${readB.error.message}`);
+    const scenarioDBB = (readB.data as { scenario_state: ScenarioState }).scenario_state;
+
+    assert(scenarioDBA.gastos_assumed === undefined, `[BD] sentido A: NUNCA debe escapar a ASSUMED con detalle PARTIAL (fue ${JSON.stringify(scenarioDBA.gastos_assumed)})`);
+    assert(scenarioDBB.gastos_assumed === undefined, `[BD] sentido B: NUNCA debe escapar a ASSUMED con detalle PARTIAL (fue ${JSON.stringify(scenarioDBB.gastos_assumed)})`);
+    assert(scenarioDBA.gastos_conflict?.detalleCompleta === false, `[BD] sentido A: detalleCompleta debe ser false (fue ${scenarioDBA.gastos_conflict?.detalleCompleta})`);
+    assert(scenarioDBB.gastos_conflict?.detalleCompleta === false, `[BD] sentido B: detalleCompleta debe ser false (fue ${scenarioDBB.gastos_conflict?.detalleCompleta})`);
+    assert(scenarioDBA.gastos_conflict?.attempts === scenarioDBB.gastos_conflict?.attempts, `[BD] G1c: mismos intentos en ambos sentidos (A=${scenarioDBA.gastos_conflict?.attempts}, B=${scenarioDBB.gastos_conflict?.attempts})`);
+    assert(scenarioDBA.gastos_conflict?.agregado === scenarioDBB.gastos_conflict?.agregado, "[BD] G1c: mismo agregado en ambos sentidos");
+    assert(scenarioDBA.gastos_conflict?.detalle === scenarioDBB.gastos_conflict?.detalle, "[BD] G1c: mismo detalle en ambos sentidos");
+    console.log("✓ afirma 15: [BD] Gate G1c bidireccional con detalle PARTIAL — RE-LECTURA confirma mismo estado final en los dos sentidos, nunca ASSUMED");
+
     console.log("\n✅ E2E TURNO OK — persistencia real de scenario_state, goals, ica_history y response_telemetry verificada");
   } finally {
     if (goalIds.length > 0) {
@@ -392,6 +444,14 @@ async function main(): Promise<void> {
       const delConv = await db.from("conversations").delete().eq("id", convId).eq("title", MARCA);
       if (delConv.error) console.error(`⚠ no pude borrar la conversación ${MARCA} ${convId}: ${delConv.error.message}`);
       else console.log(`✓ cleanup: conversación ${MARCA} ${convId} borrada`);
+    }
+    for (const [id, title] of [[convIdPartialA, `${MARCA}-partial-A`], [convIdPartialB, `${MARCA}-partial-B`]] as const) {
+      if (!id) continue;
+      const delTel = await db.from("response_telemetry").delete().eq("conversation_id", id);
+      if (delTel.error) console.error(`⚠ no pude borrar response_telemetry de ${id}: ${delTel.error.message}`);
+      const delConv = await db.from("conversations").delete().eq("id", id).eq("title", title);
+      if (delConv.error) console.error(`⚠ no pude borrar la conversación ${title} ${id}: ${delConv.error.message}`);
+      else console.log(`✓ cleanup: conversación ${title} ${id} borrada`);
     }
   }
 }

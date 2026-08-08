@@ -67,6 +67,14 @@ export type FactStatus = "MISSING" | "PARSED" | "CONFIRMED" | "CONFLICT" | "ASSU
 export interface FuenteValor {
   valor: number;
   turn: number;
+  /**
+   * BLOQUEANTE 2 (revisión AG01, tanda 2) — ¿la extracción del turno que
+   * fijó este origen fue COMPLETE? Solo relevante para `gastos_detalle_origen`
+   * (§6 exige "extracción del detalle COMPLETE" como precondición del
+   * escape a ASSUMED). `undefined` en orígenes que no la necesitan
+   * (`gastos_agregado_origen`) o en datos previos a esta corrección.
+   */
+  completa?: boolean;
 }
 
 /**
@@ -328,7 +336,15 @@ const PLAZO = /(\d[\d.,]*)\s*(a[ñn]os?|anos?|years?|meses|mes|months?)\b/;
 
 // Monto con contexto de ingreso / gasto / precio.
 const INGRESO_CTX = /\b(gano|ingreso|ingresos|sueldo|salario|cobro|rendimento|income|earn|salary)\b/;
-const GASTO_CTX = /\b(gasto|gastos|gasta|despesas?|spend|expenses?)\b/;
+// CORRECCIÓN (revisión AG01, tanda 2) — "gasté" normaliza (NFD, sin acentos)
+// a "gaste": no lo cubría ninguna de las dos formas ("gasto"/"gastos" en
+// GASTO_AGREGADO_DETALLE_RE, "gasto|gastos|gasta" aquí). Sin esa cobertura,
+// "gasté 1800: renta 900..." no activaba NINGÚN patrón declarativo y caía
+// entero en el parser de listas — "gasté" se emparejaba como NOMBRE de un
+// ítem con 1800 de importe, y el agregado se sumaba una segunda vez al
+// detalle (BLOQUEANTE 1, doble conteo). "gastó" ya normalizaba a "gasto" (la
+// tilde de la 'ó' se elimina igual) y no necesitaba cambio.
+const GASTO_CTX = /\b(gasto|gastos|gasta|gaste|despesas?|spend|expenses?)\b/;
 // PIEZA 2 — total agregado seguido de ":" y un desglose ("gasto 1000: 500
 // arriendo..."). El ":" es el marcador INEQUÍVOCO que distingue "aquí va un
 // total, y luego el detalle" de "gasto= 1000 arriendo..." (sin ":", que es
@@ -339,8 +355,10 @@ const GASTO_CTX = /\b(gasto|gastos|gasta|despesas?|spend|expenses?)\b/;
 // encabezado "en total:") terminaba mal atribuido al primer ítem de la lista
 // ("casa" se quedaba con 1500 en vez de 700). Tolera el filler ES/PT/EN entre
 // el número y los dos puntos, sin cambiar el caso ya soportado (sin filler).
+// "gaste" (forma normalizada de "gasté", ver GASTO_CTX arriba) cubre el
+// pretérito de primera persona en la forma "agregado: detalle" también.
 const GASTO_AGREGADO_DETALLE_RE =
-  /\b(?:gastos?|despesas?|expenses?)\b\s*[:=]?\s*(\d[\d.,]*)\s*(?:en\s+total|no\s+total|in\s+total|total)?\s*:/;
+  /\b(?:gastos?|gaste|despesas?|expenses?)\b\s*[:=]?\s*(\d[\d.,]*)\s*(?:en\s+total|no\s+total|in\s+total|total)?\s*:/;
 const PRECIO_CTX = /\b(precio|cuesta|vale|financiar|credito|prestamo|emprestimo|loan|financ|carro|coche|auto|casa|piso|vivienda)\b/;
 // PIEZA 3 (8ª tanda) — misma convención de miles-con-espacio que el parser
 // general (`guardrail/numbers.ts`, DIGIT_RE): "2 500" es 2500, no "2" seguido
@@ -428,8 +446,14 @@ const OBJETO_CREDITO =
 // "dale", "arrancamos", "sim", "yes"…). Anclada a ^…$ (con puntuación/énfasis
 // tolerado): un "sí" perdido dentro de una frase larga NO cuenta — el usuario
 // tiene que estar respondiendo A la propuesta, no mencionando la palabra.
+// MAYOR 1 (revisión AG01, tanda 2) — solo 3 de 8 frases naturales de
+// confirmación funcionaban ("sí"/"vale"/"ok"); "sí, correcto"/"correcto"/
+// "confirmo"/"exacto"/"así es" no. Un prefijo opcional ("sí,"/"sim,"/"yes,")
+// delante del token principal cubre las formas compuestas ("sí, correcto")
+// sin duplicar cada alternativa con y sin el "sí" — sigue ANCLADO a ^…$
+// (nunca dispara sobre una mención suelta dentro de una frase larga).
 const CONFIRMACION_CORTA_RE =
-  /^(si|s[ií]+|ok(?:ay)?|vale|dale|arrancamos|arranquemos|vamos|adelante|hagamoslo|confirmado|de acuerdo|sim|isso|vamos la|yes|yep|yeah|sure|deal|let'?s go|go ahead|sounds good)[!.\s]*$/;
+  /^(?:(?:si|s[ií]+|sim|yes)[,!.\s]+)?(si|s[ií]+|ok(?:ay)?|vale|dale|arrancamos|arranquemos|vamos|adelante|hagamoslo|confirmado|confirmo|correcto|correto|correct|confirmed|es correcto|e correto|is correct|exacto|exato|exactly|asi es|assim e|de acuerdo|sim|isso|vamos la|yes|yep|yeah|sure|deal|let'?s go|go ahead|sounds good|that'?s right|thats right)[!.\s]*$/;
 
 /** ¿Es `message` una confirmación corta ("sí", "dale", "yes"…)? */
 export function esConfirmacionCorta(message: string): boolean {
@@ -721,12 +745,15 @@ export function extractScenarioDelta(
   }
 
   // ── PIEZA 3 (12ª tanda, §2) — RESOLUCIÓN EXPLÍCITA de un conflicto de gastos ─
-  // Solo se busca si hay un conflicto ACTIVO (si no, "usa 2250" es ruido sin
-  // referente). Dos formas: por TIPO ("el correcto es el desglose") o por
-  // VALOR (una cifra que coincide con uno de los dos lados en conflicto,
-  // tolerando ±1 € de redondeo).
-  if (prev?.gastos_conflict) {
-    const resolucion = detectarResolucionConflicto(message, prev.gastos_conflict);
+  // BLOQUEANTE 3 (revisión AG01, tanda 2) — se busca contra CONFLICT **o**
+  // ASSUMED (V6: "revocable SIEMPRE", no solo mientras el conflicto sigue
+  // vivo — `parConflictoParaResolucion` reconstruye el par desde los
+  // orígenes cuando ya escapó a ASSUMED). Dos formas: por TIPO ("el correcto
+  // es el desglose") o por VALOR (una cifra que coincide con uno de los dos
+  // lados, tolerando ±1 € de redondeo).
+  const parParaResolucion = parConflictoParaResolucion(prev);
+  if (parParaResolucion) {
+    const resolucion = detectarResolucionConflicto(message, parParaResolucion);
     if (resolucion) delta.gastos_resolucion = resolucion;
   }
 
@@ -763,7 +790,17 @@ export function extractScenarioDelta(
     }
   }
 
-  const limpio = aplicarGuardaDeSanidad(delta);
+  // V16 (NUEVO, revisión AG01 tanda 2) — NINGÚN NÚMERO SE CUENTA DOS VECES.
+  // Defensa en profundidad: aunque el fix primario (GASTO_CTX/
+  // GASTO_AGREGADO_DETALLE_RE cubriendo "gaste") evita que el agregado se
+  // cuele como ítem en el caso conocido, cualquier otra vía de extracción
+  // futura podría repetir el mismo error. Si un ítem del desglose tiene
+  // EXACTAMENTE el mismo importe que el agregado declarado EN ESTE MISMO
+  // mensaje, es el propio agregado mal atribuido como partida — se descarta
+  // como ítem fantasma y el detalle se recalcula sin él.
+  const conGuardaV16 = aplicarGuardaV16(delta);
+
+  const limpio = aplicarGuardaDeSanidad(conGuardaV16);
 
   // FIX V14-3 (11ª tanda, LEY DE CONSERVACIÓN) — extraction_status SIEMPRE
   // viene definido en el delta que devuelve esta función, nunca `undefined`.
@@ -812,8 +849,11 @@ export function detectarCorreccionDeItem(
 //     lados en conflicto — "usa 2250", "eran 2250", "me equivoqué, son 2250".
 const RESOLUCION_TIPO_RE =
   /\b(?:el correcto es|correcto es|qu[eé]date con|usa(?:mos)?|toma(?:mos)?|usemos)\s+(?:el|la)?\s*(desglose|detalle|total|agregado)\b/i;
+// BLOQUEANTE 3 (revisión AG01, tanda 2) — "no, son 2200" y "corrige: 2200"
+// no estaban cubiertas (solo se detectaron al ejercitar la revocación de un
+// ASSUMED, pero la cobertura de fraseo es la misma para un CONFLICT).
 const RESOLUCION_VALOR_RE =
-  /\b(?:usa|uso|usemos|usar|toma(?:mos)?|qu[eé]date con|el correcto es|son en realidad|en realidad son|me equivoqu[eé],?\s*son|eran|era)\s+(\d[\d.,]*)/i;
+  /\b(?:usa|uso|usemos|usar|toma(?:mos)?|qu[eé]date con|el correcto es|son en realidad|en realidad son|me equivoqu[eé],?\s*son|eran|era|no,?\s*son|corrig[eo]:?|correccion:?)\s+(\d[\d.,]*)/i;
 
 export interface ResolucionConflictoGastos {
   tipo: "agregado" | "detalle";
@@ -843,6 +883,83 @@ export function detectarResolucionConflicto(
     if (Math.abs(v - conflict.agregado) <= 1) return { tipo: "agregado", valorConfirmado: conflict.agregado };
   }
   return null;
+}
+
+/**
+ * BLOQUEANTE 3 (revisión AG01, tanda 2) — §6 dice "revocable SIEMPRE" (V6),
+ * pero `detectarResolucionConflicto` solo se invocaba si `gastos_conflict`
+ * seguía activo — una vez que el escape lo cerraba a `gastos_assumed`, NINGUNA
+ * corrección del usuario tenía a qué referente engancharse ("en realidad son
+ * 2200" caía en el vacío para siempre). Los orígenes (`gastos_agregado_origen`/
+ * `gastos_detalle_origen`) SOBREVIVEN al escape — se fijan en la propia rama
+ * de escape de `reconciliarGastos` — así que un ASSUMED siempre tiene de
+ * dónde reconstruir el par agregado/detalle contra el que evaluar una
+ * resolución. Devuelve el `gastos_conflict` real si lo hay; si no, un par
+ * SINTÉTICO reconstruido desde el ASSUMED activo; `null` si no hay ninguno de
+ * los dos (nada que resolver).
+ */
+export function parConflictoParaResolucion(prev: Partial<ScenarioState> | undefined): ConflictoGastos | null {
+  if (prev?.gastos_conflict) return prev.gastos_conflict;
+  if (prev?.gastos_assumed && prev.gastos_agregado_origen && prev.gastos_detalle_origen) {
+    const ao = prev.gastos_agregado_origen;
+    const do_ = prev.gastos_detalle_origen;
+    return {
+      agregado: ao.valor,
+      agregadoTurn: ao.turn,
+      detalle: do_.valor,
+      detalleTurn: do_.turn,
+      diff: round2(do_.valor - ao.valor),
+      diffPct: ao.valor !== 0 ? (Math.abs(do_.valor - ao.valor) / Math.abs(ao.valor)) * 100 : Infinity,
+      attempts: 0,
+      detalleCompleta: do_.completa ?? false,
+    };
+  }
+  return null;
+}
+
+// ── V16 (revisión AG01, tanda 2) — GUARDA DE DOBLE CONTEO ────────────────────
+//
+// BLOQUEANTE 1 (medido en revisión adversarial): "gasté 1800: renta 900,
+// comida 500, luz 400" — antes de la extensión de GASTO_CTX/
+// GASTO_AGREGADO_DETALLE_RE (ver arriba), el pretérito "gasté" no activaba
+// NINGÚN patrón declarativo y el mensaje entero caía al parser de listas:
+// "gasté" se emparejaba como NOMBRE de un ítem con 1800 de importe, y el
+// agregado (1800) se sumaba una SEGUNDA vez dentro del propio detalle
+// (900+500+400+1800=3600, el doble de lo real). El fix primario (cobertura
+// de "gaste") ya lo evita en ese caso concreto; esta guarda es DEFENSA EN
+// PROFUNDIDAD para cualquier otra vía de extracción (presente o futura) que
+// pudiera repetir el mismo error: nunca debe haber un ítem cuyo importe sea
+// EXACTAMENTE el agregado declarado en el MISMO mensaje.
+//
+// Quirúrgica, a diferencia de la guarda de sanidad (FIX 4, más abajo): esa
+// descarta el detalle ENTERO ante una señal de error genérica; esta retira
+// SOLO el ítem fantasma — el resto de las partidas reales del mismo mensaje
+// no tienen por qué perderse.
+function aplicarGuardaV16(delta: Partial<ScenarioState>): Partial<ScenarioState> {
+  if (delta.gastos_mensuales === undefined || !delta.gastos_items || delta.gastos_items.length === 0) {
+    return delta;
+  }
+  const agregado = delta.gastos_mensuales;
+  const idxFantasma = delta.gastos_items.findIndex((i) => i.amount === agregado);
+  if (idxFantasma === -1) return delta;
+
+  const items = delta.gastos_items.filter((_, i) => i !== idxFantasma);
+  console.warn("[guardaV16] ítem fantasma descartado (doble conteo del agregado)", JSON.stringify({
+    agregado,
+    item_descartado: delta.gastos_items[idxFantasma],
+  }));
+
+  const limpio = { ...delta, gastos_items: items };
+  if (items.length >= 2) {
+    const cls = classifyExpenses(items);
+    limpio.gastos_detalle = { vitales: cls.vitales.total, noVitales: cls.noVitales.total, desconocidos: cls.desconocidos.total };
+  } else {
+    // Sin el fantasma ya no queda una lista real (<2 ítems) — no hay detalle
+    // que oponer al agregado; V1: el agregado en sí nunca se toca.
+    delete limpio.gastos_detalle;
+    delete limpio.gastos_es_detalle;
+  }
+  return limpio;
 }
 
 // ── FIX 4 (9ª tanda) — GUARDA DE SANIDAD (defensa en profundidad) ───────────
@@ -1462,20 +1579,29 @@ export function reconciliarGastos(
     assumed = undefined; // el fact_status pasa a CONFIRMED (lo fija mergeScenario).
   }
 
-  // ── 1. Resolución explícita de un CONFLICT activo ─────────────────────────
-  // §2: "usuario resuelve" → CONFIRMED, el perdedor → SUPERSEDED con motivo y turno.
-  if (conflict && delta.gastos_resolucion) {
-    const esDetalle = delta.gastos_resolucion.tipo === "detalle";
-    const ganador = esDetalle ? conflict.detalle : conflict.agregado;
-    const perdedor = esDetalle ? conflict.agregado : conflict.detalle;
-    registrarSuperseded(perdedor, "USER_CORRECTION");
-    gastosMensuales = ganador;
-    gastosEsDetalle = esDetalle;
-    agregadoOrigen = { valor: ganador, turn: turnoActual };
-    detalleOrigen = { valor: ganador, turn: turnoActual };
-    conflict = undefined;
-    assumed = undefined;
-    return resultado();
+  // ── 1. Resolución explícita de un CONFLICT o un ASSUMED activo ────────────
+  // §2: "usuario resuelve" → CONFIRMED, el perdedor → SUPERSEDED con motivo y
+  // turno. BLOQUEANTE 3 (revisión AG01, tanda 2) — antes solo disparaba con
+  // `conflict` activo; §6 exige "revocable SIEMPRE" (V6), así que también
+  // dispara con `assumed` activo, reconstruyendo agregado/detalle desde los
+  // orígenes (`agregadoOrigen`/`detalleOrigen` sobreviven al escape — se
+  // fijan en la propia rama de escape, paso 2 más abajo).
+  if ((conflict || assumed) && delta.gastos_resolucion) {
+    const parAgregado = conflict?.agregado ?? agregadoOrigen?.valor;
+    const parDetalle = conflict?.detalle ?? detalleOrigen?.valor;
+    if (parAgregado !== undefined && parDetalle !== undefined) {
+      const esDetalle = delta.gastos_resolucion.tipo === "detalle";
+      const ganador = esDetalle ? parDetalle : parAgregado;
+      const perdedor = esDetalle ? parAgregado : parDetalle;
+      registrarSuperseded(perdedor, "USER_CORRECTION");
+      gastosMensuales = ganador;
+      gastosEsDetalle = esDetalle;
+      agregadoOrigen = { valor: ganador, turn: turnoActual };
+      detalleOrigen = { valor: ganador, turn: turnoActual };
+      conflict = undefined;
+      assumed = undefined;
+      return resultado();
+    }
   }
 
   // ── 2. Conflicto activo SIN resolver este turno ───────────────────────────
@@ -1486,7 +1612,7 @@ export function reconciliarGastos(
       assumed = { valor: conflict.detalle, fuente: "detalle", turn: turnoActual };
       gastosMensuales = conflict.detalle;
       gastosEsDetalle = true;
-      detalleOrigen = { valor: conflict.detalle, turn: conflict.detalleTurn };
+      detalleOrigen = { valor: conflict.detalle, turn: conflict.detalleTurn, completa: true };
       agregadoOrigen = { valor: conflict.agregado, turn: conflict.agregadoTurn };
       conflict = undefined;
     } else {
@@ -1502,6 +1628,21 @@ export function reconciliarGastos(
     : undefined;
   const traeAgregado = delta.gastos_mensuales !== undefined;
   const agregadoValor = traeAgregado ? delta.gastos_mensuales! : undefined;
+
+  // BLOQUEANTE 3 (revisión AG01, tanda 2) — ASSUMED y CONFLICT son
+  // MUTUAMENTE EXCLUYENTES por definición (§2): si llega un dato nuevo (no
+  // una resolución explícita — esa ya se resolvió en el paso 1 y retornó
+  // antes de llegar aquí) mientras un ASSUMED sigue activo, no puede
+  // convivir con lo que sea que este turno decida (CONSISTENT/CONFLICT/
+  // reinicio). Se archiva como SUPERSEDED (V7: nunca se borra en silencio) y
+  // el resto de este paso decide el estado nuevo desde cero, comparando
+  // contra los orígenes reales — que, justo tras un escape, coinciden con el
+  // propio valor asumido (`detalleOrigen.valor === assumed.valor`), así que
+  // la comparación seguirá siendo exacta.
+  if (assumed && (traeDetalle || traeAgregado)) {
+    registrarSuperseded(assumed.valor, "ASSUMED_SUPERSEDED_BY_NEW_DATA");
+    assumed = undefined;
+  }
   // §6 — "detalle COMPLETE" mide la CALIDAD del propio desglose (¿huérfanos
   // sin asignar? ¿un ítem sospechoso de pegado?), no si el turno tiene un
   // discrepancia — un discrepancia mismo-turno (agregado ≠ desglose EN EL
@@ -1520,7 +1661,7 @@ export function reconciliarGastos(
     // "agregado 1500 en total: casa 700, comida 300" de V15, ya bien
     // atribuido; y el aggMatch clásico "gasto 1000: 500 arriendo...").
     agregadoOrigen = { valor: agregadoValor!, turn: turnoActual };
-    detalleOrigen = { valor: detalleValor!, turn: turnoActual };
+    detalleOrigen = { valor: detalleValor!, turn: turnoActual, completa: detalleCompletaEsteTurno };
     const { diff, diffPct } = calcularMaterialidad(agregadoValor!, detalleValor!);
     if (Math.abs(diff) <= TOLERANCIA_REDONDEO_EUR) {
       gastosMensuales = detalleValor;
@@ -1536,7 +1677,7 @@ export function reconciliarGastos(
       reiniciarCaptura();
     }
   } else if (traeDetalle) {
-    detalleOrigen = { valor: detalleValor!, turn: turnoActual };
+    detalleOrigen = { valor: detalleValor!, turn: turnoActual, completa: detalleCompletaEsteTurno };
     if (agregadoOrigen === undefined) {
       gastosMensuales = detalleValor;
       gastosDetalle = delta.gastos_detalle;
@@ -1572,10 +1713,21 @@ export function reconciliarGastos(
           agregado: agregadoValor!, agregadoTurn: turnoActual,
           detalle: detalleOrigen.valor, detalleTurn: detalleOrigen.turn,
           diff, diffPct, attempts: 0,
-          // El desglose se resolvió en un turno YA pasado con COMPLETE
-          // (única vía por la que `gastos_detalle_origen` se fija) — no hay
-          // extraction_status de ESE turno disponible aquí para releerlo.
-          detalleCompleta: true,
+          // BLOQUEANTE 2 (revisión AG01, tanda 2) — CORREGIDO: el comentario
+          // anterior aquí ("el desglose se resolvió en un turno YA pasado con
+          // COMPLETE, única vía por la que gastos_detalle_origen se fija")
+          // era FALSO — `gastos_detalle_origen` se fija SIN condicionar a
+          // `extraction_status` en las dos ramas de arriba (`traeDetalle` con
+          // y sin `traeAgregado`), así que un desglose PARTIAL fijaba el
+          // origen exactamente igual que uno COMPLETE. El hardcode `true`
+          // rompía G1c: el MISMO par de hechos, en el orden "detalle PARTIAL
+          // → agregado", escapaba a ASSUMED; en el orden "agregado →
+          // detalle PARTIAL" (rama `traeDetalle` de arriba, que SÍ lee
+          // `detalleCompletaEsteTurno` real), no. Ahora se lee la calidad
+          // REAL que quedó guardada junto al origen — `?? false` para
+          // orígenes previos a esta corrección (sin el campo, se falla
+          // cerrado: no se asume `COMPLETE` sin saberlo).
+          detalleCompleta: detalleOrigen.completa ?? false,
         };
       } else {
         reiniciarCaptura();

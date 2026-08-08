@@ -31,6 +31,7 @@ import {
   detectarEventosICA,
   analizarExtraccion,
   detectarResolucionConflicto,
+  parConflictoParaResolucion,
   notaConflictoGastos,
   type ScenarioState,
 } from '@/lib/calculator/scenario'
@@ -384,8 +385,16 @@ export async function POST(request: Request) {
   // 2250", "eran 2250") se perdía si el modelo decidía llamar a la tool en
   // vez de dejar el fallback. Se recalcula aquí, SIEMPRE, sobre el delta ya
   // resuelto — sin pisar lo que el fallback ya haya puesto.
-  if (seed.gastos_conflict && delta.gastos_resolucion === undefined) {
-    const resolucion = detectarResolucionConflicto(cleanMessage, seed.gastos_conflict)
+  //
+  // BLOQUEANTE 3 (revisión AG01, tanda 2) — este `if` solo miraba
+  // `seed.gastos_conflict`; una vez que el escape lo cerraba a
+  // `gastos_assumed`, ninguna corrección en lenguaje natural volvía a
+  // engancharse (V6: "revocable SIEMPRE"). `parConflictoParaResolucion`
+  // reconstruye el par agregado/detalle desde los orígenes también cuando
+  // solo queda un ASSUMED activo.
+  const parParaResolucion = parConflictoParaResolucion(seed)
+  if (parParaResolucion && delta.gastos_resolucion === undefined) {
+    const resolucion = detectarResolucionConflicto(cleanMessage, parParaResolucion)
     if (resolucion) delta.gastos_resolucion = resolucion
   }
   if (seed.gastos_assumed && esConfirmacionCorta(cleanMessage)) {

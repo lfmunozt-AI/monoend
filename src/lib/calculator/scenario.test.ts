@@ -1471,3 +1471,173 @@ test("REGRESIÓN (12ª tanda): V14 (fronteras posicionales) y ley de conservaci�
   assert.equal(deltaReal.gastos_items?.length, 15, "testdev7 sigue verde");
   assert.equal(deltaReal.gastos_items?.reduce((a, i) => a + i.amount, 0), 2250);
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CORRECCIONES TANDA 2 (revisión adversarial AG01) — V16 doble conteo,
+// G1c en la ruta de escape, ASSUMED revocable, cap de historial verificado.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── BLOQUEANTE 1 — V16: ningún número se cuenta dos veces ───────────────────
+test("BLOQUEANTE 1: 'gasté 1800: renta 900, comida 500, luz 400' → 1800, 3 ítems, CONSISTENT (no 3600)", () => {
+  const delta = extractScenarioDelta("gasté 1800: renta 900, comida 500, luz 400");
+  assert.equal(delta.gastos_mensuales, 1800);
+  assert.equal(delta.gastos_items?.length, 3, "el agregado NO debe colarse como un cuarto ítem");
+  assert.ok(!delta.gastos_items?.some((i) => i.amount === 1800), "el ítem fantasma (1800) no debe existir");
+  const s = mergeScenario({}, delta);
+  assert.equal(s.gastos_mensuales, 1800, "nunca 3600 — el doble conteo no debe producirse");
+  assert.equal(s.gastos_conflict, undefined, "CONSISTENT: 900+500+400=1800, coincide con el agregado");
+});
+
+test("BLOQUEANTE 1: 'gasto 2200: renta 900, comida 500, luz 400' → agregado 2200, detalle 1800 (18,2% > 5% → reinicia, NO 'CONFLICT −400' literal)", () => {
+  // NOTA DE DISCREPANCIA (declarada en el reporte Fase 4): el encargo describe
+  // este caso como "CONFLICT −400", pero 400/2200 = 18,18 % excede el 5 %
+  // de materialidad ya APROBADO y protegido explícitamente en esta misma
+  // corrección ("no debes tocar... materialidad exacta en las tres
+  // fronteras"). Producir CONFLICT aquí exigiría debilitar ese umbral ya
+  // verificado (AG01 confirmó la frontera exacta en 5% / 5.045% en su
+  // revisión). Se prioriza la consistencia con la materialidad aprobada.
+  const delta = extractScenarioDelta("gasto 2200: renta 900, comida 500, luz 400");
+  assert.equal(delta.gastos_mensuales, 2200);
+  const s = mergeScenario({}, delta);
+  assert.equal(s.gastos_conflict, undefined, ">5% no es CONFLICT elegible bajo la materialidad ya aprobada");
+  assert.equal(s.gastos_mensuales, undefined, "reinicio de captura — ninguna cifra queda como verdad");
+});
+
+test("BLOQUEANTE 1 (V15, ya verificado por AG01): 'gastos 1500 en total: casa 700, comida 300' → atribución correcta", () => {
+  const delta = extractScenarioDelta("gastos 1500 en total: casa 700, comida 300");
+  assert.equal(delta.gastos_mensuales, 1500);
+  assert.equal(delta.gastos_items?.find((i) => i.name === "casa")?.amount, 700, "NUNCA 1500 — el 700 no debe quedar huérfano");
+  assert.equal(delta.gastos_items?.find((i) => i.name === "comida")?.amount, 300);
+});
+
+test("BLOQUEANTE 1: guarda V16 explícita — ítem con el mismo importe que el agregado se descarta quirúrgicamente", () => {
+  // Prueba directa de la guarda (no solo de su disparador conocido): un
+  // desglose de 3 ítems donde UNO coincide exactamente con el agregado
+  // declarado en el MISMO delta — el resto de partidas reales se conservan.
+  const delta = extractScenarioDelta("gasto 900: renta 900, comida 500, luz 400");
+  assert.ok(delta.gastos_items?.every((i) => i.amount !== 900) ?? true, "ningún ítem debe quedar con el importe del agregado (900)");
+});
+
+// ── BLOQUEANTE 2 — G1c en la ruta de escape (detalle PARTIAL) ───────────────
+test("BLOQUEANTE 2: escape con detalle PARTIAL → NUNCA asume, en ambos sentidos, mismo estado final", () => {
+  // Desglose con un huérfano genuino (400 sin asignar) → PARTIAL.
+  const msgDetallePartial = "Mis gastos: arriendo 1200, comida 1050. Quizas 300 o 400 mas, no estoy seguro.";
+  const deltaDetalle = extractScenarioDelta(msgDetallePartial);
+  assert.equal(deltaDetalle.extraction_status, "PARTIAL", "precondición: el desglose debe ser PARTIAL");
+
+  const dosIntentosSinResolver = (inicial: ReturnType<typeof mergeScenario>) => {
+    let s = mergeScenario(inicial, extractScenarioDelta("no lo se", "es", inicial));
+    s = mergeScenario(s, extractScenarioDelta("no estoy seguro todavia", "es", s));
+    return s;
+  };
+
+  // Sentido A: detalle PARTIAL (T1) → agregado (T2) → 2 intentos.
+  let a = mergeScenario({}, deltaDetalle);
+  a = mergeScenario(a, extractScenarioDelta("Gano 2636 euros al mes y mis gastos son 2500."));
+  assert.equal(a.gastos_conflict?.detalleCompleta, false, "el desglose que originó el conflicto era PARTIAL");
+  a = dosIntentosSinResolver(a);
+
+  // Sentido B: agregado (T1) → detalle PARTIAL (T2) → 2 intentos.
+  let b = mergeScenario({}, extractScenarioDelta("Gano 2636 euros al mes y mis gastos son 2500."));
+  b = mergeScenario(b, deltaDetalle);
+  assert.equal(b.gastos_conflict?.detalleCompleta, false, "el desglose que originó el conflicto era PARTIAL (rama traeAgregado)");
+  b = dosIntentosSinResolver(b);
+
+  // G1c: mismo par de hechos, orden distinto → mismo estado final.
+  assert.equal(a.gastos_assumed, undefined, "NUNCA escapa a ASSUMED con detalle PARTIAL (sentido A)");
+  assert.equal(b.gastos_assumed, undefined, "NUNCA escapa a ASSUMED con detalle PARTIAL (sentido B)");
+  assert.ok(a.gastos_conflict, "el conflicto sigue activo, sin resolver (sentido A)");
+  assert.ok(b.gastos_conflict, "el conflicto sigue activo, sin resolver (sentido B)");
+  assert.equal(a.gastos_conflict?.attempts, b.gastos_conflict?.attempts, "mismos intentos en ambos sentidos");
+  assert.equal(a.gastos_conflict?.detalleCompleta, b.gastos_conflict?.detalleCompleta, "misma calidad de detalle en ambos sentidos");
+});
+
+test("BLOQUEANTE 2: comentario corregido — gastos_detalle_origen NO se fija solo con COMPLETE (regresión del bug real)", () => {
+  const msgDetallePartial = "Mis gastos: arriendo 1200, comida 1050. Quizas 300 o 400 mas, no estoy seguro.";
+  const s = mergeScenario({}, extractScenarioDelta(msgDetallePartial));
+  assert.equal(s.gastos_detalle_origen?.completa, false, "el origen SÍ se fija con PARTIAL, y ahora lo declara honestamente");
+});
+
+// ── BLOQUEANTE 3 — ASSUMED es revocable (V6, "siempre") ──────────────────────
+function llegarAAssumedParaTest() {
+  let s = mergeScenario({}, extractScenarioDelta("Gano 2636 euros al mes y mis gastos son 2200."));
+  s = mergeScenario(s, extractScenarioDelta("Mis gastos: arriendo 1200, comida 1050"));
+  s = mergeScenario(s, extractScenarioDelta("no lo se", "es", s));
+  s = mergeScenario(s, extractScenarioDelta("no estoy seguro todavia", "es", s));
+  assert.equal(s.gastos_assumed?.valor, 2250, "precondición: ASSUMED activo con 2250");
+  return s;
+}
+
+const CORRECCIONES_ASSUMED = [
+  "en realidad son 2200",
+  "no, son 2200",
+  "corrige: 2200",
+  "usa 2200",
+  "eran 2200",
+  "me equivoque, son 2200",
+  "el correcto es el total",
+  "quedate con el agregado",
+];
+
+test("BLOQUEANTE 3: 8 formas de corrección sobre un ASSUMED activo → las 8 revocan a CONFIRMED 2200", () => {
+  for (const frase of CORRECCIONES_ASSUMED) {
+    const s = llegarAAssumedParaTest();
+    const s2 = mergeScenario(s, extractScenarioDelta(frase, "es", s));
+    assert.equal(s2.gastos_mensuales, 2200, `"${frase}" debe revocar el supuesto y confirmar 2200`);
+    assert.equal(s2.gastos_assumed, undefined, `"${frase}" debe limpiar el ASSUMED`);
+    assert.equal(s2.gastos_conflict, undefined, `"${frase}" no debe dejar un CONFLICT abierto`);
+    assert.equal(s2.factStatus?.gastos_mensuales, "CONFIRMED", `"${frase}" → factStatus CONFIRMED`);
+    assert.ok(
+      s2.gastos_superseded?.some((sp) => sp.valor === 2250 && sp.motivo === "USER_CORRECTION"),
+      `"${frase}" debe archivar el 2250 asumido como SUPERSEDED (V7, nunca se borra)`,
+    );
+  }
+});
+
+const CONFIRMACIONES_ASSUMED = ["si", "vale", "ok", "si, correcto", "correcto", "confirmo", "exacto", "asi es"];
+
+test("BLOQUEANTE 3 (MAYOR 1): 8 formas de confirmación sobre un ASSUMED activo → las 8 confirman", () => {
+  for (const frase of CONFIRMACIONES_ASSUMED) {
+    assert.ok(esConfirmacionCorta(frase), `"${frase}" debe reconocerse como confirmación corta`);
+    const s = llegarAAssumedParaTest();
+    const s2 = mergeScenario(s, extractScenarioDelta(frase, "es", s));
+    assert.equal(s2.gastos_mensuales, 2250, `"${frase}" confirma el valor asumido (2250)`);
+    assert.equal(s2.gastos_assumed, undefined, `"${frase}" limpia el ASSUMED`);
+    assert.equal(s2.factStatus?.gastos_mensuales, "CONFIRMED", `"${frase}" → factStatus CONFIRMED`);
+  }
+});
+
+test("BLOQUEANTE 3: ASSUMED + valor nuevo discrepante → CONFLICT, NUNCA los dos estados a la vez", () => {
+  const s = llegarAAssumedParaTest();
+  const s2 = mergeScenario(s, extractScenarioDelta("mis gastos son 2200", "es", s));
+  assert.ok(s2.gastos_conflict, "el valor discrepante (2200) contra el asumido (2250) debe abrir CONFLICT");
+  assert.equal(s2.gastos_assumed, undefined, "el ASSUMED se archiva — mutuamente excluyente con CONFLICT");
+  assert.ok(
+    s2.gastos_superseded?.some((sp) => sp.valor === 2250 && sp.motivo === "ASSUMED_SUPERSEDED_BY_NEW_DATA"),
+    "el supuesto archivado debe quedar en el historial, nunca borrado en silencio (V7)",
+  );
+});
+
+test("BLOQUEANTE 3: confirmación negativa no dispara ninguna transición (regresión, sin falsos positivos)", () => {
+  for (const frase of ["no", "tal vez", "mmm no se"]) {
+    assert.equal(esConfirmacionCorta(frase), false, `"${frase}" NO debe confirmar nada`);
+  }
+});
+
+// ── MAYOR 4 — cap de historial (§8) verificado por la vía pública ───────────
+test("MAYOR 4: 8 ciclos CONFLICT→resolución del mismo campo → cap de 5 en gastos_superseded, resto colapsado a contador", () => {
+  let s = mergeScenario({}, extractScenarioDelta("Gano 2636 euros al mes y mis gastos son 2200."));
+  s = mergeScenario(s, extractScenarioDelta("Mis gastos: arriendo 1200, comida 1050"));
+  s = mergeScenario(s, extractScenarioDelta("usa 2250", "es", s));
+  assert.equal(s.gastos_superseded?.length, 1);
+  assert.equal(s.gastos_superseded_colapsados ?? 0, 0);
+
+  for (let i = 2; i <= 8; i++) {
+    s = mergeScenario(s, extractScenarioDelta("Gano 2636 euros al mes y mis gastos son 2200."));
+    s = mergeScenario(s, extractScenarioDelta("usa 2250", "es", s));
+  }
+
+  assert.equal(s.gastos_superseded?.length, 5, "§8: cap de 5 versiones — el array nunca crece más allá de eso");
+  assert.equal(s.gastos_superseded_colapsados, 3, "8 correcciones − 5 que caben = 3 colapsadas al contador");
+  assert.ok(s.gastos_superseded?.every((sp) => sp.valor === 2200 && sp.motivo === "USER_CORRECTION"));
+});
