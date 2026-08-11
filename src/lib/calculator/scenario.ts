@@ -1908,8 +1908,39 @@ export function mergeScenario(
   // PIEZA 7 (6ª tanda) — expone explícito lo que antes había que inferir del
   // estado: agregado y desglose son necesidades DISTINTAS (calcular vs.
   // recortar), y el prompt no debe adivinar cuál de las dos tiene.
+  //
+  // CORRECCIÓN (bug real, T4 del e2e) — CONFLACIÓN SEMÁNTICA: este flag se
+  // usaba para dos cosas distintas: (a) "tengo el desglose itemizado" (POSESIÓN,
+  // un hecho) y (b) "el agregado se derivó del desglose" (algo que antes solo
+  // pasaba cuando `base.gastos_detalle` — los buckets clasificados — se
+  // fijaba, y `reconciliarGastos` los CONGELA en `undefined` mientras hay un
+  // `gastos_conflict` activo — V2, correcto para el agregado, pero el flag
+  // heredaba esa congelación sin tener nada que ver con si el usuario YA
+  // entregó las partidas). Consecuencia real (no cosmética): con 15 ítems
+  // ya entregados pero un conflicto cross-turno activo (agregado 2200 vs.
+  // detalle 2250), `tiene_detalle_gastos` daba `false` — un estado
+  // AUTOCONTRADICTORIO (`gastos_items.length === 15` pero "no tengo
+  // detalle") que, vía E4, hacía que el modelo volviera a PEDIR el desglose
+  // que el usuario ya había dado.
+  //
+  // FIX: `tiene_detalle_gastos` es POSESIÓN — true si hay ≥1 ítem, tenga o
+  // no conflicto el agregado. La USABILIDAD para un recorte por partida
+  // sigue gobernada por su propio estado (`gastos_conflict`/
+  // `detalle_confirmado`, ya cableados en `notaConflictoGastos`/
+  // `notaDetalleSinConfirmar`/`buildScenarioContext`) — nunca por este flag.
   base.tiene_agregado_gastos = base.gastos_mensuales !== undefined;
-  base.tiene_detalle_gastos = base.gastos_detalle !== undefined;
+  base.tiene_detalle_gastos = (base.gastos_items?.length ?? 0) > 0;
+
+  // GUARDA DE AUTOCONSISTENCIA — invariante interno: si hay ítems, el flag de
+  // posesión DEBE ser true. Si esto llega a ser false, es un bug (no una
+  // situación válida de negocio) — se loguea como error para que aparezca en
+  // la revisión nocturna, nunca en silencio.
+  if ((base.gastos_items?.length ?? 0) > 0 && !base.tiene_detalle_gastos) {
+    console.error("[autoconsistencia] tiene_detalle_gastos=false con gastos_items no vacío — bug de posesión/usabilidad", JSON.stringify({
+      gastos_items_length: base.gastos_items?.length,
+      tiene_detalle_gastos: base.tiene_detalle_gastos,
+    }));
+  }
 
   // PIEZA 6 (8ª tanda) — FACT_STATUS: el eco como promotor de confianza. Se
   // calcula al final, con `base` ya resuelto (necesita el valor FINAL de cada
@@ -2141,13 +2172,24 @@ export function notaFaltaDesglose(
  * de proponer directamente qué partida recortar. Sobrante/capacidad/cuota/
  * brecha NO se bloquean — el agregado basta para esas y se responden con
  * normalidad (alcance deliberadamente estrecho, para no dejar a monoem mudo).
+ *
+ * CORRECCIÓN (bug tiene_detalle_gastos) — esa última frase ("el agregado ya
+ * basta") es FALSA si `gastos_conflict` está activo: el agregado mismo está
+ * disputado. Antes esto nunca se veía porque `tiene_detalle_gastos` daba
+ * `false` con conflicto activo (el bug de posesión/usabilidad) y esta nota
+ * jamás llegaba a emitirse en ese escenario. Ahora que la posesión es
+ * correcta (hay ítems → `tiene_detalle_gastos=true` aunque haya conflicto),
+ * esta nota debe CEDER el turno a `notaConflictoGastos` — que ya cubre "no
+ * calcules sobrante/capacidad/brecha/recorte" de forma completa y sin la
+ * contradicción — en vez de emitir su propia instrucción (parcialmente
+ * incorrecta) en paralelo.
  */
 export function notaDetalleSinConfirmar(
   s: Partial<ScenarioState> | undefined,
   message: string,
 ): string | null {
   if (!s) return null;
-  if (!s.tiene_detalle_gastos || s.detalle_confirmado) return null;
+  if (!s.tiene_detalle_gastos || s.detalle_confirmado || s.gastos_conflict) return null;
   if (!pideRecorte(message)) return null;
   const items = s.gastos_items ?? [];
   const listaItems = items.length > 0 ? items.map((i) => `${i.name}: ${i.amount} €`).join(", ") : null;
