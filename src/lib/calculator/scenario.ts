@@ -314,6 +314,149 @@ export interface ScenarioState {
   missing: string[];
 }
 
+// ── PARTICIÓN HECHOS / DIÁLOGO (13ª tanda — memoria a nivel de usuario) ──────
+//
+// DECISIÓN DE ARQUITECTURA (Luis, opción A): los HECHOS financieros son del
+// USUARIO; el estado de DIÁLOGO es de la CONVERSACIÓN. Antes, TODO el
+// `ScenarioState` vivía en `conversations.scenario_state`, así que cada
+// conversación nueva arrancaba VACÍA: amnesia entre sesiones por diseño —
+// contradice el ADN ("seguimiento constante") e incoherente con `goals`, que
+// ya era por usuario. Un usuario del piloto que abre la app el día 2 espera
+// que monoend recuerde su meta, su ingreso y su desglose.
+//
+// IMPORTANTE — la FORMA de `ScenarioState` en memoria NO CAMBIA. Cambian solo
+// el ORIGEN (dos lecturas que se fusionan) y el DESTINO (dos escrituras) de la
+// persistencia. Todo aguas abajo (orquestador, validate, policy, commandments,
+// expenses, harness) sigue recibiendo exactamente el mismo objeto.
+//
+// Las tres listas de abajo son la ÚNICA fuente de verdad de la partición. Si
+// se añade un campo a `ScenarioState` y no se clasifica aquí,
+// `splitScenarioState` LANZA — nunca asume un lado por defecto. Esa es la
+// garantía de que este bug (un hecho persistido en el lugar equivocado, o
+// perdido) no puede reaparecer por omisión.
+
+/** Campos del USUARIO: viajan entre conversaciones (`user_financial_state`). */
+export const CAMPOS_HECHOS = [
+  "ingreso_mensual",
+  "gastos_mensuales",
+  "gastos_detalle",
+  "gastos_es_detalle",
+  "gastos_items",
+  "tiene_agregado_gastos",
+  "tiene_detalle_gastos",
+  "credito",
+  "meta",
+  "meta_derivada",
+  "goals_cerradas",
+  "extraction_status",
+  "factStatus",
+  "detalle_confirmado",
+  // Ciclo de vida del conflicto (§2/§6/§8) — incluido `attempts` dentro de
+  // `gastos_conflict`: los dos intentos previos al escape cuentan a nivel de
+  // USUARIO, no se reinician al abrir un chat nuevo.
+  "gastos_conflict",
+  "gastos_assumed",
+  "gastos_superseded",
+  "gastos_superseded_colapsados",
+  "gastos_agregado_origen",
+  "gastos_detalle_origen",
+  // `turn` es el RELOJ que fecha los hechos: los orígenes, el historial
+  // SUPERSEDED y el conflicto guardan el turno en que ocurrieron. Si se
+  // reiniciara al abrir una conversación nueva, esos turnos ya grabados
+  // quedarían en el futuro y la auditoría dejaría de ser legible. Es un
+  // hecho del usuario, no un contador de la conversación en curso.
+  "turn",
+] as const;
+
+/** Campos de la CONVERSACIÓN: no viajan (`conversations.scenario_state`). */
+export const CAMPOS_DIALOGO = [
+  "propuesta_pendiente",
+  "plan_confirmado",
+  "meta_cerrada",
+  "digresiones_seguidas",
+  // El eco enunciado el turno anterior pertenece a ESTA conversación: es lo
+  // que se dijo aquí, y solo aquí puede promoverse a CONFIRMED.
+  "eco_pendiente",
+  // Derivado: `mergeScenario` lo recalcula entero en cada turno
+  // (`computeMissing`). Se clasifica aquí porque no es un hecho aportado por
+  // el usuario, y así nunca viaja como si lo fuera.
+  "missing",
+] as const;
+
+/**
+ * Señales DEL TURNO: `mergeScenario` ya las borra antes de persistir, así que
+ * en la práctica nunca llegan aquí. Se declaran igualmente para que la guarda
+ * de campo desconocido no las confunda con un campo sin clasificar — y se
+ * descartan explícitamente, sin ir a ninguno de los dos lados.
+ */
+export const CAMPOS_TRANSITORIOS = [
+  "meta_cambio_explicito",
+  "detalle_confirmado_explicito",
+  "gastos_item_correccion",
+  "gastos_resolucion",
+  "gastos_assumed_confirmado",
+] as const;
+
+export interface ScenarioStateSplit {
+  hechos: Partial<ScenarioState>;
+  dialogo: Partial<ScenarioState>;
+}
+
+/**
+ * Parte un `ScenarioState` en sus dos mitades persistibles. PURA: no muta la
+ * entrada, no escribe nada.
+ *
+ * LANZA si encuentra un campo que no está en ninguna de las tres listas — es
+ * deliberado: un campo nuevo sin clasificar es un bug de programación (se
+ * persistiría en el lado equivocado o se perdería), y debe reventar en el
+ * test, no degradarse en silencio en producción. El llamante en producción
+ * (`persistTurn`) lo captura, lo registra como fallo crítico y deja que el
+ * turno del usuario continúe.
+ */
+export function splitScenarioState(state: Partial<ScenarioState>): ScenarioStateSplit {
+  const hechos: Record<string, unknown> = {};
+  const dialogo: Record<string, unknown> = {};
+  const sinClasificar: string[] = [];
+
+  for (const [campo, valor] of Object.entries(state)) {
+    if ((CAMPOS_HECHOS as readonly string[]).includes(campo)) hechos[campo] = valor;
+    else if ((CAMPOS_DIALOGO as readonly string[]).includes(campo)) dialogo[campo] = valor;
+    else if ((CAMPOS_TRANSITORIOS as readonly string[]).includes(campo)) continue;
+    else sinClasificar.push(campo);
+  }
+
+  if (sinClasificar.length > 0) {
+    throw new Error(
+      `splitScenarioState: campo(s) sin clasificar en la partición hechos/diálogo: ${sinClasificar.join(", ")}. ` +
+        "Añádelo(s) a CAMPOS_HECHOS, CAMPOS_DIALOGO o CAMPOS_TRANSITORIOS en scenario.ts — " +
+        "nunca se asume un lado por defecto.",
+    );
+  }
+
+  return { hechos: hechos as Partial<ScenarioState>, dialogo: dialogo as Partial<ScenarioState> };
+}
+
+/**
+ * Reconstruye el `ScenarioState` que ve el pipeline a partir de sus dos
+ * orígenes. La FORMA resultante es idéntica a la de antes de esta tanda —
+ * nadie aguas abajo nota la diferencia.
+ *
+ * Los hechos mandan sobre lo que quede en el estado de la conversación: si
+ * `user_financial_state` aún no tiene fila (usuario nuevo, o backfill parcial),
+ * el estado de la conversación actúa de respaldo y se promueve a hechos en la
+ * primera escritura — nunca se arranca vacío habiendo datos.
+ */
+export function mergeEstadoPersistido(
+  hechos: Partial<ScenarioState> | undefined,
+  dialogo: Partial<ScenarioState> | undefined,
+): Partial<ScenarioState> {
+  const base = { ...(dialogo ?? {}) };
+  for (const [campo, valor] of Object.entries(hechos ?? {})) {
+    if (valor !== undefined) (base as Record<string, unknown>)[campo] = valor;
+  }
+  return base;
+}
+
 // ── Normalización ────────────────────────────────────────────────────────────
 function norm(s: string): string {
   return s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();

@@ -32,6 +32,7 @@ import {
   analizarExtraccion,
   detectarResolucionConflicto,
   parConflictoParaResolucion,
+  mergeEstadoPersistido,
   notaConflictoGastos,
   type ScenarioState,
 } from '@/lib/calculator/scenario'
@@ -207,6 +208,36 @@ export async function POST(request: Request) {
     // El motor recuerda: el escenario acumulado del diálogo (migración 010).
     prevScenario = ((conv as { scenario_state?: Partial<ScenarioState> }).scenario_state) ?? {}
   }
+
+  // ── MEMORIA A NIVEL DE USUARIO (13ª tanda, migración 021) ──────────────────
+  // Los HECHOS financieros (ingreso, gastos, desglose, meta, crédito, ciclo de
+  // conflicto…) son del USUARIO y viven en `user_financial_state`; el estado
+  // de DIÁLOGO (propuesta pendiente, digresiones, eco…) sigue en
+  // `conversations.scenario_state`. Antes TODO vivía en la conversación, así
+  // que un chat nuevo arrancaba VACÍO — amnesia entre sesiones por diseño.
+  //
+  // La FORMA del objeto que sale de aquí es IDÉNTICA a la de antes: se fusionan
+  // las dos mitades y el pipeline aguas abajo no nota ninguna diferencia.
+  //
+  // Sin fila de hechos (usuario nuevo, o backfill parcial de la 021) el estado
+  // de la conversación actúa de RESPALDO: `mergeEstadoPersistido` lo conserva
+  // entero y la primera escritura de este turno lo promueve a hechos. Nunca se
+  // arranca vacío habiendo datos.
+  const { data: userState, error: userStateErr } = await admin
+    .from('user_financial_state')
+    .select('state')
+    .eq('user_id', user.id)
+    .maybeSingle()
+  if (userStateErr) {
+    // No es bloqueante: se degrada al estado de la conversación (el
+    // comportamiento anterior a esta tanda), pero NUNCA en silencio.
+    console.error('[chat] leer user_financial_state falló — se usa el estado de la conversación como respaldo:', JSON.stringify({
+      user_id: user.id,
+      error: userStateErr.message,
+    }))
+  }
+  const hechosUsuario = ((userState as { state?: Partial<ScenarioState> } | null)?.state) ?? undefined
+  prevScenario = mergeEstadoPersistido(hechosUsuario, prevScenario)
 
   // ── Historial de la conversación ─────────────────────────────────────────────
   // Única consulta de contexto que NO puede paralelizarse con las anteriores:

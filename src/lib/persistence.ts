@@ -18,7 +18,7 @@
 // cuatro se ejecutan en paralelo (ninguna depende del resultado de otra).
 
 import type { SupabaseClient } from '@supabase/supabase-js'
-import type { ScenarioState } from './calculator/scenario'
+import { splitScenarioState, type ScenarioState } from './calculator/scenario'
 import { updateICAScore } from './ica-service'
 import { logResponseTelemetry, type ResponseTelemetryPayload } from './telemetry'
 
@@ -50,6 +50,8 @@ export interface PersistTurnPayload {
 
 export interface PersistTurnResult {
   scenarioStateOk: boolean
+  /** 13ª tanda — hechos financieros a nivel de usuario (`user_financial_state`). */
+  userStateOk: boolean
   goalOk: boolean
   icaOk: boolean
   telemetryOk: boolean
@@ -72,6 +74,39 @@ async function persistScenarioState(
   if (error) {
     console.error('[persistTurn] scenario_state FALLÓ (fallo crítico — el motor pierde memoria del diálogo):', JSON.stringify({
       conversation_id: conversationId,
+      error: error.message,
+    }))
+    return false
+  }
+  return true
+}
+
+// ── user_financial_state (13ª tanda — memoria a nivel de usuario) ─────────
+//
+// Los HECHOS financieros son del USUARIO, no de la conversación (migración
+// 021). Antes TODO el escenario vivía en `conversations.scenario_state` y una
+// conversación nueva arrancaba vacía: amnesia entre sesiones. Esta escritura
+// es la que hace que el día 2, en un chat nuevo, monoend siga recordando el
+// ingreso, la meta y el desglose.
+//
+// Un fallo aquí es CRÍTICO — el motor pierde la memoria financiera del
+// usuario, no solo la del diálogo — y se marca en la telemetría
+// (`userStatePersistFailed`), igual que `scenario_persist_failed`.
+
+async function persistUserFinancialState(
+  admin: SupabaseClient,
+  userId: string,
+  hechos: Partial<ScenarioState>,
+): Promise<boolean> {
+  const { error } = await admin
+    .from('user_financial_state')
+    .upsert(
+      { user_id: userId, state: hechos, updated_at: new Date().toISOString() },
+      { onConflict: 'user_id' },
+    )
+  if (error) {
+    console.error('[persistTurn] user_financial_state FALLÓ (fallo crítico — el motor pierde la memoria financiera del usuario entre conversaciones):', JSON.stringify({
+      user_id: userId,
       error: error.message,
     }))
     return false
@@ -234,23 +269,49 @@ export async function persistTurn(
   admin: SupabaseClient,
   payload: PersistTurnPayload,
 ): Promise<PersistTurnResult> {
-  const [scenarioStateOk, goalOk, icaOk] = await Promise.all([
-    persistScenarioState(admin, payload.conversationId, payload.scenarioState),
+  // PARTICIÓN HECHOS/DIÁLOGO (13ª tanda). `splitScenarioState` LANZA si
+  // encuentra un campo sin clasificar — es deliberado (ver su doc): un campo
+  // nuevo sin clasificar es un bug de programación que debe reventar en los
+  // tests. En producción NO puede tumbar el turno del usuario: se captura
+  // aquí, se registra como fallo crítico y el resto de escrituras continúa
+  // (la conversación se guarda igual; lo que se pierde es la promoción de los
+  // hechos, y la telemetría lo deja visible).
+  let hechos: Partial<ScenarioState> | null = null
+  let dialogo: ScenarioState = payload.scenarioState
+  try {
+    const split = splitScenarioState(payload.scenarioState)
+    hechos = split.hechos
+    // El estado de la conversación conserva SOLO la mitad de diálogo. `missing`
+    // es obligatorio en el tipo y siempre viaja en esa mitad (es derivado).
+    dialogo = { ...split.dialogo, missing: split.dialogo.missing ?? payload.scenarioState.missing }
+  } catch (err) {
+    console.error('[persistTurn] splitScenarioState FALLÓ (campo sin clasificar — bug de programación, ver CAMPOS_HECHOS/CAMPOS_DIALOGO en scenario.ts):', JSON.stringify({
+      user_id: payload.userId,
+      conversation_id: payload.conversationId,
+      error: err instanceof Error ? err.message : String(err),
+    }))
+  }
+
+  const [scenarioStateOk, userStateOk, goalOk, icaOk] = await Promise.all([
+    persistScenarioState(admin, payload.conversationId, dialogo),
+    hechos === null ? Promise.resolve(false) : persistUserFinancialState(admin, payload.userId, hechos),
     persistGoal(admin, payload.userId, payload.goal),
     persistIcaEventos(admin, payload.userId, payload.icaEventos),
   ])
 
   // La telemetría se registra DESPUÉS de conocer el resultado de
   // scenario_state: "si scenario_state falla, se registra como error crítico
-  // en la telemetría" exige que la propia fila lo lleve.
+  // en la telemetría" exige que la propia fila lo lleve. Mismo criterio para
+  // `user_financial_state` (13ª tanda).
   const telemetryOk = await logResponseTelemetry(admin, {
     ...payload.telemetry,
     scenarioPersistFailed: !scenarioStateOk,
+    userStatePersistFailed: !userStateOk,
   })
 
-  const resultado = { scenarioStateOk, goalOk, icaOk, telemetryOk }
+  const resultado = { scenarioStateOk, userStateOk, goalOk, icaOk, telemetryOk }
   const writesOk = Object.values(resultado).filter(Boolean).length
-  const writesTotal = 4
+  const writesTotal = 5
 
   console.log('[persistTurn] resumen del turno', JSON.stringify({
     user_id: payload.userId,
