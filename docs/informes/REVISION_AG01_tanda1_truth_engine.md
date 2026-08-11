@@ -1,20 +1,21 @@
 # APROBADO CON RESERVAS
 
-> **VEREDICTO VIGENTE** — quinta revisión, `agent/08` @ `402589f`, 7 de agosto de 2026.
-> Los dos bloqueantes de la cuarta revisión están cerrados (fronteras posicionales por rango).
-> **Ir a [QUINTA REVISIÓN](#quinta-revisión--agent08--402589f--7-de-agosto-de-2026) para el informe vigente.**
+> **VEREDICTO VIGENTE** — sexta revisión, `agent/08` @ `ba95746`, 11 de agosto de 2026.
+> Cierra V16 (doble conteo con palabra intermedia) y V15 (atribución única).
+> **Ir a [SEXTA REVISIÓN](#sexta-revisión--agent08--ba95746--11-de-agosto-de-2026).**
 >
-> Este documento es acumulativo: conserva las cinco revisiones en orden cronológico, porque la
-> trazabilidad de qué se rechazó y por qué es parte de la auditoría. Los veredictos de las
-> revisiones 1-4 (todos RECHAZADO) son **históricos** y se refieren a commits ya superados.
+> Documento acumulativo: conserva las seis revisiones en orden cronológico, porque la trazabilidad
+> de qué se rechazó y por qué es parte de la auditoría. Los veredictos 1-4 (RECHAZADO) son
+> **históricos** y se refieren a commits ya superados.
 
 | # | Commit revisado | Fecha | Veredicto |
 |---|---|---|---|
 | 1 | `23a5d6a` | 6 ago | RECHAZADO — rama anterior al contrato + regresión del caso 10 |
-| 2 | (adenda) | 6 ago | RECHAZADO — hallazgo de proceso: la entrega real estaba sin publicar |
+| 2 | (adenda) | 6 ago | RECHAZADO — la entrega real estaba sin publicar |
 | 3 | `f4f3561` | 6 ago | RECHAZADO — B1: partida perdida al compartir segmento con el ingreso |
 | 4 | `a83957a` | 6 ago | RECHAZADO — B1 residual (1 de 3) + B2: frontera global por palabra |
-| **5** | **`402589f`** | **7 ago** | **APROBADO CON RESERVAS** — bloqueantes cerrados; 3 condiciones de proceso |
+| 5 | `402589f` | 7 ago | APROBADO CON RESERVAS — bloqueantes cerrados (fronteras posicionales) |
+| **6** | **`ba95746`** | **11 ago** | **APROBADO CON RESERVAS** — V16 y V15 cerrados; 3 condiciones |
 
 ---
 ---
@@ -1595,3 +1596,275 @@ credenciales Supabase (preexistente, idéntico en `develop`). Los 5 mensajes exi
 rotura se ejecutaron contra `extractScenarioDelta`, `mergeScenario`, `buildScenarioContext`,
 `analizarExtraccion` y `numerosCandidatos` reales, y se contrastaron contra `develop` con el mismo
 script. `test:e2e` y `smoke:db`: no verificables por mí.*
+
+
+---
+---
+
+# SEXTA REVISIÓN — `agent/08` @ `ba95746` · 11 de agosto de 2026
+
+## VEREDICTO: APROBADO CON RESERVAS
+
+> **Revisión adversarial — AG08, 13ª tanda: V16 (palabra intermedia) + V15 (atribución única)**
+> Revisor: AG01 (Arquitecto) · Base: `origin/develop` @ `5af972c` (ya incluye tandas 1 y 2)
+> Rama revisada: `origin/agent/08` @ `ba95746` (1 commit por delante)
+> Método: batería reproducida entera; **los 6 mensajes exigidos ejecutados uno por uno**;
+> **4 formas propias inventadas por mí** (verificadas como ausentes de su batería antes de
+> escribirlas); afirmación central del informe de AG08 verificada por contraejecución; cada
+> hallazgo contrastado contra `develop`.
+> No se tocó código de AG08, no se mergeó nada, no se pusheó código.
+
+---
+
+## 1 · Resumen
+
+Esta tanda cierra la reserva que dejé en la revisión anterior — el doble conteo con palabra
+intermedia — y lo hace bien. **De los 6 mensajes exigidos, los 6 pasan.** Sobre el mismo corpus,
+`develop` falla 6 de 6 y `agent/08` pasa 4 de 6 de mis formas inventadas, con las 2 restantes
+**idénticas a `develop`**: mejora estricta, cero regresión.
+
+Lo más valioso de la entrega no es el fix, es el **test estructural de atribución única** y la
+honestidad con que está construido: AG08 declara que su "arma 1" (cada cifra en exactamente un
+destino) **no habría cazado el bloqueante de esta misma tanda**. Lo verifiqué ejecutando el delta
+buggy de `develop` y **es cierto** (§3). Un implementador que documenta el punto ciego de su propio
+test es exactamente lo contrario del patrón que originó esta serie de revisiones.
+
+La reserva: el mecanismo es una **enumeración explícita** de conectores, no un comodín — decisión
+deliberada y bien argumentada por AG08 — y por tanto cualquier fraseo fuera de la lista sigue
+fallando. Encontré dos con mis propias formas.
+
+---
+
+## 2 · Los 6 mensajes exigidos (bloque L) — **6/6**
+
+### V16 — doble conteo con palabra intermedia
+
+| # | Mensaje | Esperado | `agent/08` | `develop` |
+|---|---|---|---|---|
+| 1 | `"mis gastos fueron 1200: internet 300, agua 400, gas 500"` | 1200 · 3 ítems · CONSISTENT | ✅ **1200 · 3 · COMPLETE** | ❌ 2400 (4 ítems, `fueron`=1200) |
+| 2 | `"gastamos 950 al mes: mercado 500, gasolina 250, farmacia 200"` | 950 · 3 · CONSISTENT | ✅ **950 · 3 · COMPLETE** | ❌ 1900 (`gastamos`=950) |
+| 3 | `"gasté 1800: renta 900, comida 500, luz 400"` | 1800 · 3 (regresión) | ✅ **1800 · 3** | ✅ (ya arreglado en tanda 2) |
+
+### V15 — atribución
+
+| # | Mensaje | Resultado |
+|---|---|---|
+| 4 | `"gasto 1500 en total: casa 700, comida 300"` | ✅ agregado 1500 · `casa=700` (**no** 1500) · el 700 **no** queda huérfano · suma 1000 vs 1500 = 33% > 5% → reinicio de captura (§6, materialidad aprobada) |
+| 5 | `"gasto 1500 en total: casa 700, comida 300, luz 500"` | ✅ suma exacta 1500 → **CONSISTENT**, sin conflicto |
+| 6 | `"sueldo 3000, quiero un piso de 200000"` | ✅ ingreso 3000 · `meta.monto = 200000` · **nunca cruzados**; `meta.monto` jamás 3000; el 200000 ya no queda huérfano |
+
+**Sin sustitución de casos (bloque I.4).** Los 6 están en la batería: `grep` sobre
+`scenario.test.ts` da 3, 3, 5, 10, 3 y 3 coincidencias respectivamente. Corrige el incumplimiento
+que reporté en la tanda anterior y no reincide.
+
+---
+
+## 3 · El test estructural de atribución única — verificado, incluido su punto ciego
+
+`scenario.test.ts:1886` — *"INVARIANTE DE CIERRE (V14+V15+V16): cada cifra en EXACTAMENTE un
+destino, y ninguna palabra funcional como ítem"*. Recorre un corpus de 22 mensajes de las tandas 1,
+2 y 3 llamando a `extractScenarioDelta` real (sin mocks), con dos comprobaciones:
+
+- **Arma 1** — cada cifra en exactamente un destino: ni cero (V14, desapareció) ni dos (V16, se
+  contó dos veces). El alias `credito.monto` ↔ `meta.monto` cuenta como **un** destino.
+- **Arma 2** — ningún ítem puede llamarse como una palabra funcional del patrón declarativo
+  (`gasto/gastos/gasté/gastamos/fueron/son/al/mes/total/aproximadamente…`).
+
+**Verifiqué la afirmación central de su informe** — que el arma 1 sola habría dado luz verde al
+bloqueante de esta tanda — ejecutando el delta buggy de `develop`:
+
+```
+items = [fueron=1200, internet=300, agua=400, gas=500]
+candidatos = [1200, 300, 400, 500]
+destinos   = 1200→[item:fueron]  300→[item:internet]  400→[item:agua]  500→[item:gas]
+cifras con CERO destinos (V14): []      cifras con DOS destinos (V16): []
+→ arma 1 sola DA LUZ VERDE al bug — la afirmación de AG08 es CIERTA
+```
+
+Cada cifra tenía exactamente un destino y el total salía **duplicado**, porque el destino era el
+equivocado. Por eso el arma 2 existe, y por eso el test vale: sin ella sería un test que cuadra
+mientras el sistema miente.
+
+**Reimplementé ambas armas por mi cuenta** (sin reutilizar su código) y las corrí sobre 11 mensajes
+del contrato: **11/11 OK**, cero cifras sin destino, cero dobles, cero palabras funcionales como
+nombre de ítem.
+
+---
+
+## 4 · Hallazgos
+
+### 🟠 MAYOR M1 — La enumeración de conectores no cubre artículos ni sustantivos intercalados (PREEXISTENTE)
+
+**Archivo:** `src/lib/calculator/scenario.ts` — `CONECTOR_DECLARATIVO` (nueva) y
+`GASTO_AGREGADO_DETALLE_RE`.
+
+Inventé 4 formas de "agregado + palabra intermedia + detalle", verificadas como **ausentes de su
+batería** antes de escribirlas (`grep` de `"ascienden a"`, `"unos 900"`, `"rondan"`,
+`"más o menos"` → 0 coincidencias). **2 pasan, 2 fallan:**
+
+| Mensaje (mío) | Real | `agent/08` | `develop` |
+|---|---|---|---|
+| `"en total gasto unos 900 al mes: mercado 400, transporte 300, ocio 200"` | 900 | ✅ **900** | ❌ 1400 |
+| `"gasto más o menos 750 mensuales: internet 250, gas 250, ropa 250"` | 750 | ✅ **750** | ❌ 1250 |
+| `"mis gastos del mes ascienden a 1400: alquiler 800, comida 400, luz 200"` | 1400 | ❌ **2000** | ❌ 2000 |
+| `"mis gastos rondan los 1100: hipoteca 600, seguro 200, agua 300"` | 1100 | ❌ **1600** | ❌ 1600 |
+
+**Los 2 fallos son idénticos a `develop`** → no es regresión de esta tanda.
+
+**Causa:** `CONECTOR_DECLARATIVO` enumera `ascienden a` y `rondan`, pero mis frases meten un
+sustantivo (`gastos **del mes** ascienden a`) o un artículo (`rondan **los** 1100`) que rompen la
+ventana. Sin match, el agregado no se reclama y su cifra se la queda el primer nombre de partida:
+`alquiler=1400` (debería ser 800) y `hipoteca=1100` (debería ser 600), con el importe real
+convertido en huérfano.
+
+**Atenuante relevante:** ambos salen **`PARTIAL`**, no `COMPLETE` — el sistema **señala** que algo
+quedó sin asignar. Es cualitativamente distinto de los casos que esta tanda arregló, que salían
+`COMPLETE` (silenciosamente falsos). Un `PARTIAL` erróneo pide aclaración; un `COMPLETE` erróneo
+miente.
+
+**Sobre la decisión de diseño:** AG08 documenta que descartó el comodín `.{0,N}` a propósito,
+porque se tragaría un nombre de partida real (`"gastos: internet 300…"` leería 300 como agregado) y
+rompería V13/V15. **Coincido: el comodín es peor.** Pero la consecuencia inevitable es que la
+cobertura es la lista, y la lista siempre irá por detrás del lenguaje real. Mi recomendación no es
+el comodín sino una **red estructural**: si tras `GASTO_CTX` hay una cifra seguida de `:` y luego
+una lista de ≥2 partidas, esa cifra es agregado — sea cual sea lo que haya en medio. Eso cubre la
+familia entera sin adivinar palabras.
+
+---
+
+### 🟢 Falso positivo de mi propio detector (lo declaro para que no confunda)
+
+Mi comprobación de "doble destino" marcó
+`"gasto más o menos 750 mensuales: internet 250, gas 250, ropa 250"` porque el valor 250 aparece en
+tres ítems. **No es un defecto del código**: son tres partidas legítimas distintas que casualmente
+valen lo mismo. Mi detector indexaba por valor en vez de por posición. El resultado real de ese
+mensaje es correcto (750, 3 ítems). Lo dejo escrito para que nadie lo lea como hallazgo.
+
+---
+
+### ⚪ Nota de proceso (cuarta vez) — V14/V15/V16 siguen fuera del contrato
+
+`docs/CONTRATO_TRUTH_ENGINE.md` sigue con **E1-E6** y **V1-V13**. V14 (conservación), V15
+(atribución) y V16 (doble conteo) —las tres familias que esta tanda cierra— **no están escritas**.
+Es la cuarta tanda seguida en que el revisor juzga invariantes que solo viven en prompts e
+informes. Con el go-live del 17 a la vuelta de la esquina, el próximo revisor (o el propio AG08 en
+seis semanas) no tendrá contra qué juzgar.
+
+---
+
+## 5 · Los 9 casos de aceptación + extras
+
+| # | Caso | Test existe | Ejercita ruta real | Pasa |
+|---|---|---|---|---|
+| 9 | `"…60 100 Pañales_Bebe_Vital"` | Sí | Sí | ✅ `AMBIGUOUS`, sospechoso 60100, conflicto `false` |
+| 10 | `"gasto 2 500 €"` | Sí | Sí | ✅ 2500 |
+| 11 | `"gano 2300, tengo 43 años, 2 hijos, gasto 2200"` | Sí | Sí | ✅ 2300/2200, `COMPLETE` |
+| 12 | `"gano 2300 y gasto 2200 y 450"` | Sí | Sí | ✅ `PARTIAL`, huérfanos `[450]` |
+| 13 | `"Diezmo_Vital 225, Casa_Vital 700"` | Sí | Sí | ✅ 2 ítems |
+| 14 | `"alquiler 700 comida 450 luz 120"` | Sí | Sí | ✅ 3 ítems |
+| 15 | `"Alquiler: 700, Comida: 450, Luz: 120"` | Sí | Sí | ✅ 3 ítems |
+| 16 | 15 partidas testdev7 | Sí | Sí | ✅ 15 ítems · suma 2250 · **buckets 2250** |
+| 17 | Crédito con monto sin plazo | Sí | Sí | ✅ plazo `undefined`, `missing` incluye plazo |
+| **Los dos de Luis** | | | | |
+| — | Desglose sin confirmar: no propone recorte, sí responde sobrante | Sí | Sí | ✅ bloquea "¿qué puedo recortar?", **no** bloquea "¿cuánto me queda?", sobrante 1030 |
+| — | `"gasto aproximadamente 2000 entre vivienda, comida"` → items vacío | Sí | Sí | ✅ 2000, 0 ítems |
+| **Bloque L** | | | | |
+| L1-L3 | V16 palabra intermedia | Sí | Sí | ✅ 3/3 |
+| L4-L6 | V15 atribución | Sí | Sí | ✅ 3/3 |
+| — | 4 formas propias mías | No | Sí | ⚠️ 2/4 (M1, preexistente) |
+| — | Atribución única, 11 mensajes (armas reimplementadas por mí) | Sí | Sí | ✅ 11/11 |
+| **Regresión tandas 1-2** | | | | |
+| — | 3 bloqueantes tanda 1 | Sí | Sí | ✅ 1200 / 1090 / 1090 |
+| — | G1c bidireccional | Sí | Sí | ✅ idénticos, `detalleCompleta` incluido |
+| — | Bloqueo granular con CONFLICT | Sí | Sí | ✅ cuota 548.22 · sobrante bloqueado |
+
+---
+
+## 6 · Invariantes
+
+| # | Estado | Evidencia |
+|---|---|---|
+| **V1** | ✅ | Nada se descarta por `extraction_status`; los `PARTIAL` de M1 conservan los datos con confianza. |
+| **V2 · V3 · V4 · V6 · V7** | ✅ | `reconciliarGastos` **sin cambios** (firma y cuerpo intactos); ciclo de conflicto no tocado. |
+| **V5** | ✅ | No tocado. |
+| **V8** | ✅ | `"gano 0"` / `"gasto 0"` → `INVALID`, sin campo financiero. |
+| **V9** | ✅ (round-trip) / ⚠️ (BD) | Sin cambios en persistencia. `test:e2e` **no verificable por mí** (credenciales). |
+| **V10** | ✅ | No aplica: sin sustituciones de texto. |
+| **V11** | ✅ | **Ningún test reescrito**: los 153 previos siguen intactos y verdes; los 12 nuevos son aditivos. |
+| **V12** | ✅ | Sin regresión. |
+| **V13** | ✅ | `rangosReclamados: Rango[]` (`scenario.ts:556`) y `rangosParaMeta` (`:565`) siguen siendo **rangos posicionales**, no sets de strings. Sin rechazo automático (bloque I.1). |
+| **V14** | ✅ | 11 mensajes con mis armas: cero cifras sin destino. |
+| **V15** | ✅ | Los 3 casos del bloque L pasan; `meta.monto` nunca captura el ingreso. |
+| **V16** | ⚠️ **Parcial** | Cubre los conectores enumerados (los 6 exigidos + 2 de mis 4); no cubre artículos/sustantivos intercalados (M1, preexistente). |
+
+**Bloque B — compatibilidad:** ✅ `gastos_detalle` intacto; buckets derivados de los ítems
+(testdev7: ítems 2250 = buckets 2250, no pueden divergir).
+**Bloque C — alcance:** ✅ las 3 coincidencias de `CONFLICT`/`reconciliarGastos` en el diff son
+**comentarios**, no lógica; `reconciliarGastos` sin cambios. No se añadió nada de cross-turno nuevo.
+*(Nota: el bloque C del encargo declara la reconciliación cross-turno "fuera de alcance", pero ya
+está mergeada en `develop` desde la tanda 2 — lo leo como "no añadir lógica nueva", que se cumple.)*
+**Bloque E — detector de pegado:** ✅ sin cambios (umbral 50× + suelo 3×, ambos vigentes).
+**Bloque F — migración 019:** ✅ **no tocada** (el diff no incluye `supabase/`).
+**Bloque G — sin texto enlatado:** ✅ esta tanda no añade texto al usuario; `notaConflictoGastos`
+sin cambios.
+**Bloque H — declaración de impacto:** ✅ el diff toca exactamente lo declarado (3 archivos:
+informe, `scenario.ts`, `scenario.test.ts`). "Eliminadas: ninguna" es cierto. La tabla
+función-por-función coincide con el diff real.
+
+---
+
+## 7 · Riesgos latentes
+
+1. **La enumeración envejece.** `CONECTOR_DECLARATIVO` es una lista cerrada de palabras
+   funcionales. Cada fraseo real no contemplado reaparece como misatribución. Es la deuda
+   estructural de esta familia: sugiero la red por forma (cifra + `:` + lista ≥2) como
+   complemento, no sustituto.
+2. **El arma 2 también es una lista.** Detecta palabras funcionales *conocidas* como nombre de
+   ítem. Un conector nuevo no cubierto produciría un ítem con un nombre que el arma 2 tampoco
+   reconoce — el test no lo cazaría. Es el mismo límite, un nivel más arriba.
+3. **`gastos_mensuales` derivado de la suma cuando no hay agregado reconocido**: en los casos de
+   M1 el sistema registra 2000/1600 (suma del desglose corrupto). El `PARTIAL` lo señala, pero si
+   el usuario no aclara, esa cifra se persiste.
+4. **V14/V15/V16 sin sede en el contrato** (§4) — riesgo de proceso, no de código.
+
+---
+
+## 8 · Recomendación explícita a Luis
+
+**Mergear, con condiciones.** Los 6 mensajes exigidos pasan, no hay ninguna regresión (tandas 1 y 2
+íntegras, G1c bidireccional, bloqueo granular, materialidad), el alcance se respetó, la declaración
+de impacto es exacta y ningún test se reescribió. Mergear deja el sistema **estrictamente mejor**:
+sobre el corpus de M1, `develop` falla 6 de 6 y esta rama pasa 4, sin empeorar ninguno.
+
+Y algo que quiero dejar por escrito: el test estructural de atribución única con su punto ciego
+declarado es la mejor pieza de ingeniería de calidad que ha producido esta serie. Verifiqué la
+afirmación y es cierta. Eso es lo contrario del "60100".
+
+**Condiciones:**
+
+1. **Antes del merge:** ejecutar `test:e2e` y `smoke:db` — **no verificables por mí** (credenciales).
+   Única parte de la entrega que no he podido reproducir.
+2. **Antes del go-live del 17 (no bloquea el merge): red estructural para M1.** Cifra tras
+   `GASTO_CTX` seguida de `:` y de una lista de ≥2 partidas ⇒ es agregado, sin depender de qué
+   palabras haya en medio. *Aceptación:* `"mis gastos del mes ascienden a 1400: …"` → 1400 y
+   `"mis gastos rondan los 1100: …"` → 1100. Atenuante: hoy salen `PARTIAL`, no `COMPLETE` — el
+   sistema pide aclaración en vez de mentir, así que es riesgo acotado.
+3. **Escribir V14, V15 y V16 en §9 del contrato** (cuarta tanda pidiéndolo). Si el go-live es el
+   17, esto debería entrar antes: es lo único que permite a un revisor futuro juzgar sin arqueología.
+
+**Lo que NO hay que tocar:** el test estructural de atribución única y sus dos armas, la decisión
+de enumerar conectores en vez de usar comodín (está bien razonada), `reconciliarGastos`, las
+fronteras posicionales, la materialidad y el bloqueo granular.
+
+---
+
+*Nota de método: batería reproducida en worktree aislado y desechable (`git worktree add --detach`,
+eliminado al terminar), sin tocar el worktree de AG08 — `npm test` 14/14 · `test:guardrail` 262/262
+· `test:calculator` 252/252 · `test:regression` 84/84 turnos · `tsc --noEmit` limpio · `npm run
+build` falla solo en el prerender de una página de auth por credenciales Supabase ausentes
+(preexistente, idéntico en `develop`). Los 6 mensajes exigidos, mis 4 formas propias, las dos armas
+de atribución (reimplementadas por mí), G1c, el bloqueo granular y las regresiones de las tandas 1
+y 2 se ejecutaron contra `extractScenarioDelta`, `mergeScenario`, `buildScenarioContext`,
+`analizarExtraccion`, `numerosCandidatos`, `parseExpenseListDetallado`, `classifyExpenses` y
+`toolArgsToScenarioDelta` reales, y se contrastaron contra `develop` con el mismo script.
+`test:e2e` y `smoke:db`: no verificables por mí.*
