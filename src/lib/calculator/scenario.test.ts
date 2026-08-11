@@ -1641,3 +1641,70 @@ test("MAYOR 4: 8 ciclos CONFLICT→resolución del mismo campo → cap de 5 en g
   assert.equal(s.gastos_superseded_colapsados, 3, "8 correcciones − 5 que caben = 3 colapsadas al contador");
   assert.ok(s.gastos_superseded?.every((sp) => sp.valor === 2200 && sp.motivo === "USER_CORRECTION"));
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// BUG tiene_detalle_gastos (T4 del e2e) — POSESIÓN vs. USABILIDAD.
+// ═══════════════════════════════════════════════════════════════════════════
+
+const TESTDEV7_REAL =
+  "Diezmo_Vital 225, 700 Casa_Vital Supermercado_Vital 450, 120 Servicios_Vitales, " +
+  "Telecomunicaciones_Necesario 60 100 Pañales_Bebe_Vital, Colegio_Niño_Necesario 150 " +
+  "Transporte_Necesario 100, 80 Ropa_Posible, Ocio_Familiar 60 40 Farmacia_Vital, " +
+  "Suscripciones_Ocio 25 40 Gimnasio_Necesario, 60 Ahorro_Posible Gastos_Varios_Posible 40";
+
+test("BUG tiene_detalle_gastos (2): gastos 2200 → 15 partidas (2250) → posesión true, conflicto activo, agregado intacto", () => {
+  let s = mergeScenario({}, extractScenarioDelta("gano 2300 y gasto 2200"));
+  s = mergeScenario(s, extractScenarioDelta(TESTDEV7_REAL));
+  assert.equal(s.gastos_items?.length, 15, "las 15 partidas se conservan (V14, ley de conservación)");
+  assert.equal(s.tiene_detalle_gastos, true, "POSESIÓN: hay ítems, da igual que haya conflicto");
+  assert.ok(s.gastos_conflict, "G1c: la reconciliación cross-turno SÍ detecta la discrepancia");
+  assert.equal(s.gastos_conflict?.agregado, 2200);
+  assert.equal(s.gastos_conflict?.detalle, 2250);
+  assert.equal(s.gastos_conflict?.diff, 50);
+  assert.equal(s.gastos_mensuales, 2200, "V2: el agregado NUNCA se sobrescribe mientras el conflicto está activo");
+});
+
+test("BUG tiene_detalle_gastos (3): con detalle en conflicto, la nota pide RESOLVER, nunca vuelve a pedir el desglose", () => {
+  let s = mergeScenario({}, extractScenarioDelta("gano 2300 y gasto 2200"));
+  s = mergeScenario(s, extractScenarioDelta(TESTDEV7_REAL));
+  const msg = "¿qué puedo recortar?";
+  assert.equal(notaFaltaDesglose(s, msg), null, "NUNCA vuelve a pedir el desglose — ya lo tiene (E4)");
+  assert.ok(notaConflictoGastos(s)?.includes("CONFLICTO SIN RESOLVER"), "pide resolver la discrepancia, no el desglose");
+});
+
+test("BUG tiene_detalle_gastos (4): con gastos_items vacío, SÍ se pide el desglose", () => {
+  const s = mergeScenario({}, extractScenarioDelta("gano 2300 y gasto 2200"));
+  assert.equal(s.gastos_items, undefined);
+  assert.equal(s.tiene_detalle_gastos, false, "POSESIÓN: sin ítems, no hay nada que posea");
+  const nota = notaFaltaDesglose(s, "¿qué puedo recortar?");
+  assert.ok(nota?.includes("DESGLOSE"), "sin ítems, la nota SÍ debe pedirlo");
+});
+
+test("BUG tiene_detalle_gastos (5): con detalle en conflicto, NO se propone recorte por partida", () => {
+  let s = mergeScenario({}, extractScenarioDelta("gano 2300 y gasto 2200"));
+  s = mergeScenario(s, extractScenarioDelta(TESTDEV7_REAL));
+  const ctx = buildScenarioContext(s, TESTDEV7_REAL);
+  assert.ok(!("recorte" in ctx.conceptos), "recorte_propuesto_50pct sigue bloqueado con conflicto activo (§7, ya vigente)");
+  assert.ok(!ctx.bloque.includes("recorte_propuesto"));
+  // notaDetalleSinConfirmar cede el turno a notaConflictoGastos: no debe
+  // emitir su propia (y contradictoria) instrucción de "sobrante SÍ" cuando
+  // el propio agregado está en disputa.
+  assert.equal(notaDetalleSinConfirmar(s, "¿qué puedo recortar?"), null, "cede a notaConflictoGastos, sin contradicción");
+});
+
+test("BUG tiene_detalle_gastos: guarda de autoconsistencia — el flag nunca puede ser false con ítems presentes", () => {
+  let s = mergeScenario({}, extractScenarioDelta("gano 2300 y gasto 2200"));
+  s = mergeScenario(s, extractScenarioDelta(TESTDEV7_REAL));
+  // Invariante verificado directamente (la guarda interna loguea si esto
+  // llegara a divergir — aquí se comprueba que, de hecho, nunca diverge).
+  assert.equal((s.gastos_items?.length ?? 0) > 0, s.tiene_detalle_gastos, "posesión y longitud de ítems siempre coinciden");
+});
+
+test("BUG tiene_detalle_gastos: evento ICA 'detalle_gastos' SÍ se dispara aunque el desglose entre en conflicto", () => {
+  // Efecto colateral correcto del fix: con la semántica vieja (gastos_detalle
+  // !== undefined), un desglose que colisiona con el agregado NUNCA disparaba
+  // este evento — el usuario aportó 15 partidas y el ICA no lo registraba.
+  const antes = mergeScenario({}, extractScenarioDelta("gano 2300 y gasto 2200"));
+  const despues = mergeScenario(antes, extractScenarioDelta(TESTDEV7_REAL));
+  assert.ok(detectarEventosICA(antes, despues).includes("detalle_gastos"));
+});
