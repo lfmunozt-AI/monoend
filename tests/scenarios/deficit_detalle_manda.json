@@ -2,7 +2,7 @@
   "name": "deficit_detalle_manda",
   "playbook": "PB4",
   "language": "es",
-  "description": "Caso real QA — tres bugs de fontanería a la vez. T1: ingreso 10000, gastos agregados 10000 (sobrante 0, correcto en ese momento). T2: el usuario desglosa — vitales 2000+1000+2000=5000, no vitales 3000+1000+2000=6000 → total real 11.000. BUG 1: el detalle debe pisar el agregado obsoleto (antes se quedaba en 10.000 y sobrante 0). BUG 2: con gastos>ingreso el déficit (1000) es el titular de la respuesta, no un sobrante negativo mudo.",
+  "description": "Caso real QA — T1: ingreso 10000, gastos agregados 10000 (sobrante 0, correcto en ese momento). T2: el usuario desglosa — vitales 2000+1000+2000=5000, no vitales 3000+1000+2000=6000 → total del desglose 11.000. ACTUALIZADO (12ª tanda, §6): el desglose se aleja un 10% del agregado declarado en T1 — por encima del 5% elegible para conflicto, así que ya NO es 'el detalle pisa al agregado obsoleto' (BUG 1, 6ª tanda): es un fallo de comprensión (§6) que reinicia la captura de gastos. `sobrante`/`gastos`/`deficit` quedan bloqueados (V4: no se calcula una derivada sobre un dato que se acaba de invalidar); la clasificación vital/no-vital y el recorte del 50% SÍ se calculan igual, porque leen los ítems del propio mensaje, no gastos_mensuales.",
   "turns": [
     {
       "user": "Gano 10000 euros al mes y mis gastos son 10000.",
@@ -12,15 +12,13 @@
     },
     {
       "user": "vitales: alquiler 2000, seguro 1000, comida 2000. no vitales: ocio 3000, ropa 1000, gimnasio 2000",
-      "fixtureResponse": "Estás en déficit de 1000 € al mes: tus gastos son 11000 € frente a un ingreso de 10000 €. Ninguna compra a crédito es viable en esta situación. Te propongo recortar los gastos no vitales a la mitad para cerrar esa brecha. ¿Confirmamos ese recorte?",
+      "fixtureResponse": "El desglose que me diste no cuadra con lo que declaraste antes. ¿Me confirmas el total real de tus gastos mensuales?",
       "expectBlocked": false,
-      "expectConcept": { "gastos": { "value": 11000, "tol": 0 }, "deficit": { "value": 1000, "tol": 0 } },
-      "expectNotContains": ["sobrante mensual: 0", "gastos son 10000"],
+      "expectNotContains": ["sobrante mensual: 0", "gastos son 10000", "déficit de 1000", "gastos son 11000"],
       "expectFallback": false,
       "expectScenarioState": {
         "ingreso_mensual": 10000,
-        "gastos_mensuales": 11000,
-        "gastos_detalle": { "vitales": 5000, "noVitales": 6000, "desconocidos": 0 }
+        "missing": ["gastos"]
       }
     }
   ]

@@ -409,6 +409,15 @@ export function buildScenarioContext(
   const ingreso = scenario.ingreso_mensual;
   const gasto = scenario.gastos_mensuales;
 
+  // PIEZA 4 (12ª tanda, §7) — BLOQUEO GRANULAR: mientras `gastos_conflict`
+  // esté activo, se bloquea todo lo que CONSUME el valor disputado de gastos
+  // (sobrante, déficit, capacidad anual, brecha, esfuerzo total, recorte
+  // propuesto, nueva capacidad) — V4 (nunca calcular una derivada que
+  // consume un campo en CONFLICT). NO bloquea la cuota del crédito (solo
+  // consume monto/plazo/TAE, nunca gastos) ni la clasificación
+  // vital/no-vital (consume `gastos_items`, no el agregado en pugna).
+  const gastosEnConflicto = !!scenario.gastos_conflict;
+
   let capacidadMensual: number | null = null;
   // FIX B — hospedados para que el bloque de crédito (más abajo) pueda derivar
   // brecha_mensual/esfuerzo_total sin recalcular sobrante/déficit.
@@ -418,10 +427,10 @@ export function buildScenarioContext(
   if (ingreso !== undefined) {
     realidad.push({ etiqueta: "ingreso_mensual", valor: ingreso, formula: "dato que aportaste" });
   }
-  if (gasto !== undefined) {
+  if (gasto !== undefined && !gastosEnConflicto) {
     realidad.push({ etiqueta: "gastos_mensuales", valor: gasto, formula: "dato que aportaste" });
   }
-  if (ingreso !== undefined && gasto !== undefined) {
+  if (ingreso !== undefined && gasto !== undefined && !gastosEnConflicto) {
     const s = sobrante(ingreso, gasto);
     if (s.ok) {
       sobranteValor = s.valor;
@@ -548,10 +557,17 @@ export function buildScenarioContext(
       realidad.push({ etiqueta: "gastos_vitales", valor: cls.vitales.total, formula: listaTxt(cls.vitales.items) });
     }
     if (cls.noVitales.items.length > 0) {
+      // PIEZA 4 (12ª tanda, §7) — la clasificación vital/no-vital SÍ se
+      // expone con gastos en CONFLICT (no depende del agregado en pugna);
+      // el recorte propuesto y la nueva capacidad SÍ dependen de él (uno lo
+      // usa como base a recortar, el otro lo suma al sobrante bloqueado) y
+      // se bloquean.
       realidad.push({ etiqueta: "gastos_no_vitales", valor: cls.noVitales.total, formula: listaTxt(cls.noVitales.items) });
-      realidad.push({ etiqueta: "recorte_propuesto_50pct", valor: cls.recortePropuesto, formula: "supuesto: reducir no vitales a la mitad" });
-      if (capacidadMensual !== null) {
-        realidad.push({ etiqueta: "nueva_capacidad", valor: round2(capacidadMensual + cls.recortePropuesto), formula: `sobrante ${capacidadMensual} + recorte ${cls.recortePropuesto}` });
+      if (!gastosEnConflicto) {
+        realidad.push({ etiqueta: "recorte_propuesto_50pct", valor: cls.recortePropuesto, formula: "supuesto: reducir no vitales a la mitad" });
+        if (capacidadMensual !== null) {
+          realidad.push({ etiqueta: "nueva_capacidad", valor: round2(capacidadMensual + cls.recortePropuesto), formula: `sobrante ${capacidadMensual} + recorte ${cls.recortePropuesto}` });
+        }
       }
     }
     if (cls.desconocidos.items.length > 0) {

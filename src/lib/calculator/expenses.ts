@@ -388,9 +388,18 @@ function emparejarNombreMonto(tokens: Tok[]): ExpenseItem[] {
     // el ":" NO va seguido de un número, era un encabezado ("Mis gastos:
     // netflix 15…") — se descarta TODO lo acumulado, sin arrastrarlo al
     // nombre real que viene después.
+    //
+    // FIX V15 (12ª tanda) — el encabezado TAMBIÉN descarta un `pendingAmount`
+    // que hubiera quedado colgado ANTES del ":" (p. ej. "gasto 1500 en
+    // total: casa 700" — sin esto, el 1500 sobrevivía como monto pendiente y
+    // se atribuía mal a "casa", que tiene su PROPIO importe (700) dos
+    // palabras más adelante). Un encabezado es un punto de corte tan firme
+    // como una coma: nada de antes se traslada a lo que sigue.
     if (tok.kind === "word" && tok.hadColon) {
       const next = tokens[idx + 1];
-      pendingName = next && next.kind === "num" ? [tok.raw] : [];
+      const esPromesaDeValor = !!next && next.kind === "num";
+      pendingName = esPromesaDeValor ? [tok.raw] : [];
+      if (!esPromesaDeValor) pendingAmount = undefined;
       continue;
     }
 

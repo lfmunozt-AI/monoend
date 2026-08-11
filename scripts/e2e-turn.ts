@@ -130,6 +130,11 @@ async function main(): Promise<void> {
 
   let convId: string | undefined;
   let goalIds: string[] = [];
+  // Correcciones tanda 2 (revisión AG01) — BLOQUEANTE 2: dos conversaciones
+  // APARTE para el caso bidireccional con detalle PARTIAL (necesitan
+  // `scenario_state` propios, uno por cada orden de los mismos dos hechos).
+  let convIdPartialA: string | undefined;
+  let convIdPartialB: string | undefined;
   try {
     // ── setup: conversación propia, vacía ─────────────────────────────────
     const ins = await db.from("conversations")
@@ -343,6 +348,89 @@ async function main(): Promise<void> {
       console.log("✓ afirma 12: [BD] response_telemetry.extraction_status/expense_items/delta_raw/previous_scenario/merged_scenario sobreviven a la re-lectura — migración 019 verificada");
     }
 
+    // ── T5 (12ª tanda) — RECONCILIACIÓN CROSS-TURNO (Gate G1c) contra BD real.
+    // Caso real de origen de esta tanda: el usuario declara un agregado de
+    // gastos en un turno y entrega un desglose que no cuadra en OTRO — la
+    // afirmación central es que el CONFLICTO sobrevive a la escritura y
+    // RE-LECTURA de `conversations.scenario_state` (nunca al objeto en
+    // memoria), y que resolverlo dos turnos después también se persiste.
+    estado = await ejecutarTurno(db, userId, convId, estado, extractScenarioDelta("Gano 2636 euros al mes y mis gastos son 2200."), "Gano 2636 euros al mes y mis gastos son 2200.");
+    console.log("✓ T5a: persistTurn ejecutado (agregado de gastos 2200)");
+
+    const delta5b = extractScenarioDelta("Mis gastos: arriendo 1200, comida 1050");
+    estado = await ejecutarTurno(db, userId, convId, estado, delta5b, "Mis gastos: arriendo 1200, comida 1050");
+    console.log("✓ T5b: persistTurn ejecutado (desglose 2250 — no cuadra con el agregado)");
+
+    const read5b = await db.from("conversations").select("scenario_state").eq("id", convId).single();
+    if (read5b.error) throw new Error(`re-read T5b: ${read5b.error.message}`);
+    const scenarioDB5b = (read5b.data as { scenario_state: ScenarioState }).scenario_state;
+    assert(scenarioDB5b.gastos_conflict?.agregado === 2200, `[BD] gastos_conflict.agregado debe ser 2200 (fue ${scenarioDB5b.gastos_conflict?.agregado})`);
+    assert(scenarioDB5b.gastos_conflict?.detalle === 2250, `[BD] gastos_conflict.detalle debe ser 2250 (fue ${scenarioDB5b.gastos_conflict?.detalle})`);
+    assert(scenarioDB5b.gastos_conflict?.diff === 50, `[BD] gastos_conflict.diff debe ser +50 (fue ${scenarioDB5b.gastos_conflict?.diff})`);
+    assert(scenarioDB5b.factStatus?.gastos_mensuales === "CONFLICT", `[BD] factStatus.gastos_mensuales debe ser CONFLICT (fue ${scenarioDB5b.factStatus?.gastos_mensuales})`);
+    console.log("✓ afirma 13: [BD] gastos_conflict (agregado 2200, detalle 2250, diff +50) sobrevive a la RE-LECTURA — el conflicto real de origen de esta tanda queda detectado y persistido");
+
+    const delta5c = extractScenarioDelta("eran 2250", "es", estado);
+    assert(delta5c.gastos_resolucion?.valorConfirmado === 2250, `T5c debería detectar la resolución 'eran 2250' (fue ${JSON.stringify(delta5c.gastos_resolucion)})`);
+    estado = await ejecutarTurno(db, userId, convId, estado, delta5c, "eran 2250");
+    console.log("✓ T5c: persistTurn ejecutado (resolución: 'eran 2250')");
+
+    const read5c = await db.from("conversations").select("scenario_state").eq("id", convId).single();
+    if (read5c.error) throw new Error(`re-read T5c: ${read5c.error.message}`);
+    const scenarioDB5c = (read5c.data as { scenario_state: ScenarioState }).scenario_state;
+    assert(scenarioDB5c.gastos_mensuales === 2250, `[BD] gastos_mensuales debe ser 2250 tras la resolución (fue ${scenarioDB5c.gastos_mensuales})`);
+    assert(scenarioDB5c.gastos_conflict === undefined, `[BD] gastos_conflict debe quedar cerrado (fue ${JSON.stringify(scenarioDB5c.gastos_conflict)})`);
+    assert(scenarioDB5c.factStatus?.gastos_mensuales === "CONFIRMED", `[BD] factStatus.gastos_mensuales debe ser CONFIRMED (fue ${scenarioDB5c.factStatus?.gastos_mensuales})`);
+    assert(scenarioDB5c.gastos_superseded?.some((s) => s.valor === 2200 && s.motivo === "USER_CORRECTION"), `[BD] gastos_superseded debe conservar el 2200 perdedor (fue ${JSON.stringify(scenarioDB5c.gastos_superseded)})`);
+    console.log("✓ afirma 14: [BD] resolución (2250 CONFIRMED, 2200 SUPERSEDED) sobrevive a la RE-LECTURA — V7, el valor perdedor nunca se borra");
+
+    // ── T6 (correcciones tanda 2, BLOQUEANTE 2) — Gate G1c bidireccional con
+    // desglose PARTIAL, contra BD real. Mismos dos hechos (agregado 2500,
+    // desglose con un huérfano genuino sin asignar) en los DOS órdenes
+    // posibles, cada uno en su propia conversación — RE-LECTURA desde
+    // `conversations.scenario_state` debe dar el mismo `detalleCompleta`
+    // (false) y, tras dos intentos sin resolver, el mismo resultado: el
+    // conflicto sigue activo, NUNCA escapa a ASSUMED.
+    const MSG_DETALLE_PARTIAL = "Mis gastos: arriendo 1200, comida 1050. Quizas 300 o 400 mas, no estoy seguro.";
+    const deltaDetallePartial = extractScenarioDelta(MSG_DETALLE_PARTIAL);
+    assert(deltaDetallePartial.extraction_status === "PARTIAL", `T6 precondición: el desglose debe ser PARTIAL (fue ${deltaDetallePartial.extraction_status})`);
+
+    const insA = await db.from("conversations").insert({ user_id: userId, title: `${MARCA}-partial-A`, scenario_state: {} }).select("id").single();
+    if (insA.error) throw new Error(`insert conversación T6-A: ${insA.error.message}`);
+    convIdPartialA = (insA.data as { id: string }).id;
+
+    let estadoA = await ejecutarTurno(db, userId, convIdPartialA, { missing: [] }, deltaDetallePartial, MSG_DETALLE_PARTIAL);
+    estadoA = await ejecutarTurno(db, userId, convIdPartialA, estadoA, extractScenarioDelta("Gano 2636 euros al mes y mis gastos son 2500."), "Gano 2636 euros al mes y mis gastos son 2500.");
+    estadoA = await ejecutarTurno(db, userId, convIdPartialA, estadoA, extractScenarioDelta("no lo se", "es", estadoA), "no lo se");
+    estadoA = await ejecutarTurno(db, userId, convIdPartialA, estadoA, extractScenarioDelta("no estoy seguro todavia", "es", estadoA), "no estoy seguro todavia");
+    console.log("✓ T6 sentido A: detalle PARTIAL (T1) → agregado (T2) → 2 intentos sin resolver, persistido");
+
+    const insB = await db.from("conversations").insert({ user_id: userId, title: `${MARCA}-partial-B`, scenario_state: {} }).select("id").single();
+    if (insB.error) throw new Error(`insert conversación T6-B: ${insB.error.message}`);
+    convIdPartialB = (insB.data as { id: string }).id;
+
+    let estadoB = await ejecutarTurno(db, userId, convIdPartialB, { missing: [] }, extractScenarioDelta("Gano 2636 euros al mes y mis gastos son 2500."), "Gano 2636 euros al mes y mis gastos son 2500.");
+    estadoB = await ejecutarTurno(db, userId, convIdPartialB, estadoB, deltaDetallePartial, MSG_DETALLE_PARTIAL);
+    estadoB = await ejecutarTurno(db, userId, convIdPartialB, estadoB, extractScenarioDelta("no lo se", "es", estadoB), "no lo se");
+    estadoB = await ejecutarTurno(db, userId, convIdPartialB, estadoB, extractScenarioDelta("no estoy seguro todavia", "es", estadoB), "no estoy seguro todavia");
+    console.log("✓ T6 sentido B: agregado (T1) → detalle PARTIAL (T2) → 2 intentos sin resolver, persistido");
+
+    const readA = await db.from("conversations").select("scenario_state").eq("id", convIdPartialA).single();
+    if (readA.error) throw new Error(`re-read T6-A: ${readA.error.message}`);
+    const scenarioDBA = (readA.data as { scenario_state: ScenarioState }).scenario_state;
+    const readB = await db.from("conversations").select("scenario_state").eq("id", convIdPartialB).single();
+    if (readB.error) throw new Error(`re-read T6-B: ${readB.error.message}`);
+    const scenarioDBB = (readB.data as { scenario_state: ScenarioState }).scenario_state;
+
+    assert(scenarioDBA.gastos_assumed === undefined, `[BD] sentido A: NUNCA debe escapar a ASSUMED con detalle PARTIAL (fue ${JSON.stringify(scenarioDBA.gastos_assumed)})`);
+    assert(scenarioDBB.gastos_assumed === undefined, `[BD] sentido B: NUNCA debe escapar a ASSUMED con detalle PARTIAL (fue ${JSON.stringify(scenarioDBB.gastos_assumed)})`);
+    assert(scenarioDBA.gastos_conflict?.detalleCompleta === false, `[BD] sentido A: detalleCompleta debe ser false (fue ${scenarioDBA.gastos_conflict?.detalleCompleta})`);
+    assert(scenarioDBB.gastos_conflict?.detalleCompleta === false, `[BD] sentido B: detalleCompleta debe ser false (fue ${scenarioDBB.gastos_conflict?.detalleCompleta})`);
+    assert(scenarioDBA.gastos_conflict?.attempts === scenarioDBB.gastos_conflict?.attempts, `[BD] G1c: mismos intentos en ambos sentidos (A=${scenarioDBA.gastos_conflict?.attempts}, B=${scenarioDBB.gastos_conflict?.attempts})`);
+    assert(scenarioDBA.gastos_conflict?.agregado === scenarioDBB.gastos_conflict?.agregado, "[BD] G1c: mismo agregado en ambos sentidos");
+    assert(scenarioDBA.gastos_conflict?.detalle === scenarioDBB.gastos_conflict?.detalle, "[BD] G1c: mismo detalle en ambos sentidos");
+    console.log("✓ afirma 15: [BD] Gate G1c bidireccional con detalle PARTIAL — RE-LECTURA confirma mismo estado final en los dos sentidos, nunca ASSUMED");
+
     console.log("\n✅ E2E TURNO OK — persistencia real de scenario_state, goals, ica_history y response_telemetry verificada");
   } finally {
     if (goalIds.length > 0) {
@@ -356,6 +444,14 @@ async function main(): Promise<void> {
       const delConv = await db.from("conversations").delete().eq("id", convId).eq("title", MARCA);
       if (delConv.error) console.error(`⚠ no pude borrar la conversación ${MARCA} ${convId}: ${delConv.error.message}`);
       else console.log(`✓ cleanup: conversación ${MARCA} ${convId} borrada`);
+    }
+    for (const [id, title] of [[convIdPartialA, `${MARCA}-partial-A`], [convIdPartialB, `${MARCA}-partial-B`]] as const) {
+      if (!id) continue;
+      const delTel = await db.from("response_telemetry").delete().eq("conversation_id", id);
+      if (delTel.error) console.error(`⚠ no pude borrar response_telemetry de ${id}: ${delTel.error.message}`);
+      const delConv = await db.from("conversations").delete().eq("id", id).eq("title", title);
+      if (delConv.error) console.error(`⚠ no pude borrar la conversación ${title} ${id}: ${delConv.error.message}`);
+      else console.log(`✓ cleanup: conversación ${title} ${id} borrada`);
     }
   }
 }

@@ -62,6 +62,20 @@ export interface ResponseTelemetryPayload {
   previousScenario?: Record<string, unknown> | null
   mergedScenario?: Record<string, unknown> | null
   expenseItems?: Array<Record<string, unknown>> | null
+  /**
+   * PIEZA 7 (12ª tanda, §2/§6) — telemetría de la reconciliación cross-turno
+   * (migración 020_telemetry_conflict.sql). `mergedScenario` ya lleva
+   * `gastos_conflict`/`gastos_assumed` enteros dentro del JSON, pero eso
+   * exige parsear el blob para medir la tasa real de conflictos — estas
+   * columnas de primera clase son lo que la revisión nocturna (AG07) puede
+   * agregar directamente (`group by conflict_status`, `avg(conflict_diff)`…).
+   * Todas nullable — un turno sin conflicto/supuesto activo las deja NULL.
+   */
+  conflictStatus?: 'CONFLICT' | 'ASSUMED' | null
+  conflictField?: string | null
+  conflictDiff?: number | null
+  conflictAttempts?: number | null
+  assumedFields?: string[] | null
 }
 
 /**
@@ -111,6 +125,11 @@ export async function logResponseTelemetry(
       previous_scenario: payload.previousScenario ?? null,
       merged_scenario: payload.mergedScenario ?? null,
       expense_items: payload.expenseItems ?? null,
+      conflict_status: payload.conflictStatus ?? null,
+      conflict_field: payload.conflictField ?? null,
+      conflict_diff: payload.conflictDiff ?? null,
+      conflict_attempts: payload.conflictAttempts ?? null,
+      assumed_fields: payload.assumedFields ?? null,
     })
     if (error) throw new Error(error.message)
     return true
