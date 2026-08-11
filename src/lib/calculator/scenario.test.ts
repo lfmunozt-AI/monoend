@@ -1708,3 +1708,209 @@ test("BUG tiene_detalle_gastos: evento ICA 'detalle_gastos' SÍ se dispara aunqu
   const despues = mergeScenario(antes, extractScenarioDelta(TESTDEV7_REAL));
   assert.ok(detectarEventosICA(antes, despues).includes("detalle_gastos"));
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 13ª TANDA — V16 (doble conteo con palabra intermedia) + V15 (atribución
+// única) + el test estructural que cierra la familia V14/V15/V16.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── BLOQUEANTE A — V16: doble conteo con palabra intermedia ─────────────────
+
+test("V16-A1: 'mis gastos fueron 1200: internet 300, agua 400, gas 500' → 1200, 3 ítems, CONSISTENT (nunca 2400)", () => {
+  const msg = "mis gastos fueron 1200: internet 300, agua 400, gas 500";
+  const delta = extractScenarioDelta(msg);
+  assert.equal(delta.gastos_mensuales, 1200, "el agregado declarado se reclama pese a la palabra intermedia 'fueron'");
+  assert.equal(delta.gastos_items?.length, 3, "3 partidas — el agregado NO puede colarse como un cuarto ítem");
+  assert.ok(!delta.gastos_items?.some((i) => i.amount === 1200), "ningún ítem puede llevar el importe del agregado");
+  const s = mergeScenario({}, delta);
+  assert.equal(s.gastos_mensuales, 1200, "NUNCA 2400 — el doble conteo no debe producirse");
+  assert.equal(s.gastos_conflict, undefined, "CONSISTENT: 300+400+500 = 1200, coincide con el agregado");
+});
+
+test("V16-A2: 'gastamos 950 al mes: mercado 500, gasolina 250, farmacia 200' → 950, 3 ítems, CONSISTENT (nunca 1900)", () => {
+  const msg = "gastamos 950 al mes: mercado 500, gasolina 250, farmacia 200";
+  const delta = extractScenarioDelta(msg);
+  assert.equal(delta.gastos_mensuales, 950, "'gastamos' + 'al mes' entre keyword y cifra");
+  assert.equal(delta.gastos_items?.length, 3);
+  assert.ok(!delta.gastos_items?.some((i) => i.amount === 950));
+  const s = mergeScenario({}, delta);
+  assert.equal(s.gastos_mensuales, 950, "NUNCA 1900");
+  assert.equal(s.gastos_conflict, undefined, "CONSISTENT: 500+250+200 = 950");
+});
+
+// Cuatro formas PROPIAS (no presentes en ningún test anterior) que ejercitan
+// otras alternativas del conector declarativo, en los tres idiomas.
+test("V16-A3 (forma propia): 'mis gastos mensuales son 800: luz 200, agua 250, internet 350' → 800, 3 ítems, CONSISTENT", () => {
+  const delta = extractScenarioDelta("mis gastos mensuales son 800: luz 200, agua 250, internet 350");
+  assert.equal(delta.gastos_mensuales, 800);
+  assert.equal(delta.gastos_items?.length, 3);
+  assert.equal(mergeScenario({}, delta).gastos_mensuales, 800);
+});
+
+test("V16-A4 (forma propia): 'gastos aproximadamente 600: transporte 200, ocio 150, ropa 250' → 600, 3 ítems", () => {
+  const delta = extractScenarioDelta("gastos aproximadamente 600: transporte 200, ocio 150, ropa 250");
+  assert.equal(delta.gastos_mensuales, 600);
+  assert.equal(delta.gastos_items?.length, 3);
+  assert.ok(!delta.gastos_items?.some((i) => i.amount === 600));
+});
+
+test("V16-A5 (forma propia, PT): 'as despesas foram 900: renda 400, comida 300, luz 200' → 900, 3 ítems", () => {
+  const delta = extractScenarioDelta("as despesas foram 900: renda 400, comida 300, luz 200");
+  assert.equal(delta.gastos_mensuales, 900);
+  assert.equal(delta.gastos_items?.length, 3);
+  assert.ok(!delta.gastos_items?.some((i) => i.amount === 900));
+});
+
+test("V16-A6 (forma propia, EN): 'my expenses were 700: rent 400, food 200, power 100' → 700, 3 ítems", () => {
+  const delta = extractScenarioDelta("my expenses were 700: rent 400, food 200, power 100");
+  assert.equal(delta.gastos_mensuales, 700);
+  assert.equal(delta.gastos_items?.length, 3);
+  assert.ok(!delta.gastos_items?.some((i) => i.amount === 700));
+});
+
+test("V16-A7 (regresión tanda 2): 'gasté 1800: renta 900, comida 500, luz 400' → 1800, 3 ítems", () => {
+  const delta = extractScenarioDelta("gasté 1800: renta 900, comida 500, luz 400");
+  assert.equal(delta.gastos_mensuales, 1800);
+  assert.equal(delta.gastos_items?.length, 3);
+});
+
+// ── BLOQUEANTE B — V15: atribución correcta ────────────────────────────────
+
+test("V15-B1: 'gasto 1500 en total: casa 700, comida 300' → casa=700 (NUNCA 1500), agregado 1500", () => {
+  const delta = extractScenarioDelta("gasto 1500 en total: casa 700, comida 300");
+  assert.equal(delta.gastos_mensuales, 1500);
+  assert.equal(delta.gastos_items?.find((i) => i.name === "casa")?.amount, 700, "el ítem conserva SU importe, no el del agregado");
+  assert.equal(delta.gastos_items?.find((i) => i.name === "comida")?.amount, 300);
+});
+
+test("V15-B2: 'gasto 1500 en total: casa 700, comida 300, luz 500' → suma exacta 1500 → CONSISTENT", () => {
+  const delta = extractScenarioDelta("gasto 1500 en total: casa 700, comida 300, luz 500");
+  assert.equal(delta.gastos_mensuales, 1500);
+  assert.equal(delta.gastos_items?.length, 3);
+  const s = mergeScenario({}, delta);
+  assert.equal(s.gastos_mensuales, 1500);
+  assert.equal(s.gastos_conflict, undefined, "700+300+500 = 1500 exacto → CONSISTENT, sin conflicto");
+});
+
+test("V15-B3: 'gano 2300 y quiero una casa' → meta.monto NUNCA es el ingreso (2300)", () => {
+  const delta = extractScenarioDelta("gano 2300 y quiero una casa");
+  assert.equal(delta.ingreso_mensual, 2300);
+  assert.notEqual(delta.meta?.monto, 2300, "un número reclamado por 'gano' no puede ser el monto de la meta");
+});
+
+test("V15-B4: 'sueldo 3000, quiero un piso de 200000' → ingreso 3000 y meta 200000, nunca cruzados", () => {
+  const delta = extractScenarioDelta("sueldo 3000, quiero un piso de 200000");
+  assert.equal(delta.ingreso_mensual, 3000, "el sueldo es el ingreso");
+  assert.equal(delta.meta?.monto, 200000, "el precio del piso es el monto de la meta, no un huérfano");
+  assert.notEqual(delta.meta?.monto, 3000, "jamás cruzados");
+  assert.notEqual(delta.ingreso_mensual, 200000);
+});
+
+// ── INVARIANTE DE CIERRE — ATRIBUCIÓN ÚNICA (estructural) ──────────────────
+//
+// Cierra la familia V14/V15/V16 de una vez: recorre los mensajes de las tandas
+// 1, 2 y 3 y afirma, para CADA cifra del mensaje, que aparece en EXACTAMENTE
+// UN destino. Ni cero (V14: desapareció en silencio) ni dos (V16: se contó
+// dos veces).
+//
+// DOS ARMAS, deliberadamente — y esto importa: la primera SOLA no habría
+// cazado el bloqueante A de esta tanda. En aquel bug el agregado (1200) se
+// atribuía a UN destino (un ítem llamado "fueron"), no a dos: la cuenta de
+// destinos cuadraba perfectamente, y aun así el total salía duplicado porque
+// el destino era el EQUIVOCADO. La segunda arma es la que caza esa clase:
+// ningún ítem puede llamarse como una palabra funcional del patrón
+// declarativo — si eso pasa, el agregado se coló en la lista.
+
+/** Multiconjunto de valores → cuántas veces aparece cada uno. */
+function multisetDeValores(vals: number[]): Map<number, number> {
+  const m = new Map<number, number>();
+  for (const v of vals) m.set(v, (m.get(v) ?? 0) + 1);
+  return m;
+}
+
+/**
+ * Todos los destinos posibles de una cifra en el delta. `credito` y `meta`
+ * comparten monto/plazo de forma LEGÍTIMA y por diseño (crédito↔meta: "la
+ * meta ES el crédito" — ver `rangosParaMeta` en scenario.ts y la derivación
+ * BUG 3 de `mergeScenario`), así que ese alias cuenta como UN solo destino.
+ */
+function destinosDeCadaCifra(delta: Partial<ScenarioState>, huerfanos: number[]): number[] {
+  const d: number[] = [];
+  if (delta.ingreso_mensual !== undefined) d.push(delta.ingreso_mensual);
+  if (delta.gastos_mensuales !== undefined) d.push(delta.gastos_mensuales);
+  for (const item of delta.gastos_items ?? []) d.push(item.amount);
+  if (delta.credito?.monto !== undefined) d.push(delta.credito.monto);
+  if (delta.credito?.plazo_meses !== undefined) d.push(delta.credito.plazo_meses);
+  if (delta.credito?.tae_pct !== undefined) d.push(delta.credito.tae_pct);
+  if (delta.meta?.monto !== undefined && delta.meta.monto !== delta.credito?.monto) d.push(delta.meta.monto);
+  if (delta.meta?.plazo_meses !== undefined && delta.meta.plazo_meses !== delta.credito?.plazo_meses) {
+    d.push(delta.meta.plazo_meses);
+  }
+  d.push(...huerfanos);
+  return d;
+}
+
+/** Palabras funcionales del patrón declarativo: JAMÁS son el nombre de una partida. */
+const PALABRAS_NUNCA_ITEM =
+  /^(?:gasto|gastos|gaste|gastamos|gastaron|gastabamos|despesas?|expenses?|spent|gano|sueldo|salario|ingreso|ingresos|fueron|fue|son|es|eran|era|foram|foi|sao|were|was|are|is|al|mes|mensuales?|total|aproximadamente|aprox|unos|unas|cerca|alrededor)$/;
+
+/** Los mensajes de las tres tandas, en un solo corpus. */
+const CORPUS_ATRIBUCION = [
+  // — tanda 1 (V13/V14: fronteras posicionales + conservación)
+  "gano 2000 y gasto en arriendo 800, comida 300, luz 100",
+  "gano 1500, quiero una casa de 200000 a 240 meses, casa 700, comida 300, luz 90",
+  "gano 1500, quiero financiar una casa de 200000 a 240 meses, casa 700, comida 300, luz 90",
+  "gano 700 y pago arriendo 650, comida 200, luz 50",
+  "mi sueldo es 2500 y el arriendo 800, comida 300, luz 90",
+  "gasto 2 500 €",
+  "gano 2300 y gasto aproximadamente 2000 entre vivienda, comida, servicios, ocio",
+  // — tanda 2 (G1c: reconciliación cross-turno + V16 v1)
+  "gasto 2200: 1200 arriendo 1050 comida",
+  "Gano 2636 euros al mes y mis gastos son 2200.",
+  "Mis gastos: arriendo 1200, comida 1050",
+  "gasté 1800: renta 900, comida 500, luz 400",
+  "gasto 1500 en total: casa 700, comida 300",
+  "gano 2300 y quiero una casa",
+  "el banco me ofrece un 9%",
+  // — tanda 3 (esta: V16 palabra intermedia + V15 atribución)
+  "mis gastos fueron 1200: internet 300, agua 400, gas 500",
+  "gastamos 950 al mes: mercado 500, gasolina 250, farmacia 200",
+  "mis gastos mensuales son 800: luz 200, agua 250, internet 350",
+  "gastos aproximadamente 600: transporte 200, ocio 150, ropa 250",
+  "as despesas foram 900: renda 400, comida 300, luz 200",
+  "my expenses were 700: rent 400, food 200, power 100",
+  "gasto 1500 en total: casa 700, comida 300, luz 500",
+  "sueldo 3000, quiero un piso de 200000",
+];
+
+test("INVARIANTE DE CIERRE (V14+V15+V16): cada cifra en EXACTAMENTE un destino, y ninguna palabra funcional como ítem", () => {
+  const fallos: string[] = [];
+
+  for (const msg of CORPUS_ATRIBUCION) {
+    const delta = extractScenarioDelta(msg);
+    const huerfanos = detectarNumerosHuerfanos(msg, delta).numerosHuerfanos;
+
+    // ARMA 1 — atribución única: ni cero (V14) ni dos (V16).
+    const candidatos = multisetDeValores(numerosCandidatos(msg));
+    const destinos = multisetDeValores(destinosDeCadaCifra(delta, huerfanos));
+    for (const [valor, veces] of candidatos) {
+      const enDestino = destinos.get(valor) ?? 0;
+      if (enDestino === 0) fallos.push(`V14 "${msg}": ${valor} desapareció (0 destinos)`);
+      else if (enDestino > veces) fallos.push(`V16 "${msg}": ${valor} se contó ${enDestino} veces, el mensaje lo dice ${veces}`);
+      else if (enDestino < veces) fallos.push(`V14 "${msg}": ${valor} aparece ${veces} veces y solo ${enDestino} tienen destino`);
+    }
+
+    // ARMA 2 — ninguna palabra funcional del patrón declarativo puede ser el
+    // NOMBRE de una partida: esa es la firma exacta del doble conteo del
+    // bloqueante A ("fueron"=1200, "gastamos"=950, "gasté"=1800).
+    for (const item of delta.gastos_items ?? []) {
+      const primeraPalabra = item.name.trim().split(/\s+/)[0] ?? "";
+      const n = primeraPalabra.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
+      if (PALABRAS_NUNCA_ITEM.test(n)) {
+        fallos.push(`V16 "${msg}": el ítem "${item.name}"=${item.amount} lleva una palabra declarativa por nombre — el agregado se coló en la lista`);
+      }
+    }
+  }
+
+  assert.deepEqual(fallos, [], `ATRIBUCIÓN ÚNICA violada:\n${fallos.join("\n")}`);
+});
