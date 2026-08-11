@@ -357,3 +357,94 @@ salieron a la luz por revisión cruzada (`docs/informes/REVISION_AG01_tanda1_tru
 
 Se registra en §15 (paso 4) como **obligatorio, no opcional**: toda entrega pasa por revisión de
 un agente distinto del implementador antes de PR.
+
+### E7 · 2026-08-11 — aclaración de numeración: V11 ya es E2, no una enmienda nueva
+
+En la comunicación entre AG08 y AG01 durante la tanda 2 (`docs/informes/CORRECCIONES_AG08_tanda2_reconciliacion_cross_turno.md`,
+`docs/informes/REVISION_AG01_tanda2_reconciliacion.md`) se citó **V11 como "enmienda E7"**. No lo
+es: **V11 ya está incorporado en E2** (arriba). Esta entrada cierra la ambigüedad de numeración —
+no añade invariante nueva. Referencia única de V11 a partir de ahora: **E2**.
+
+### E8 · 2026-08-11 — aclaración de numeración: V12/V13 ya son E2, no una enmienda nueva
+
+Misma situación que E7: la comunicación entre agentes citó **V12 y V13 como "enmienda E8"**
+(`docs/informes/CORRECCIONES_AG08_tanda2_reconciliacion_cross_turno.md` §"Base verificada" cita "V15
+atribución… Enmienda E8 del contrato"). **V12 y V13 ya están incorporados en E2.** Esta entrada
+cierra la ambigüedad — no añade invariante nueva. Referencia única de V12/V13 a partir de ahora:
+**E2**.
+
+**Nota de proceso (E7+E8):** es la **tercera tanda consecutiva** en que el revisor adversarial
+(AG01) juzga invariantes que el contrato no contenía formalmente en el momento de la revisión —
+primero V11-V13 (tanda 1, cerrado en E2), ahora V14-V16 (tanda 2, cerrado en E9 abajo). El
+contrato es la fuente de verdad o no sirve: **toda invariante que un revisor usa para aprobar o
+rechazar una entrega se incorpora a §9 en la misma tanda en que se detecta**, no se deja para la
+memoria de los agentes ni para informes sueltos.
+
+### E9 · 2026-08-11 — §9, invariantes formales nuevos V14-V16
+
+Detectados y verificados en la tanda 2 de reconciliación cross-turno
+(`docs/informes/CORRECCIONES_AG08_tanda2_reconciliacion_cross_turno.md`,
+`docs/informes/CORRECCIONES_AG08_tanda2_revision_AG01.md`,
+`docs/informes/REVISION_AG01_tanda2_reconciliacion.md`). Se añaden a la tabla de §9:
+
+| # | Invariante |
+|---|---|
+| **V14** | **Ley de conservación.** Ningún número desaparece en silencio. Todo número termina en (a) campo asignado, (b) huérfano no relevante, o (c) huérfano relevante que degrada `extraction_status` a `PARTIAL`. `extraction_status` nunca sale `undefined`. |
+| **V15** | **Atribución correcta.** La conservación (V14) garantiza que ningún número desaparezca — **no** que se atribuya al campo correcto. Son invariantes distintas: un número puede sobrevivir y aun así atribuirse mal. |
+| **V16** | **No doble conteo.** Un importe declarado como agregado no puede figurar además como ítem del detalle; la suma de ítems no puede exceder el agregado sin declarar `CONFLICT`. |
+
+**Motivo V14:** convierte una clase entera de fallos ("un número simplemente desapareció") en test
+estructural automático — se verifica sobre el propio delta, sin enumerar casos manualmente.
+
+**Motivo V15 (caso real que la distingue de V14):** "gasté 1800: renta 900, comida 500, luz 400" —
+sin V15, "gasté" podía leerse como ítem con importe 1800 (ningún número desaparecía: V14 seguía
+cumplida) mientras el agregado real terminaba en `renta=900, comida=500, luz=400` **más** un
+ítem fantasma `gasté=1800`, reportando 3600 en vez de 1800. La regresión de fronteras posicionales
+("casa" de un crédito no debe destruir "casa 700" de un gasto) es la misma clase de fallo.
+
+**Motivo V16 y estado — PARCIAL, no cerrado:** el mismo caso de arriba corregido por
+`aplicarGuardaV16` (`src/lib/calculator/scenario.ts`): si un ítem del desglose iguala
+**exactamente** el agregado declarado en el mismo mensaje, se descarta como ítem fantasma.
+Cubre `"gasté 1800: renta 900, comida 500, luz 400"` → 1800 ✅. **No cubre** el fraseo con palabra
+intermedia entre la cifra y la palabra clave de gasto (`"mis gastos fueron 1200: …"`,
+`"gastamos 950 al mes: …"`) — ahí el patrón declarativo no reconoce agregado alguno, el total cae
+al parser de listas como una partida más, y el resultado sale **el doble** de los gastos reales
+marcado `COMPLETE`, sin huérfano ni señal de ambigüedad. Preexistente e idéntico en `develop`; no
+es regresión de la tanda 2. **Condición antes del piloto (no del merge)**, según recomendación
+explícita de AG01: generalizar V16 para que cualquier lista precedida de contexto de gasto + cifra
++ dos puntos trate esa cifra como agregado, y — como red — degradar a `AMBIGUOUS` en vez de
+`COMPLETE` si la suma de ítems ≈ 2× una cifra presente en el mensaje.
+
+### E10 · 2026-08-11 — §1 y §12, memoria a nivel de usuario (decisión de Luis, 2026-08-07)
+
+**Decisión:** el estado financiero es del **usuario**, no de la conversación.
+
+**Diagnóstico:** hoy `scenario_state` se lee de `conversations` filtrando por `conversationId`
+(`src/app/api/chat/route.ts`, lectura de `conv.scenario_state` tras `.eq('id', conversationId)`).
+Cada conversación nueva arranca con `prevScenario = {}`: amnesia entre sesiones **por diseño**.
+Contradice el ADN de `CLAUDE.md` ("seguimiento constante") y es inconsistente con `goals`, que ya
+es por usuario (`user_id` en `007_goals_table.sql`), no por conversación.
+
+**Resolución:** los **HECHOS financieros** (ingreso, gastos, detalle, ítems, crédito, conflictos,
+`ASSUMED`/`SUPERSEDED`, `fact_status`) pasan a nivel de **usuario**. El **estado de DIÁLOGO**
+(digresiones, propuesta pendiente, contador anti-repetición) permanece por **conversación** — no
+tiene sentido que una digresión de hace tres sesiones condicione el turno de hoy.
+
+**Se descarta explícitamente usar RAG como fuente de hechos financieros.** RAG es recuperación
+probabilística; la capa de hechos debe ser determinista, con procedencia (`fact_status`,
+`SUPERSEDED` con motivo y turno) y estado verificable. RAG queda para recuperación no
+estructurada (contexto conversacional libre), **nunca** como fuente de una cifra — sería
+reintroducir por la puerta trasera exactamente lo que §3 prohíbe para `LLM_INFERRED`.
+
+**Alcance de implementación — no se especifica aquí.** Esta enmienda registra la decisión y su
+motivo; el diseño de la migración (tabla nueva vs. columna en `profiles`, estrategia de
+reconciliación cuando el usuario tiene múltiples conversaciones concurrentes) es trabajo de
+implementación de la tanda correspondiente, no de este contrato.
+
+### Casos nuevos a la matriz de aceptación (E9/E10 — §10, 25-27)
+
+| # | Entrada | Estado esperado | Respuesta debe |
+|---|---|---|---|
+| 25 | `"mis gastos fueron 1200: internet 300, agua 400, gas 500"` | gastos **1200** (hoy da 2400 — M1, condición de piloto, ver E9) | Ningún doble conteo del agregado como ítem |
+| 26 | `"gasté 1800: renta 900, comida 500, luz 400"` | gastos 1800, 3 ítems, `CONSISTENT`/`COMPLETE` (atribución única, V15) | "gasté" nunca se atribuye como ítem con importe 1800 |
+| 27 | Sesión nueva (conversación distinta) de un usuario con meta/ingreso/desglose ya confirmados en una sesión anterior | Los hechos financieros están disponibles sin volver a preguntarlos | Reconoce el estado; no repite el onboarding de datos ya `CONFIRMED` |
