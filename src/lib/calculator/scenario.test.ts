@@ -30,6 +30,11 @@ import {
   numerosCandidatos,
   detectarResolucionConflicto,
   notaConflictoGastos,
+  splitScenarioState,
+  mergeEstadoPersistido,
+  CAMPOS_HECHOS,
+  CAMPOS_DIALOGO,
+  CAMPOS_TRANSITORIOS,
   type ScenarioState,
 } from "./scenario";
 import { buildScenarioContext } from "./orchestrator";
@@ -1913,4 +1918,142 @@ test("INVARIANTE DE CIERRE (V14+V15+V16): cada cifra en EXACTAMENTE un destino, 
   }
 
   assert.deepEqual(fallos, [], `ATRIBUCIÓN ÚNICA violada:\n${fallos.join("\n")}`);
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 13ª TANDA — MEMORIA A NIVEL DE USUARIO: partición hechos / diálogo.
+// ═══════════════════════════════════════════════════════════════════════════
+
+test("split: cada campo de HECHOS va a `hechos` y ninguno se filtra a `dialogo`", () => {
+  const estado: Partial<ScenarioState> = {
+    ingreso_mensual: 2300,
+    gastos_mensuales: 2200,
+    gastos_detalle: { vitales: 1200, noVitales: 1000, desconocidos: 0 },
+    gastos_es_detalle: true,
+    gastos_items: [{ name: "arriendo", amount: 1200, category: "vital", source: "regex", turn: 1 }],
+    tiene_agregado_gastos: true,
+    tiene_detalle_gastos: true,
+    credito: { monto: 30000, plazo_meses: 36, tae_es_referencia: true },
+    meta: { titulo: "casa", monto: 150000 },
+    meta_derivada: false,
+    goals_cerradas: [{ titulo: "moto", monto: 5000 }],
+    extraction_status: "COMPLETE",
+    factStatus: { ingreso_mensual: "CONFIRMED" },
+    detalle_confirmado: true,
+    gastos_conflict: { agregado: 2200, agregadoTurn: 1, detalle: 2250, detalleTurn: 2, diff: 50, diffPct: 2.27, attempts: 2, detalleCompleta: true },
+    gastos_assumed: { valor: 2250, fuente: "detalle", turn: 4 },
+    gastos_superseded: [{ valor: 2200, motivo: "USER_CORRECTION", turn: 3 }],
+    gastos_superseded_colapsados: 1,
+    gastos_agregado_origen: { valor: 2200, turn: 1 },
+    gastos_detalle_origen: { valor: 2250, turn: 2, completa: true },
+    turn: 5,
+  };
+  const { hechos, dialogo } = splitScenarioState(estado);
+
+  for (const campo of CAMPOS_HECHOS) {
+    assert.ok(campo in hechos, `${campo} debe ir a HECHOS (viaja entre conversaciones)`);
+    assert.ok(!(campo in dialogo), `${campo} NUNCA debe quedarse en el estado de diálogo`);
+  }
+  // El ciclo de conflicto viaja íntegro, `attempts` incluido: abrir un chat
+  // nuevo no puede reiniciar el contador previo al escape (§6).
+  assert.equal(hechos.gastos_conflict?.attempts, 2, "los intentos son un HECHO del usuario, no de la conversación");
+});
+
+test("split: cada campo de DIÁLOGO va a `dialogo` y ninguno se filtra a `hechos`", () => {
+  const estado: Partial<ScenarioState> = {
+    propuesta_pendiente: { tipo: "plan", turno: 3 } as never,
+    plan_confirmado: true,
+    meta_cerrada: true,
+    digresiones_seguidas: 2,
+    eco_pendiente: { fields: ["gastos_detalle"] },
+    missing: ["tae"],
+  };
+  const { hechos, dialogo } = splitScenarioState(estado);
+
+  for (const campo of CAMPOS_DIALOGO) {
+    assert.ok(campo in dialogo, `${campo} debe quedarse en el DIÁLOGO (no viaja)`);
+    assert.ok(!(campo in hechos), `${campo} NUNCA debe viajar como si fuera un hecho del usuario`);
+  }
+});
+
+test("split: las señales del TURNO se descartan — no van a hechos ni a diálogo", () => {
+  const estado: Partial<ScenarioState> = {
+    ingreso_mensual: 2300,
+    meta_cambio_explicito: true,
+    detalle_confirmado_explicito: true,
+    gastos_item_correccion: { name: "luz", amount: 150 },
+    gastos_resolucion: { tipo: "detalle", valorConfirmado: 2250 },
+    gastos_assumed_confirmado: true,
+  };
+  const { hechos, dialogo } = splitScenarioState(estado);
+  for (const campo of CAMPOS_TRANSITORIOS) {
+    assert.ok(!(campo in hechos) && !(campo in dialogo), `${campo} es señal del turno: no se persiste en ningún lado`);
+  }
+  assert.equal(hechos.ingreso_mensual, 2300, "el resto del estado sí se clasifica con normalidad");
+});
+
+test("split: un campo DESCONOCIDO hace FALLAR — nunca se asume un lado por defecto", () => {
+  const conCampoNuevo = { ingreso_mensual: 2300, campo_inventado_sin_clasificar: 42 } as unknown as Partial<ScenarioState>;
+  assert.throws(
+    () => splitScenarioState(conCampoNuevo),
+    /campo\(s\) sin clasificar[\s\S]*campo_inventado_sin_clasificar/,
+    "añadir un campo al estado sin clasificarlo debe reventar, no degradarse en silencio",
+  );
+});
+
+test("split: cobertura total — un estado REAL de varios turnos no deja ningún campo sin clasificar", () => {
+  // Regresión de la clase de bug: si una tanda futura añade un campo al
+  // estado y olvida clasificarlo, este test falla aquí (no en producción).
+  let s = mergeScenario({}, extractScenarioDelta("gano 2300 y gasto 2200"));
+  s = mergeScenario(s, extractScenarioDelta("quiero financiar un carro de 30000 a 36 meses"));
+  s = mergeScenario(s, extractScenarioDelta("Mis gastos: arriendo 1200, comida 1050"));
+  assert.doesNotThrow(() => splitScenarioState(s));
+
+  const { hechos, dialogo } = splitScenarioState(s);
+  const total = Object.keys(hechos).length + Object.keys(dialogo).length;
+  const transitoriosPresentes = (CAMPOS_TRANSITORIOS as readonly string[]).filter((c) => c in s).length;
+  assert.equal(total + transitoriosPresentes, Object.keys(s).length, "todo campo del estado real acaba clasificado");
+});
+
+test("mergeEstadoPersistido: reconstruye la MISMA forma; los hechos mandan sobre el diálogo", () => {
+  const hechos: Partial<ScenarioState> = { ingreso_mensual: 2300, gastos_mensuales: 2200, turn: 7 };
+  const dialogo: Partial<ScenarioState> = { missing: ["meta"], digresiones_seguidas: 1, plan_confirmado: true };
+  const fusionado = mergeEstadoPersistido(hechos, dialogo);
+
+  assert.equal(fusionado.ingreso_mensual, 2300);
+  assert.equal(fusionado.gastos_mensuales, 2200);
+  assert.equal(fusionado.turn, 7);
+  assert.equal(fusionado.digresiones_seguidas, 1, "el diálogo de ESTA conversación se conserva");
+  assert.equal(fusionado.plan_confirmado, true);
+  assert.deepEqual(fusionado.missing, ["meta"]);
+});
+
+test("mergeEstadoPersistido: sin fila de hechos, el estado de la conversación actúa de RESPALDO (nunca arranca vacío)", () => {
+  // Usuario anterior a la migración 021, o backfill parcial: todo lo que tenga
+  // la conversación debe sobrevivir y promoverse en la primera escritura.
+  const soloConversacion: Partial<ScenarioState> = { ingreso_mensual: 2300, gastos_mensuales: 2200, missing: [] };
+  const fusionado = mergeEstadoPersistido(undefined, soloConversacion);
+  assert.equal(fusionado.ingreso_mensual, 2300, "NUNCA se arranca vacío habiendo datos en la conversación");
+  assert.equal(fusionado.gastos_mensuales, 2200);
+});
+
+test("split + merge es IDEMPOTENTE: partir y volver a fusionar devuelve el mismo estado persistible", () => {
+  // La garantía central de la restricción de diseño: la FORMA de ScenarioState
+  // no cambia — partirlo para persistirlo y reconstruirlo al leer es una
+  // operación sin pérdida (salvo las señales del turno, que por definición no
+  // se persisten y que `mergeScenario` ya borra antes de llegar aquí).
+  let s = mergeScenario({}, extractScenarioDelta("gano 2300 y gasto 2200"));
+  s = mergeScenario(s, extractScenarioDelta("Mis gastos: arriendo 1200, comida 1050"));
+  const { hechos, dialogo } = splitScenarioState(s);
+  const reconstruido = mergeEstadoPersistido(hechos, dialogo);
+
+  // La comparación se hace sobre el round-trip JSON porque ESE es el camino
+  // real: `state`/`scenario_state` son jsonb, y jsonb no distingue entre "la
+  // clave no está" y "la clave está con undefined" — `JSON.stringify` elimina
+  // las segundas. `mergeScenario` deja algunas claves presentes con valor
+  // undefined (p. ej. `gastos_assumed` cuando no hay supuesto activo);
+  // exigir que sobrevivan sería exigir una fidelidad que la BD no da, y
+  // afirmaría una garantía falsa.
+  const comoLoDevuelveLaBD = (x: unknown) => JSON.parse(JSON.stringify(x));
+  assert.deepEqual(comoLoDevuelveLaBD(reconstruido), comoLoDevuelveLaBD(s), "ida y vuelta sin pérdida ni deformación");
 });

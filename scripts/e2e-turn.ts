@@ -30,6 +30,7 @@ import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import {
   extractScenarioDelta,
   mergeScenario,
+  mergeEstadoPersistido,
   detectarNumerosHuerfanos,
   detectarDiscrepanciaGastos,
   deltaSinGastosPorDiscrepancia,
@@ -49,6 +50,45 @@ const MARCA = "e2e-turn-test";
 
 function assert(cond: unknown, msg: string): void {
   if (!cond) throw new Error(`ASSERT FALLÓ: ${msg}`);
+}
+
+/**
+ * RE-LECTURA del estado persistido, EXACTAMENTE como la hace route.ts desde
+ * la 13ª tanda (migración 021): los HECHOS del usuario salen de
+ * `user_financial_state` (por user_id) y el DIÁLOGO de
+ * `conversations.scenario_state` (por conversation_id); se fusionan en un
+ * `ScenarioState` con la MISMA forma de siempre.
+ *
+ * Las afirmaciones de este script NO cambian de contenido por esta tanda —
+ * siguen exigiendo que los mismos hechos sobrevivan a un ciclo real de
+ * escritura→re-lectura. Lo único que cambia es DÓNDE viven, que es
+ * precisamente lo que esta tanda mueve a propósito. Leer aquí por el mismo
+ * camino que producción es lo que mantiene el test honesto: si mañana la
+ * lectura de route.ts se rompiera, este helper se rompería igual.
+ */
+async function leerEstadoPersistido(
+  db: SupabaseClient<any>,
+  userId: string,
+  conversationId: string,
+): Promise<ScenarioState> {
+  const conv = await db.from("conversations").select("scenario_state").eq("id", conversationId).single();
+  if (conv.error) throw new Error(`re-read conversations: ${conv.error.message}`);
+  const userState = await db.from("user_financial_state").select("state").eq("user_id", userId).maybeSingle();
+  if (userState.error) throw new Error(`re-read user_financial_state: ${userState.error.message}`);
+
+  const dialogo = (conv.data as { scenario_state: Partial<ScenarioState> }).scenario_state ?? {};
+  const hechos = (userState.data as { state?: Partial<ScenarioState> } | null)?.state ?? undefined;
+  return mergeEstadoPersistido(hechos, dialogo) as ScenarioState;
+}
+
+/** Solo la mitad de DIÁLOGO, para afirmar que los hechos NO se quedaron ahí. */
+async function leerSoloDialogo(
+  db: SupabaseClient<any>,
+  conversationId: string,
+): Promise<Partial<ScenarioState>> {
+  const conv = await db.from("conversations").select("scenario_state").eq("id", conversationId).single();
+  if (conv.error) throw new Error(`re-read conversations (solo diálogo): ${conv.error.message}`);
+  return (conv.data as { scenario_state: Partial<ScenarioState> }).scenario_state ?? {};
 }
 
 /**
@@ -135,6 +175,9 @@ async function main(): Promise<void> {
   // `scenario_state` propios, uno por cada orden de los mismos dos hechos).
   let convIdPartialA: string | undefined;
   let convIdPartialB: string | undefined;
+  // 13ª tanda — conversaciones del caso de memoria a nivel de usuario (T7).
+  let convIdMemoriaA: string | undefined;
+  let convIdMemoriaB: string | undefined;
   try {
     // ── setup: conversación propia, vacía ─────────────────────────────────
     const ins = await db.from("conversations")
@@ -157,9 +200,7 @@ async function main(): Promise<void> {
     console.log("✓ T1: persistTurn ejecutado (ingreso/gastos limpios + huérfanos)");
 
     // Afirma 1-3: RE-LECTURA desde la BD, nunca desde `estado` en memoria.
-    const read1 = await db.from("conversations").select("scenario_state").eq("id", convId).single();
-    if (read1.error) throw new Error(`re-read T1: ${read1.error.message}`);
-    const scenarioDB1 = (read1.data as { scenario_state: ScenarioState }).scenario_state;
+    const scenarioDB1 = await leerEstadoPersistido(db, userId, convId);
     assert(scenarioDB1.ingreso_mensual === 2300, `[BD] ingreso_mensual debe ser 2300 (fue ${scenarioDB1.ingreso_mensual})`);
     assert(scenarioDB1.gastos_mensuales === 2000, `[BD] gastos_mensuales debe ser 2000 (fue ${scenarioDB1.gastos_mensuales})`);
     console.log("✓ afirma 1: [BD] ingreso_mensual=2300, gastos_mensuales=2000 — sobrevivieron a los huérfanos");
@@ -206,9 +247,7 @@ async function main(): Promise<void> {
     estado = await ejecutarTurno(db, userId, convId, estado, delta3, "el banco me ofrece un 18% para financiar 2400");
     console.log("✓ T3: persistTurn ejecutado (crédito con monto y TAE, sin plazo)");
 
-    const read3 = await db.from("conversations").select("scenario_state").eq("id", convId).single();
-    if (read3.error) throw new Error(`re-read T3: ${read3.error.message}`);
-    const scenarioDB3 = (read3.data as { scenario_state: ScenarioState }).scenario_state;
+    const scenarioDB3 = await leerEstadoPersistido(db, userId, convId);
     assert(scenarioDB3.credito?.monto === 2400, `[BD] credito.monto debe ser 2400 (fue ${scenarioDB3.credito?.monto})`);
     assert(scenarioDB3.credito?.plazo_meses === undefined, `[BD] credito.plazo_meses debe quedar undefined, NUNCA 0 (fue ${scenarioDB3.credito?.plazo_meses})`);
     console.log("✓ afirma 8: [BD] credito.monto=2400 persistido, plazo_meses ausente (no 0)");
@@ -307,9 +346,7 @@ async function main(): Promise<void> {
     console.log("✓ T4: persistTurn ejecutado (mensaje real testdev7, 15 partidas)");
 
     // Re-lectura desde conversations — columnas ya existentes, siempre verificable.
-    const read4 = await db.from("conversations").select("scenario_state").eq("id", convId).single();
-    if (read4.error) throw new Error(`re-read T4: ${read4.error.message}`);
-    const scenarioDB4 = (read4.data as { scenario_state: ScenarioState }).scenario_state;
+    const scenarioDB4 = await leerEstadoPersistido(db, userId, convId);
     assert(scenarioDB4.gastos_items?.length === 15, `[BD] gastos_items debe sobrevivir con las 15 partidas (fueron ${scenarioDB4.gastos_items?.length})`);
     assert(scenarioDB4.tiene_detalle_gastos === true, "[BD] tiene_detalle_gastos debe ser true tras el desglose");
     assert(scenarioDB4.extraction_status !== undefined, "[BD] extraction_status debe persistir");
@@ -361,9 +398,7 @@ async function main(): Promise<void> {
     estado = await ejecutarTurno(db, userId, convId, estado, delta5b, "Mis gastos: arriendo 1200, comida 1050");
     console.log("✓ T5b: persistTurn ejecutado (desglose 2250 — no cuadra con el agregado)");
 
-    const read5b = await db.from("conversations").select("scenario_state").eq("id", convId).single();
-    if (read5b.error) throw new Error(`re-read T5b: ${read5b.error.message}`);
-    const scenarioDB5b = (read5b.data as { scenario_state: ScenarioState }).scenario_state;
+    const scenarioDB5b = await leerEstadoPersistido(db, userId, convId);
     assert(scenarioDB5b.gastos_conflict?.agregado === 2200, `[BD] gastos_conflict.agregado debe ser 2200 (fue ${scenarioDB5b.gastos_conflict?.agregado})`);
     assert(scenarioDB5b.gastos_conflict?.detalle === 2250, `[BD] gastos_conflict.detalle debe ser 2250 (fue ${scenarioDB5b.gastos_conflict?.detalle})`);
     assert(scenarioDB5b.gastos_conflict?.diff === 50, `[BD] gastos_conflict.diff debe ser +50 (fue ${scenarioDB5b.gastos_conflict?.diff})`);
@@ -375,9 +410,7 @@ async function main(): Promise<void> {
     estado = await ejecutarTurno(db, userId, convId, estado, delta5c, "eran 2250");
     console.log("✓ T5c: persistTurn ejecutado (resolución: 'eran 2250')");
 
-    const read5c = await db.from("conversations").select("scenario_state").eq("id", convId).single();
-    if (read5c.error) throw new Error(`re-read T5c: ${read5c.error.message}`);
-    const scenarioDB5c = (read5c.data as { scenario_state: ScenarioState }).scenario_state;
+    const scenarioDB5c = await leerEstadoPersistido(db, userId, convId);
     assert(scenarioDB5c.gastos_mensuales === 2250, `[BD] gastos_mensuales debe ser 2250 tras la resolución (fue ${scenarioDB5c.gastos_mensuales})`);
     assert(scenarioDB5c.gastos_conflict === undefined, `[BD] gastos_conflict debe quedar cerrado (fue ${JSON.stringify(scenarioDB5c.gastos_conflict)})`);
     assert(scenarioDB5c.factStatus?.gastos_mensuales === "CONFIRMED", `[BD] factStatus.gastos_mensuales debe ser CONFIRMED (fue ${scenarioDB5c.factStatus?.gastos_mensuales})`);
@@ -405,6 +438,13 @@ async function main(): Promise<void> {
     estadoA = await ejecutarTurno(db, userId, convIdPartialA, estadoA, extractScenarioDelta("no estoy seguro todavia", "es", estadoA), "no estoy seguro todavia");
     console.log("✓ T6 sentido A: detalle PARTIAL (T1) → agregado (T2) → 2 intentos sin resolver, persistido");
 
+    // 13ª tanda — la lectura de A se hace AQUÍ, antes de que la secuencia B
+    // escriba en la MISMA fila de hechos del usuario. Los hechos son del
+    // usuario (migración 021), así que dos secuencias del mismo usuario ya no
+    // tienen estados de hechos independientes: leer A al final devolvería los
+    // hechos de B y el test compararía B contra B (no probaría nada).
+    const scenarioDBA = await leerEstadoPersistido(db, userId, convIdPartialA);
+
     const insB = await db.from("conversations").insert({ user_id: userId, title: `${MARCA}-partial-B`, scenario_state: {} }).select("id").single();
     if (insB.error) throw new Error(`insert conversación T6-B: ${insB.error.message}`);
     convIdPartialB = (insB.data as { id: string }).id;
@@ -415,12 +455,7 @@ async function main(): Promise<void> {
     estadoB = await ejecutarTurno(db, userId, convIdPartialB, estadoB, extractScenarioDelta("no estoy seguro todavia", "es", estadoB), "no estoy seguro todavia");
     console.log("✓ T6 sentido B: agregado (T1) → detalle PARTIAL (T2) → 2 intentos sin resolver, persistido");
 
-    const readA = await db.from("conversations").select("scenario_state").eq("id", convIdPartialA).single();
-    if (readA.error) throw new Error(`re-read T6-A: ${readA.error.message}`);
-    const scenarioDBA = (readA.data as { scenario_state: ScenarioState }).scenario_state;
-    const readB = await db.from("conversations").select("scenario_state").eq("id", convIdPartialB).single();
-    if (readB.error) throw new Error(`re-read T6-B: ${readB.error.message}`);
-    const scenarioDBB = (readB.data as { scenario_state: ScenarioState }).scenario_state;
+    const scenarioDBB = await leerEstadoPersistido(db, userId, convIdPartialB);
 
     assert(scenarioDBA.gastos_assumed === undefined, `[BD] sentido A: NUNCA debe escapar a ASSUMED con detalle PARTIAL (fue ${JSON.stringify(scenarioDBA.gastos_assumed)})`);
     assert(scenarioDBB.gastos_assumed === undefined, `[BD] sentido B: NUNCA debe escapar a ASSUMED con detalle PARTIAL (fue ${JSON.stringify(scenarioDBB.gastos_assumed)})`);
@@ -431,7 +466,69 @@ async function main(): Promise<void> {
     assert(scenarioDBA.gastos_conflict?.detalle === scenarioDBB.gastos_conflict?.detalle, "[BD] G1c: mismo detalle en ambos sentidos");
     console.log("✓ afirma 15: [BD] Gate G1c bidireccional con detalle PARTIAL — RE-LECTURA confirma mismo estado final en los dos sentidos, nunca ASSUMED");
 
-    console.log("\n✅ E2E TURNO OK — persistencia real de scenario_state, goals, ica_history y response_telemetry verificada");
+    // ── T7 (13ª tanda) — MEMORIA A NIVEL DE USUARIO: DOS CONVERSACIONES ──────
+    // El caso que motivó la migración 021: el usuario declara sus datos en una
+    // conversación y al día siguiente abre un chat NUEVO. Antes, ese chat
+    // arrancaba VACÍO (amnesia por diseño) y monoend le preguntaba otra vez
+    // todo lo que ya sabía. Aquí se verifica, por RE-LECTURA DESDE LA BD, que
+    // los HECHOS viajan y el DIÁLOGO no.
+    const insC1 = await db.from("conversations").insert({ user_id: userId, title: `${MARCA}-memoria-A`, scenario_state: {} }).select("id").single();
+    if (insC1.error) throw new Error(`insert conversación T7-A: ${insC1.error.message}`);
+    convIdMemoriaA = (insC1.data as { id: string }).id;
+
+    // 1. Conversación A: ingreso 2300, gastos 2200, meta casa 150000 y las 15
+    //    partidas de testdev7 (que suman 2250 → conflicto con el agregado).
+    let estadoA7 = await ejecutarTurno(db, userId, convIdMemoriaA, { missing: [] }, extractScenarioDelta("gano 2300 y gasto 2200"), "gano 2300 y gasto 2200");
+    estadoA7 = await ejecutarTurno(db, userId, convIdMemoriaA, estadoA7, toolArgsToScenarioDelta({ meta_titulo: "casa", meta_monto: 150000 }), "quiero una casa de 150.000 €");
+    estadoA7 = await ejecutarTurno(db, userId, convIdMemoriaA, estadoA7, extractScenarioDelta(MENSAJE_REAL_TESTDEV7, "es", estadoA7), MENSAJE_REAL_TESTDEV7);
+    // Estado de DIÁLOGO propio de A, para comprobar después que NO se filtra.
+    const conDialogoA = { ...estadoA7, digresiones_seguidas: 2, plan_confirmado: true, propuesta_pendiente: { fields: ["plan"] } as never };
+    await ejecutarTurno(db, userId, convIdMemoriaA, conDialogoA, {}, "de acuerdo");
+    assert(estadoA7.gastos_conflict !== undefined, "T7 precondición: A debe tener un conflicto abierto (2200 vs 2250)");
+    const attemptsEnA = estadoA7.gastos_conflict?.attempts;
+    console.log(`✓ T7 conversación A: ingreso/gastos/meta/15 partidas persistidos · conflicto abierto (attempts=${attemptsEnA})`);
+
+    // 2. Conversación B: NUEVA, distinto conversationId, MISMO user_id, con
+    //    `scenario_state` vacío — como cualquier chat recién abierto.
+    const insC2 = await db.from("conversations").insert({ user_id: userId, title: `${MARCA}-memoria-B`, scenario_state: {} }).select("id").single();
+    if (insC2.error) throw new Error(`insert conversación T7-B: ${insC2.error.message}`);
+    convIdMemoriaB = (insC2.data as { id: string }).id;
+
+    // 3. RE-LECTURA desde la BD por el MISMO camino que route.ts.
+    const estadoEnB = await leerEstadoPersistido(db, userId, convIdMemoriaB);
+    assert(estadoEnB.ingreso_mensual === 2300, `[BD] B debe recordar el ingreso 2300 (fue ${estadoEnB.ingreso_mensual})`);
+    assert(estadoEnB.gastos_mensuales === 2200, `[BD] B debe recordar los gastos 2200 (fue ${estadoEnB.gastos_mensuales})`);
+    assert(estadoEnB.meta?.monto === 150000, `[BD] B debe recordar la meta 150000 (fue ${JSON.stringify(estadoEnB.meta)})`);
+    assert(estadoEnB.gastos_items?.length === 15, `[BD] B debe recordar las 15 partidas (fueron ${estadoEnB.gastos_items?.length})`);
+    console.log("✓ afirma 16: [BD] la conversación NUEVA recuerda ingreso 2300, gastos 2200, la meta y las 15 partidas — se acabó la amnesia entre sesiones");
+
+    // 4. `missing` no puede volver a pedir lo que ya se sabe.
+    // `missing` es DERIVADO: lo recalcula `mergeScenario` en cada turno. Se
+    // obtiene igual que lo haría el primer turno real de la conversación B.
+    const missingEnB = mergeScenario(estadoEnB, {}).missing;
+    assert(!missingEnB.includes("ingreso"), `[BD] missing NO debe pedir 'ingreso' en B: ${JSON.stringify(missingEnB)}`);
+    assert(!missingEnB.includes("gastos"), `[BD] missing NO debe pedir 'gastos' en B: ${JSON.stringify(missingEnB)}`);
+    console.log(`✓ afirma 17: [BD] missing en B no contiene 'ingreso' ni 'gastos' — monoend no re-pregunta lo que ya tiene (${JSON.stringify(missingEnB)})`);
+
+    // 5. El DIÁLOGO de A NO se filtra a B.
+    assert(estadoEnB.digresiones_seguidas === undefined, `[BD] digresiones_seguidas de A NO puede filtrarse a B (fue ${estadoEnB.digresiones_seguidas})`);
+    assert(estadoEnB.propuesta_pendiente === undefined, `[BD] propuesta_pendiente de A NO puede filtrarse a B (fue ${JSON.stringify(estadoEnB.propuesta_pendiente)})`);
+    assert(estadoEnB.plan_confirmado === undefined, `[BD] plan_confirmado de A NO puede filtrarse a B (fue ${estadoEnB.plan_confirmado})`);
+    console.log("✓ afirma 18: [BD] el estado de DIÁLOGO de A (digresiones, propuesta pendiente, plan confirmado) NO se filtra a B");
+
+    // 6. El conflicto abierto en A sigue abierto en B, con sus attempts intactos.
+    assert(estadoEnB.gastos_conflict !== undefined, "[BD] el conflicto abierto en A debe seguir abierto en B");
+    assert(estadoEnB.gastos_conflict?.attempts === attemptsEnA, `[BD] los attempts NO se reinician al abrir un chat nuevo (A=${attemptsEnA}, B=${estadoEnB.gastos_conflict?.attempts})`);
+    assert(estadoEnB.gastos_conflict?.agregado === 2200 && estadoEnB.gastos_conflict?.detalle === 2250, `[BD] el conflicto viaja íntegro: ${JSON.stringify(estadoEnB.gastos_conflict)}`);
+    console.log(`✓ afirma 19: [BD] el conflicto (2200 vs 2250) sigue abierto en B con attempts=${estadoEnB.gastos_conflict?.attempts} — abrir un chat nuevo no permite esquivar el escape de §6`);
+
+    // Y la contraparte: los HECHOS no se quedaron en el estado de la conversación.
+    const soloDialogoA = await leerSoloDialogo(db, convIdMemoriaA);
+    assert(soloDialogoA.ingreso_mensual === undefined, `[BD] los HECHOS no pueden quedarse en conversations.scenario_state (ingreso=${soloDialogoA.ingreso_mensual})`);
+    assert(soloDialogoA.gastos_items === undefined, "[BD] los gastos_items no pueden quedarse en el estado de la conversación");
+    console.log("✓ afirma 20: [BD] la partición es real — conversations.scenario_state ya solo guarda el DIÁLOGO");
+
+    console.log("\n✅ E2E TURNO OK — persistencia real de scenario_state, user_financial_state, goals, ica_history y response_telemetry verificada");
   } finally {
     if (goalIds.length > 0) {
       const delGoals = await db.from("goals").delete().in("id", goalIds);
@@ -445,7 +542,12 @@ async function main(): Promise<void> {
       if (delConv.error) console.error(`⚠ no pude borrar la conversación ${MARCA} ${convId}: ${delConv.error.message}`);
       else console.log(`✓ cleanup: conversación ${MARCA} ${convId} borrada`);
     }
-    for (const [id, title] of [[convIdPartialA, `${MARCA}-partial-A`], [convIdPartialB, `${MARCA}-partial-B`]] as const) {
+    for (const [id, title] of [
+      [convIdPartialA, `${MARCA}-partial-A`],
+      [convIdPartialB, `${MARCA}-partial-B`],
+      [convIdMemoriaA, `${MARCA}-memoria-A`],
+      [convIdMemoriaB, `${MARCA}-memoria-B`],
+    ] as const) {
       if (!id) continue;
       const delTel = await db.from("response_telemetry").delete().eq("conversation_id", id);
       if (delTel.error) console.error(`⚠ no pude borrar response_telemetry de ${id}: ${delTel.error.message}`);
@@ -453,6 +555,12 @@ async function main(): Promise<void> {
       if (delConv.error) console.error(`⚠ no pude borrar la conversación ${title} ${id}: ${delConv.error.message}`);
       else console.log(`✓ cleanup: conversación ${title} ${id} borrada`);
     }
+    // 13ª tanda — la fila de hechos del usuario es POR USUARIO, no por
+    // conversación: hay que borrarla explícitamente o el script dejaría el
+    // estado sintético de la prueba pegado al usuario real de `profiles`.
+    const delUserState = await db.from("user_financial_state").delete().eq("user_id", userId);
+    if (delUserState.error) console.error(`⚠ no pude borrar user_financial_state de ${userId}: ${delUserState.error.message}`);
+    else console.log(`✓ cleanup: user_financial_state de ${userId} borrado`);
   }
 }
 

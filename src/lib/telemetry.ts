@@ -51,6 +51,14 @@ export interface ResponseTelemetryPayload {
    */
   scenarioPersistFailed: boolean | null
   /**
+   * 13ª tanda — ¿falló la escritura de los HECHOS financieros del usuario
+   * (`user_financial_state`, migración 021)? Es un fallo CRÍTICO distinto de
+   * `scenarioPersistFailed`: ese pierde la memoria del DIÁLOGO en curso, este
+   * pierde la memoria FINANCIERA del usuario entre conversaciones. Nullable
+   * (turnos anteriores a la migración la dejan en NULL).
+   */
+  userStatePersistFailed?: boolean | null
+  /**
    * PIEZA 7 (8ª tanda) — telemetría de depuración de extracción (migración
    * 019_telemetry_extraction.sql). Cierra el bucle de "arreglar a ciegas":
    * permite reconstruir, para un turno real, qué devolvió la extracción, en
@@ -120,6 +128,7 @@ export async function logResponseTelemetry(
       numeros_huerfanos: payload.numerosHuerfanos,
       discrepancia_gastos: payload.discrepanciaGastos,
       scenario_persist_failed: payload.scenarioPersistFailed,
+      user_state_persist_failed: payload.userStatePersistFailed ?? null,
       extraction_status: payload.extractionStatus ?? null,
       delta_raw: payload.deltaRaw ?? null,
       previous_scenario: payload.previousScenario ?? null,
