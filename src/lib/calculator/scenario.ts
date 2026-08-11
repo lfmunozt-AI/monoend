@@ -344,7 +344,11 @@ const INGRESO_CTX = /\b(gano|ingreso|ingresos|sueldo|salario|cobro|rendimento|in
 // ítem con 1800 de importe, y el agregado se sumaba una segunda vez al
 // detalle (BLOQUEANTE 1, doble conteo). "gastó" ya normalizaba a "gasto" (la
 // tilde de la 'ó' se elimina igual) y no necesitaba cambio.
-const GASTO_CTX = /\b(gasto|gastos|gasta|gaste|despesas?|spend|expenses?)\b/;
+// BLOQUEANTE A (V16, 13ª tanda) — formas verbales de PLURAL/1ª persona del
+// plural ("gastamos 950 al mes", "gastaron", "gastábamos") tampoco estaban
+// cubiertas: sin keyword reconocida, el mensaje entero caía al parser de
+// listas y el agregado se contaba DOS veces (ver GASTO_AGREGADO_DETALLE_RE).
+const GASTO_CTX = /\b(gasto|gastos|gasta|gaste|gastamos|gastaron|gastabamos|despesas?|gastamo?s|spend|spent|expenses?)\b/;
 // PIEZA 2 — total agregado seguido de ":" y un desglose ("gasto 1000: 500
 // arriendo..."). El ":" es el marcador INEQUÍVOCO que distingue "aquí va un
 // total, y luego el detalle" de "gasto= 1000 arriendo..." (sin ":", que es
@@ -357,8 +361,44 @@ const GASTO_CTX = /\b(gasto|gastos|gasta|gaste|despesas?|spend|expenses?)\b/;
 // el número y los dos puntos, sin cambiar el caso ya soportado (sin filler).
 // "gaste" (forma normalizada de "gasté", ver GASTO_CTX arriba) cubre el
 // pretérito de primera persona en la forma "agregado: detalle" también.
-const GASTO_AGREGADO_DETALLE_RE =
-  /\b(?:gastos?|gaste|despesas?|expenses?)\b\s*[:=]?\s*(\d[\d.,]*)\s*(?:en\s+total|no\s+total|in\s+total|total)?\s*:/;
+// BLOQUEANTE A (V16, 13ª tanda) — LA VENTANA ERA DEMASIADO ESTRECHA. El
+// patrón exigía que la keyword y la cifra fueran prácticamente ADYACENTES
+// (solo toleraba ":"/"=" y espacios). Con palabras intermedias —
+// "mis gastos FUERON 1200: internet 300…", "gastamos 950 AL MES: mercado
+// 500…" — no matcheaba NADA: el agregado no se reclamaba, su rango no se
+// excluía, y el parser de listas se quedaba la cifra como un ítem más
+// ("fueron"=1200, "gastamos"=950) que además se SUMABA al resto del
+// desglose. El usuario decía 1.200 € y el sistema registraba 2.400 €, en
+// silencio, sin huérfano, sin conflicto y con extraction_status COMPLETE.
+//
+// `CONECTOR_DECLARATIVO` enumera EXPLÍCITAMENTE lo que puede ir entre la
+// keyword y la cifra (cópulas, marcadores de periodo y de aproximación, en
+// ES/PT/EN). Deliberadamente NO es un comodín `.{0,N}`: un comodín se
+// tragaría un nombre de partida real ("gastos: internet 300…" leería 300
+// como agregado) y rompería V13/V15. Cada alternativa es una palabra
+// funcional que jamás es el nombre de una partida.
+const CONECTOR_DECLARATIVO =
+  "(?:\\s+(?:" +
+  // ES — cópulas y verbos de estado
+  "fueron|fue|son|es|sera|seran|eran|era|andan|anda|rondan|ronda|alcanzan|alcanza|" +
+  "ascienden\\s+a|asciende\\s+a|suman|suma|totalizan|totaliza|" +
+  // ES — periodo y aproximación
+  "al\\s+mes|por\\s+mes|mensuales?|mensualmente|en\\s+total|de\\s+media|" +
+  "mas\\s+o\\s+menos|aproximadamente|aprox|cerca\\s+de|alrededor\\s+de|unos|unas|como|" +
+  // PT
+  "foram|foi|sao|e|serao|no\\s+total|por\\s+mes|mensais|cerca\\s+de|" +
+  // EN
+  "were|was|are|is|will\\s+be|about|around|roughly|approximately|" +
+  "per\\s+month|monthly|in\\s+total|a\\s+month" +
+  "))*";
+
+const GASTO_AGREGADO_DETALLE_RE = new RegExp(
+  "\\b(?:gastos?|gaste|gastamos|gastaron|gastabamos|despesas?|expenses?|spent)\\b" +
+    CONECTOR_DECLARATIVO +
+    "\\s*[:=]?\\s*(\\d[\\d.,]*)" +
+    CONECTOR_DECLARATIVO +
+    "\\s*:",
+);
 const PRECIO_CTX = /\b(precio|cuesta|vale|financiar|credito|prestamo|emprestimo|loan|financ|carro|coche|auto|casa|piso|vivienda)\b/;
 // PIEZA 3 (8ª tanda) — misma convención de miles-con-espacio que el parser
 // general (`guardrail/numbers.ts`, DIGIT_RE): "2 500" es 2500, no "2" seguido
@@ -412,7 +452,16 @@ function esRango(n: string, ctxRe: RegExp, matchAmount: RegExpExecArray): boolea
 }
 
 // Meta.
-const META_CTX = /\b(meta|objetivo|quiero (?:comprar|llegar|ahorrar)|goal|target|juntar|reunir)\b/;
+// BLOQUEANTE B (V15, 13ª tanda) — "quiero un piso de 200000" no matcheaba:
+// META_CTX solo cubría "quiero COMPRAR/LLEGAR/AHORRAR", no "quiero + OBJETO"
+// directo. Y el bloque de crédito tampoco lo recogía, porque exige monto Y
+// plazo (aquí no hay plazo). Resultado: el 200000 quedaba HUÉRFANO — la ley
+// de conservación (V14) garantizaba que no desapareciera en silencio, pero
+// no que llegara a su campo correcto: eso es exactamente lo que V15
+// (atribución) añade sobre V14 (conservación). El monto sí se conoce con
+// confianza; lo que faltaba era el ancla contextual que lo llevara a `meta`.
+const META_CTX =
+  /\b(meta|objetivo|quiero (?:comprar|llegar|ahorrar)|quiero(?:mos)?\s+(?:un|una|el|la|unos|unas)?\s*(?:casa|piso|apartamento|apartamiento|vivienda|carro|coche|auto|vehiculo|moto)|goal|target|juntar|reunir)\b/;
 
 // PIEZA 6 — PETICIÓN EXPLÍCITA de cambio de meta. Solo estas formas autorizan
 // tocar la meta activa: "cambia la meta", "olvida el carro", "ahora quiero una
@@ -941,24 +990,52 @@ function aplicarGuardaV16(delta: Partial<ScenarioState>): Partial<ScenarioState>
   }
   const agregado = delta.gastos_mensuales;
   const idxFantasma = delta.gastos_items.findIndex((i) => i.amount === agregado);
-  if (idxFantasma === -1) return delta;
 
-  const items = delta.gastos_items.filter((_, i) => i !== idxFantasma);
-  console.warn("[guardaV16] ítem fantasma descartado (doble conteo del agregado)", JSON.stringify({
-    agregado,
-    item_descartado: delta.gastos_items[idxFantasma],
-  }));
+  let limpio = delta;
+  if (idxFantasma !== -1) {
+    const items = delta.gastos_items.filter((_, i) => i !== idxFantasma);
+    console.warn("[guardaV16] ítem fantasma descartado (doble conteo del agregado)", JSON.stringify({
+      agregado,
+      item_descartado: delta.gastos_items[idxFantasma],
+    }));
 
-  const limpio = { ...delta, gastos_items: items };
-  if (items.length >= 2) {
-    const cls = classifyExpenses(items);
-    limpio.gastos_detalle = { vitales: cls.vitales.total, noVitales: cls.noVitales.total, desconocidos: cls.desconocidos.total };
-  } else {
-    // Sin el fantasma ya no queda una lista real (<2 ítems) — no hay detalle
-    // que oponer al agregado; V1: el agregado en sí nunca se toca.
-    delete limpio.gastos_detalle;
-    delete limpio.gastos_es_detalle;
+    limpio = { ...delta, gastos_items: items };
+    if (items.length >= 2) {
+      const cls = classifyExpenses(items);
+      limpio.gastos_detalle = { vitales: cls.vitales.total, noVitales: cls.noVitales.total, desconocidos: cls.desconocidos.total };
+    } else {
+      // Sin el fantasma ya no queda una lista real (<2 ítems) — no hay detalle
+      // que oponer al agregado; V1: el agregado en sí nunca se toca.
+      delete limpio.gastos_detalle;
+      delete limpio.gastos_es_detalle;
+    }
   }
+
+  // VERIFICACIÓN DE SUMA (V16, 13ª tanda) — segunda mitad de la guarda: el
+  // ítem fantasma es la forma CONOCIDA del doble conteo (un importe repetido
+  // exactamente), pero no la única concebible. Si la suma del desglose EXCEDE
+  // el agregado declarado en el mismo mensaje, o hay doble conteo o hay un
+  // error de lectura — en cualquier caso el turno NO puede salir en silencio.
+  //
+  // Deliberadamente solo DETECTA y avisa, no corrige: quién gana entre
+  // agregado y desglose es competencia de `reconciliarGastos` (§6,
+  // materialidad + CONFLICT), que ya recibe ambos valores intactos y decide
+  // con reglas explícitas. Corregir aquí sería elegir en silencio — justo lo
+  // que el principio §0 prohíbe. El log es la red de seguridad: si aparece
+  // sin un CONFLICT/reinicio posterior que lo justifique, es un bug.
+  const items = limpio.gastos_items ?? [];
+  if (items.length > 0) {
+    const suma = round2(items.reduce((acc, i) => acc + i.amount, 0));
+    if (suma > agregado + TOLERANCIA_REDONDEO_EUR) {
+      console.warn("[guardaV16] la suma del desglose EXCEDE el agregado declarado — debe resolverlo la reconciliación (§6), nunca en silencio", JSON.stringify({
+        agregado,
+        suma_items: suma,
+        exceso: round2(suma - agregado),
+        items: items.map((i) => ({ name: i.name, amount: i.amount })),
+      }));
+    }
+  }
+
   return limpio;
 }
 
