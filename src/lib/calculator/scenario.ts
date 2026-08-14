@@ -270,6 +270,16 @@ export interface ScenarioState {
    * sigue siendo lo que consume el orquestador; esto es la traza de origen.
    */
   gastos_items?: GastoItemEntry[];
+  /**
+   * MENOR (follow-up QA testdev8, §8) — el contrato fija un cap de 5
+   * versiones por campo en el estado persistido; `gastos_items` acumulaba sin
+   * tope (§8 lo exige también aquí, no solo en `gastos_superseded`). Cuántas
+   * versiones ANTIGUAS de una misma partida (por nombre normalizado) se
+   * colapsaron al superar el cap — mismo patrón que
+   * `gastos_superseded_colapsados`: nunca se borra el ACTIVO, solo el
+   * historial más viejo cuando ya excede el tope.
+   */
+  gastos_items_colapsados?: number;
   /** PIEZA 1 (8ª tanda) — honestidad del último turno de extracción. No degrada nada por sí solo. */
   extraction_status?: ExtractionStatus;
   /** PIEZA 6 (8ª tanda) — confianza por campo (ver `FactStatus`). */
@@ -366,6 +376,7 @@ export const CAMPOS_HECHOS = [
   "gastos_detalle",
   "gastos_es_detalle",
   "gastos_items",
+  "gastos_items_colapsados",
   "tiene_agregado_gastos",
   "tiene_detalle_gastos",
   "credito",
@@ -515,7 +526,11 @@ const INGRESO_CTX = /\b(gano|ingreso|ingresos|sueldo|salario|cobro|rendimento|in
 // plural ("gastamos 950 al mes", "gastaron", "gastábamos") tampoco estaban
 // cubiertas: sin keyword reconocida, el mensaje entero caía al parser de
 // listas y el agregado se contaba DOS veces (ver GASTO_AGREGADO_DETALLE_RE).
-const GASTO_CTX = /\b(gasto|gastos|gasta|gaste|gastamos|gastaron|gastabamos|despesas?|gastamo?s|spend|spent|expenses?)\b/;
+// BLOQUEANTE M1 (follow-up QA testdev8) — "gastado"/"gastada" (participio,
+// "he gastado 900 en total: …") faltaba: ninguna otra forma de la lista lo
+// cubre y es tan natural como "gasté"/"gastamos". Sin esto, la keyword no se
+// reconocía y el mensaje entero caía al parser de listas sin fronteras.
+const GASTO_CTX = /\b(gasto|gastos|gasta|gaste|gastado|gastada|gastamos|gastaron|gastabamos|despesas?|gastamo?s|spend|spent|expenses?)\b/;
 // PIEZA 2 — total agregado seguido de ":" y un desglose ("gasto 1000: 500
 // arriendo..."). El ":" es el marcador INEQUÍVOCO que distingue "aquí va un
 // total, y luego el detalle" de "gasto= 1000 arriendo..." (sin ":", que es
@@ -582,12 +597,62 @@ const AMOUNT = /(\d{1,3}(?: \d{3})+(?:,\d+)?|\d[\d.,]*)/;
 // `AMOUNT.source` para que el agregado declarado ("2 200") se lea como 2200
 // igual que cualquier otro monto del sistema.
 const GASTO_AGREGADO_DETALLE_RE = new RegExp(
-  "\\b(?:gastos?|gaste|gastamos|gastaron|gastabamos|despesas?|expenses?|spent)\\b" +
+  "\\b(?:gastos?|gaste|gastado|gastada|gastamos|gastaron|gastabamos|despesas?|expenses?|spent)\\b" +
     CONECTOR_DECLARATIVO +
     "\\s*[:=]?\\s*" + AMOUNT.source +
     CONECTOR_DECLARATIVO +
     "\\s*:",
 );
+
+// BLOQUEANTE M1 (revisión adversarial, follow-up QA testdev8) — REGLA
+// ESTRUCTURAL DEL AGREGADO. `GASTO_AGREGADO_DETALLE_RE` enumera conectores
+// (`CONECTOR_DECLARATIVO`): cualquier fraseo natural fuera de esa lista rompe
+// el match. Caso real medido: "mis gastos del mes pasado fueron de 1500:
+// hipoteca 800, comida 400, luz 300" no matchea ("del mes pasado" no está en
+// la lista) — el mensaje cae al parser de listas, que lee "1500" como el
+// importe de "hipoteca" (1500 en vez de 800) y el total sale 2200 en vez de
+// 1500. Con usuarios reales, cualquier fraseo no anticipado es G1b.
+//
+// La señal estructural es más fuerte que enumerar palabras: una cifra
+// seguida de ":" y, tras los dos puntos, una lista de ≥2 partidas con
+// importe propio ES el agregado — sin importar qué palabras haya entre la
+// keyword de gasto y la cifra, o entre la cifra y los dos puntos. El propio
+// éxito del parseo de la lista es el validador (si lo que sigue a ":" no
+// forma una lista real, esta función no se dispara). `CONECTOR_DECLARATIVO`/
+// `GASTO_AGREGADO_DETALLE_RE` quedan como RESPALDO — el llamante los prueba
+// después, no antes.
+function detectarAgregadoEstructural(
+  message: string,
+  n: string,
+): { agregado: number; rango: Rango; restoDesdeColon: string } | null {
+  const kw = GASTO_CTX.exec(n);
+  if (!kw) return null;
+
+  const colonRe = /:/g;
+  colonRe.lastIndex = kw.index;
+  let colonMatch: RegExpExecArray | null;
+  while ((colonMatch = colonRe.exec(n)) !== null) {
+    const colonIdx = colonMatch.index;
+    // La cifra es el ÚLTIMO número entre la keyword y este ":" — el más
+    // cercano al ":" es el candidato natural (duraciones/plazos mencionados
+    // antes, "en los últimos 3 meses gasté 1200:", quedan descartados por
+    // sí solos: "3" no es el último número del tramo).
+    const tramo = n.slice(kw.index, colonIdx);
+    const numeros = [...tramo.matchAll(new RegExp(AMOUNT.source, "g"))];
+    if (numeros.length === 0) continue;
+    const agregado = parseDigitAmount(numeros[numeros.length - 1][0]);
+    if (!Number.isFinite(agregado) || agregado <= 0) continue;
+
+    // Estructura confirmada SOLO si lo que sigue a ":" es una lista real de
+    // ≥2 partidas — el propio parseo es el validador, no una suposición.
+    const restoDesdeColon = message.slice(colonIdx + 1);
+    if (parseExpenseList(restoDesdeColon).length < 2) continue;
+
+    return { agregado, rango: { start: kw.index, end: colonIdx + 1 }, restoDesdeColon };
+  }
+  return null;
+}
+
 const PRECIO_CTX = /\b(precio|cuesta|vale|financiar|credito|prestamo|emprestimo|loan|financ|carro|coche|auto|casa|piso|vivienda)\b/;
 
 // PIEZA 1 (5ª tanda) — MARCADOR ANUAL. "gano 27600 al año" NO es "gano 27600
@@ -850,8 +915,25 @@ export function extractScenarioDelta(
   // si coinciden. Tiene PRIORIDAD sobre la lista: sin ella, el parser de listas
   // ya habría troceado el mensaje entero en detalle y el agregado nunca habría
   // quedado registrado aparte.
-  const aggMatch = GASTO_AGREGADO_DETALLE_RE.exec(n);
-  if (aggMatch) {
+  // BLOQUEANTE M1 — la señal ESTRUCTURAL (cifra + ":" + lista real) es la
+  // puerta principal; `GASTO_AGREGADO_DETALLE_RE` (conectores enumerados)
+  // queda como respaldo para cuando no hay ":" o la lista no valida.
+  const estructural = detectarAgregadoEstructural(message, n);
+  const aggMatch = estructural ? null : GASTO_AGREGADO_DETALLE_RE.exec(n);
+  if (estructural) {
+    delta.gastos_mensuales = estructural.agregado;
+    rangosReclamados.push(estructural.rango);
+    rangosParaMeta.push(estructural.rango);
+    const detailItems = parseExpenseList(estructural.restoDesdeColon);
+    const cls = classifyExpenses(detailItems);
+    delta.gastos_detalle = {
+      vitales: cls.vitales.total,
+      noVitales: cls.noVitales.total,
+      desconocidos: cls.desconocidos.total,
+    };
+    delta.gastos_es_detalle = true;
+    delta.gastos_items = itemsAGastoItemEntries(detailItems, "regex");
+  } else if (aggMatch) {
     const agregado = parseDigitAmount(aggMatch[1]);
     if (Number.isFinite(agregado) && agregado > 0) {
       delta.gastos_mensuales = agregado;
@@ -1819,6 +1901,41 @@ function pushSuperseded(
   return { superseded: actual, colapsados: colap };
 }
 
+const CAP_ITEMS_POR_NOMBRE = 5; // §8
+
+/**
+ * MENOR (follow-up QA testdev8, §8) — mismo cap de 5 versiones que
+ * `gastos_superseded`, aplicado ahora a `gastos_items`: por cada PARTIDA (por
+ * nombre normalizado), como máximo 5 versiones sobreviven (activa +
+ * historial). Al superar el cap se recortan las MÁS ANTIGUAS — el orden
+ * cronológico ya garantiza que el ACTIVO (siempre el último) nunca se
+ * recorta — y se suman al contador `gastos_items_colapsados` (nunca se
+ * borran en silencio sin dejar rastro de que ocurrió, V7).
+ */
+function capGastoItemsPorNombre(
+  items: GastoItemEntry[],
+  colapsadosPrevio: number,
+): { items: GastoItemEntry[]; colapsados: number } {
+  const porNombre = new Map<string, GastoItemEntry[]>();
+  for (const item of items) {
+    const key = norm(item.name);
+    const arr = porNombre.get(key);
+    if (arr) arr.push(item);
+    else porNombre.set(key, [item]);
+  }
+  let colapsados = colapsadosPrevio;
+  const resultado: GastoItemEntry[] = [];
+  for (const arr of porNombre.values()) {
+    while (arr.length > CAP_ITEMS_POR_NOMBRE) {
+      arr.shift();
+      colapsados += 1;
+    }
+    resultado.push(...arr);
+  }
+  resultado.sort((a, b) => a.turn - b.turn);
+  return { items: resultado, colapsados };
+}
+
 /** §6 — diferencia (con signo, detalle − agregado) y su magnitud relativa al agregado. */
 function calcularMaterialidad(agregado: number, detalle: number): { diff: number; diffPct: number } {
   const diff = round2(detalle - agregado);
@@ -2156,7 +2273,10 @@ export function mergeScenario(
     const previos = (base.gastos_items ?? []).map((i) =>
       !i.superseded && nombresASuperseder.has(norm(i.name)) ? { ...i, superseded: true } : i,
     );
-    base.gastos_items = [...previos, ...nuevosAplicables];
+    // MENOR (§8) — cap de 5 versiones por partida; nunca recorta el activo.
+    const capped = capGastoItemsPorNombre([...previos, ...nuevosAplicables], base.gastos_items_colapsados ?? 0);
+    base.gastos_items = capped.items;
+    base.gastos_items_colapsados = capped.colapsados;
   }
 
   // BLOQUEANTE 2 (revisión AG01, QA testdev8) — `reconciliarGastos` calcula el

@@ -1933,6 +1933,7 @@ test("split: cada campo de HECHOS va a `hechos` y ninguno se filtra a `dialogo`"
     gastos_detalle: { vitales: 1200, noVitales: 1000, desconocidos: 0 },
     gastos_es_detalle: true,
     gastos_items: [{ name: "arriendo", amount: 1200, category: "vital", source: "regex", turn: 1 }],
+    gastos_items_colapsados: 2,
     tiene_agregado_gastos: true,
     tiene_detalle_gastos: true,
     credito: { monto: 30000, plazo_meses: 36, tae_es_referencia: true },
@@ -2251,4 +2252,91 @@ test("m1 (revisión AG01): un tool_call posterior SÍ sustituye a un ítem previ
   assert.equal(activos.length, 2);
   assert.equal(activos.find((i) => i.name === "ocio")?.amount, 150, "tool SÍ sustituye a un regex previo");
   assert.equal(activos.find((i) => i.name === "ocio")?.source, "tool");
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// BLOQUEANTE M1 (follow-up QA testdev8) — REGLA ESTRUCTURAL DEL AGREGADO.
+// "una cifra seguida de ':' y una lista de ≥2 partidas ES el agregado, sin
+// importar qué palabras haya entre la keyword y la cifra" — 10 fraseos: los
+// 4 "conocidos" del encargo, más 6 NUEVOS inventados aquí (distintos de los
+// que probó AG01 en su revisión), incluido el caso que antes fallaba
+// ("del mes pasado fueron de 1500" atribuía 1500 a la primera partida).
+// ═══════════════════════════════════════════════════════════════════════════
+
+const CASOS_AGREGADO_ESTRUCTURAL: Array<[string, number, number]> = [
+  // conocidos (los cuatro exigidos por el encargo)
+  ["mis gastos fueron 1200: internet 300, agua 400, gas 500", 1200, 3],
+  ["mis gastos del mes son 1200: internet 300, agua 400, gas 500", 1200, 3],
+  ["gastamos 950 al mes: mercado 500, gasolina 250, farmacia 200", 950, 3],
+  ["gasté 1800: renta 900, comida 500, luz 400", 1800, 3],
+  // 6 fraseos NUEVOS (distintos de los cuatro que inventó AG01 en su
+  // revisión: "rondan los X al mes", "he gastado X en total", "del mes
+  // pasado fueron de X", "unos X al mes") — cada uno mete palabras
+  // arbitrarias entre la keyword y la cifra, o entre la cifra y ":".
+  ["en mi casa gasto normalmente 1300: comida 500, transporte 400, ocio 400", 1300, 3],
+  ["el total que gasto se ubica en 1100: renta 600, luz 300, agua 200", 1100, 3],
+  ["gasté, calculando todo, 1700 el mes pasado: hipoteca 900, super 500, gasolina 300", 1700, 3],
+  ["gasto, sin contar imprevistos, 1450: arriendo 800, comida 450, internet 200", 1450, 3],
+  ["mis gastos terminan siendo 2100 cada mes: colegio 1200, mercado 600, seguro 300", 2100, 3],
+  ["gastamos, entre todos los del hogar, 1600 mensuales: agua 300, gas 300, internet 1000", 1600, 3],
+];
+
+for (const [msg, agregadoEsperado, itemsEsperados] of CASOS_AGREGADO_ESTRUCTURAL) {
+  test(`BLOQUEANTE M1 estructural: "${msg}" → agregado ${agregadoEsperado}, ${itemsEsperados} ítems`, () => {
+    const delta = extractScenarioDelta(msg);
+    assert.equal(delta.gastos_mensuales, agregadoEsperado);
+    assert.equal(delta.gastos_items?.length, itemsEsperados);
+    const suma = delta.gastos_items!.reduce((acc, i) => acc + i.amount, 0);
+    assert.equal(suma, agregadoEsperado, "suma de ítems = agregado (sin doble conteo, sin atribución cruzada)");
+  });
+}
+
+test("BLOQUEANTE M1: el caso que AG01 encontró roto ('del mes pasado fueron de 1500') ya NO le atribuye el agregado a la primera partida", () => {
+  const delta = extractScenarioDelta(
+    "mis gastos del mes pasado fueron de 1500: hipoteca 800, comida 400, luz 300",
+  );
+  assert.equal(delta.gastos_mensuales, 1500);
+  const hipoteca = delta.gastos_items?.find((i) => i.name === "hipoteca");
+  assert.equal(hipoteca?.amount, 800, "la hipoteca real (800), nunca el agregado completo (1500)");
+});
+
+test("BLOQUEANTE M1: la enumeración de conectores sigue funcionando como RESPALDO cuando la estructura no valida (mensaje corto, sin lista real)", () => {
+  // Un ":" sin una lista de ≥2 partidas detrás no activa la regla
+  // estructural — cae al comportamiento previo (missing/huérfano), nunca
+  // inventa un agregado sin desglose que lo respalde.
+  const delta = extractScenarioDelta("mis gastos fueron 1200: no sé bien en qué");
+  assert.equal(delta.gastos_es_detalle, undefined, "sin ≥2 partidas reales, no hay desglose que fijar");
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MENOR — cap de gastos_items por partida (§8 del contrato: máx 5 versiones)
+// ═══════════════════════════════════════════════════════════════════════════
+
+test("MENOR §8: gastos_items respeta el cap de 5 versiones por partida — el activo nunca se pierde", () => {
+  let s = mergeScenario(
+    {},
+    toolArgsToScenarioDelta({ gastos_detalle: [{ nombre: "ocio", monto: 100 }, { nombre: "casa", monto: 900 }] }),
+  );
+  // 7 correcciones más del mismo nombre ("ocio") — 8 versiones en total.
+  for (let i = 1; i <= 7; i++) {
+    s = mergeScenario(
+      s,
+      toolArgsToScenarioDelta({ gastos_detalle: [{ nombre: "ocio", monto: 100 + i * 10 }, { nombre: "casa", monto: 900 }] }),
+    );
+  }
+
+  const todasLasVersionesDeOcio = (s.gastos_items ?? []).filter((it) => it.name === "ocio");
+  assert.ok(todasLasVersionesDeOcio.length <= 5, `nunca más de 5 versiones de 'ocio' en el estado: ${todasLasVersionesDeOcio.length}`);
+
+  const activo = itemsGastoActivos(s.gastos_items).find((it) => it.name === "ocio");
+  assert.equal(activo?.amount, 170, "el ACTIVO es siempre el más reciente (100 + 7×10), el cap nunca lo recorta");
+
+  assert.ok((s.gastos_items_colapsados ?? 0) >= 3, `las versiones más viejas de 'ocio' que excedieron el cap se cuentan: ${s.gastos_items_colapsados}`);
+
+  // 'casa' se re-declaró con el MISMO valor cada turno (el tool_call exige
+  // ≥2 partidas para registrar algo) — el cap la alcanza igual, pero el
+  // activo sigue siendo el correcto.
+  const versionesDeCasa = (s.gastos_items ?? []).filter((it) => it.name === "casa");
+  assert.ok(versionesDeCasa.length <= 5, `'casa' también respeta el cap: ${versionesDeCasa.length}`);
+  assert.equal(itemsGastoActivos(s.gastos_items).find((it) => it.name === "casa")?.amount, 900);
 });

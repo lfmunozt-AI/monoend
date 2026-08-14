@@ -288,6 +288,72 @@ test("Mandamiento 10 · OBLIGATORIO 2 — anáfora cuya cifra SÍ está en conce
   assert.ok(r.violaciones.some((v) => v.mandamiento === 10));
 });
 
+// ── FIXTURE CANÓNICA REPUESTA (MAYOR 1, revisión follow-up QA testdev8) ─────
+// V11: este test EXISTÍA con esta frase EXACTA en la tanda que introdujo el
+// Mandamiento 10 y se ELIMINÓ en la tanda siguiente porque la regex de
+// entonces (demostrativo + SUSTANTIVO, o "eso" desnudo) no la detectaba —
+// se sustituyó por fixtures que sí pasaban en vez de arreglar la detección.
+// Eso es exactamente la violación que V11 prohíbe: "si el test fallaba, el
+// código estaba mal, no el test". La frase es la real del incidente QA que
+// originó el mandamiento (demostrativo + verbo copulativo, "Esa es…") — la
+// forma que además motivó M10 en primer lugar.
+test("Mandamiento 10 · CANÓNICO (repuesto, V11) — 'Esa es tu capacidad real para destinar a ahorro o pago de deudas.' (demostrativo + verbo) se repara con la cifra verificada", async () => {
+  const r = await applyEnforcement(
+    "Esa es tu capacidad real para destinar a ahorro o pago de deudas.",
+    {
+      userMessage: "¿cuánto me queda al mes?",
+      carril: "FINANCIERO",
+      lang: "es",
+      missing: [],
+      valores: [250],
+      conceptos: { sobrante: 250 },
+      esSimulacion: false,
+    },
+  );
+  assert.ok(r.texto.includes("250"), `la cifra verificada se reinserta en la frase canónica: ${r.texto}`);
+  assert.ok(
+    /250\s*€\s+es\s+tu\s+capacidad\s+real/i.test(r.texto),
+    `solo el demostrativo se sustituye — el verbo y el resto de la frase sobreviven intactos: ${r.texto}`,
+  );
+  assert.ok(r.violaciones.some((v) => v.mandamiento === 10));
+});
+
+test("Mandamiento 10 · CANÓNICO — variantes de demostrativo+verbo (ES/PT) que antes se escapaban, todas detectadas", async () => {
+  const BASE = {
+    userMessage: "¿cuánto me queda al mes?",
+    carril: "FINANCIERO" as const,
+    lang: "es" as const,
+    missing: [] as string[],
+    valores: [250],
+    conceptos: { sobrante: 250 },
+    esSimulacion: false,
+  };
+  const formas = [
+    "Ese sería el margen disponible este mes.",
+    "Eso te deja margen para maniobrar.",
+    "Esa te permite cubrir imprevistos sin apuros.",
+    "Esta es la base para tu plan de ahorro.",
+    "Esto queda disponible para tu meta.",
+  ];
+  for (const raw of formas) {
+    const r = await applyEnforcement(raw, BASE);
+    assert.ok(r.texto.includes("250"), `"${raw}" debe reparar con la cifra verificada, dio: "${r.texto}"`);
+  }
+});
+
+test("Mandamiento 10 · CANÓNICO — forma PT con verbo acentuado ('é') se detecta (antes '\\b' de ASCII no reconocía 'é' como palabra)", async () => {
+  const r = await applyEnforcement("Essa é a tua margem mensal.", {
+    userMessage: "quanto me sobra por mês?",
+    carril: "FINANCIERO",
+    lang: "pt",
+    missing: [],
+    valores: [250],
+    conceptos: { sobrante: 250 },
+    esSimulacion: false,
+  });
+  assert.ok(r.texto.includes("250"), `PT con verbo acentuado debe repararse: ${r.texto}`);
+});
+
 test("Mandamiento 10 · OBLIGATORIO 3 — anáfora cuya cifra NO está en conceptos → la frase se ELIMINA (nunca se inventa)", async () => {
   const r = await applyEnforcement("Con ese monto podrás cerrar tu meta antes de lo previsto.", {
     userMessage: "¿cuál es mi situación?",

@@ -383,7 +383,46 @@ function esPlanFantasma(text: string, raw: string | undefined): boolean {
 // Si tras esto la respuesta queda sin sustancia, es tarea de `ensureSubstance`
 // / el reintento acotado de route.ts (que comparte `cifraPedidaAusente` con
 // este módulo) — nunca de M10 resucitar el RAW.
-const ANAFORA_SIN_ANTECEDENTE_RE = /\b(esa|ese|esta|este|esto|eso)\s+(cifra|cantidad|monto|numero|valor)\b|\beso\b/i;
+// MAYOR 1 (revisión, follow-up QA testdev8) — la primera versión solo
+// detectaba demostrativo + SUSTANTIVO ("esa cifra", "ese monto") o "eso"
+// desnudo. NUNCA detectaba demostrativo + VERBO — que es la frase REAL del
+// QA que originó el mandamiento: "Esa es tu capacidad real para destinar a
+// ahorro o pago de deudas." ("Esa" + "es", copulativo). 5 de 8 formas
+// probadas se escapaban. Se amplía a demostrativo (ES/PT/EN) seguido,
+// opcionalmente, de un clítico (te/me/le/nos/os/se/lhe/lhes) y luego un
+// verbo de la familia copulativa/resultativa ("es", "sería", "deja",
+// "permite"...) — la MISMA familia semántica del caso real, no "cualquier
+// verbo" (una lista abierta dispararía sobre prosa legítima sin cifras que
+// no tiene nada que ver con una anáfora rota). El verbo queda en un
+// lookahead: la sustitución solo reemplaza el DEMOSTRATIVO, así que la frase
+// sigue leyéndose natural ("Esa es tu capacidad..." → "250 € es tu
+// capacidad...").
+const CLITICOS_RE = "(?:me|te|le|se|nos|os|lhe|lhes)\\s+";
+// Formas acentuadas Y sin acento (el texto que llega aquí es el RAW del
+// modelo — no pasa por `norm()` — así que "sería"/"é"/"serão" con su acento
+// real deben estar en la lista igual que su variante sin tilde).
+const VERBOS_ANAFORA_RE =
+  // ES
+  "es|son|era|eran|sera|será|seran|serán|seria|sería|serian|serían|fue|fueron|queda|quedan|deja|dejan|" +
+  "permite|permiten|da|dan|corresponde|representa|equivale|significa|resulta|cubre|alcanza|basta|sirve|" +
+  // PT ("e" a secas se omite a propósito: en ES es "y" — un falso positivo
+  // real, no hipotético — "é" acentuado no colisiona con nada)
+  "é|sao|são|sera|será|serao|serão|foi|foram|fica|ficam|" +
+  // EN
+  "is|are|was|were|leaves|allows|gives|corresponds|represents|equals|means|results|covers|reaches|suffices|serves";
+// FRONTERA UNICODE — `\b` en JS solo reconoce `[A-Za-z0-9_]` como carácter de
+// palabra: "é" (verbo PT, "es") queda FUERA de esa definición, así que
+// `\bé\b` nunca matchea. Con la lista de verbos incluyendo formas acentuadas
+// (PIEZA de arriba), la frontera tiene que ser Unicode-consciente o esas
+// entradas son letra muerta — se define a mano con lookaround + `\p{L}`.
+const B_START = "(?<![\\p{L}\\p{N}_])";
+const B_END = "(?![\\p{L}\\p{N}_])";
+const ANAFORA_SIN_ANTECEDENTE_RE = new RegExp(
+  `${B_START}(?:esa|ese|esta|este|esto|eso)\\s+(?:cifra|cantidad|monto|numero|valor)${B_END}` +
+    `|${B_START}eso${B_END}` +
+    `|${B_START}(?:esa|ese|esta|este|esto|eso|essa|esse|isso|isto|that|this)${B_END}(?=\\s+(?:${CLITICOS_RE})?(?:${VERBOS_ANAFORA_RE})${B_END})`,
+  "iu",
+);
 
 function esNum(n: number): string {
   return String(n).replace(".", ",");
