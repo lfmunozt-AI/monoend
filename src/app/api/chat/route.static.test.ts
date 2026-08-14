@@ -61,3 +61,27 @@ test("route.ts ya NO llama a logResponseTelemetry directamente (vive dentro de p
     "logResponseTelemetry debe invocarse solo desde persistence.ts, nunca desde route.ts",
   );
 });
+
+// ── QA testdev8 — verificación ESTÁTICA de los fixes de esta tanda ──────────
+// Mismo motivo que arriba: route.ts depende del runtime de Next.js y no se
+// puede importar/ejecutar aquí. Estas pruebas confirman que el código de los
+// bloqueantes/mayores sigue presente — un refactor futuro que borre alguna de
+// estas piezas por error revienta aquí, no en producción.
+
+test("BLOQUEANTE 3/4: la LLAMADA 1 recibe las derivadas recalculadas del estado persistido (verifiedSeed)", () => {
+  const src = leerRoute();
+  assert.match(src, /buildScenarioContext\(seed as ScenarioState, cleanMessage\)/);
+  assert.match(src, /notaDatosCalculados/);
+});
+
+test("BLOQUEANTE 1/2: reintento acotado cuando la cifra pedida por el usuario está ausente de la respuesta", () => {
+  const src = leerRoute();
+  assert.match(src, /conceptsInSentence\(cleanMessage\)/);
+  assert.match(src, /cifraAusente/);
+});
+
+test("MAYOR 7: se detecta la repetición del MENSAJE del usuario, no solo de la respuesta", () => {
+  const src = leerRoute();
+  assert.match(src, /contarRepeticionesMensajeUsuario\(/);
+  assert.match(src, /notaRepeticionMensaje/);
+});

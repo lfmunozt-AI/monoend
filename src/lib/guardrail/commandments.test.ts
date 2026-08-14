@@ -231,3 +231,44 @@ test("idempotencia: caso del déficit fantasma también es idempotente", () => {
   const twice = enforceCommandments(once.texto, contexto);
   assert.equal(once.texto, twice.texto);
 });
+
+// ── Mandamiento 10 (QA testdev8) — LA CIFRA PEDIDA NUNCA SE BORRA ────────────
+test("Mandamiento 10: cifra pedida ('¿cuánto me queda al mes?' → sobrante) eliminada por una capa anterior → revierte al RAW", () => {
+  const raw = "Te quedan 250 € al mes libres para ahorro o pago de deudas.";
+  const trasEnforcement = "Esa es tu capacidad real para destinar a ahorro o pago de deudas.";
+  const r = enforceCommandments(
+    trasEnforcement,
+    ctx({ conceptos: { sobrante: 250 }, userMessage: "¿cuánto me queda al mes?", raw }),
+  );
+  assert.ok(r.texto.includes("250"), "la cifra pedida vuelve a aparecer");
+  assert.ok(r.violaciones.some((v) => v.mandamiento === 10));
+});
+
+test("Mandamiento 10: la respuesta YA trae la cifra pedida → no interviene", () => {
+  const raw = "Te quedan 250 € al mes.";
+  const texto = "Te quedan 250 € al mes, así que puedes destinarlos a tu meta.";
+  const r = enforceCommandments(
+    texto,
+    ctx({ conceptos: { sobrante: 250 }, userMessage: "¿cuánto me queda al mes?", raw }),
+  );
+  assert.equal(r.texto, texto);
+  assert.ok(!r.violaciones.some((v) => v.mandamiento === 10));
+});
+
+test("Mandamiento 10: si el RAW tampoco traía la cifra pedida, no revierte (no hay nada útil a lo que volver)", () => {
+  const raw = "Tu situación financiera es estable este mes.";
+  const texto = "Esa cifra es la que necesitas para tu meta.";
+  const r = enforceCommandments(
+    texto,
+    ctx({ conceptos: { sobrante: 250 }, userMessage: "¿cuánto me queda al mes?", raw }),
+  );
+  assert.equal(r.texto, texto, "no revierte: el raw tampoco tenía la cifra ni resolvía la anáfora");
+});
+
+test("Mandamiento 10: sin userMessage no hay nada que comprobar — nunca se activa", () => {
+  const raw = "Te quedan 250 € al mes.";
+  const texto = "Esa es tu capacidad real.";
+  const r = enforceCommandments(texto, ctx({ conceptos: { sobrante: 250 }, raw }));
+  assert.equal(r.texto, texto);
+  assert.ok(!r.violaciones.some((v) => v.mandamiento === 10));
+});

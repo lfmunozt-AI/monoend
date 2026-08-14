@@ -6,7 +6,8 @@
 // Ninguna capa intermedia vuelve a ser responsable de la garantía global; su
 // trabajo es no introducir violaciones, esta es la red de seguridad
 // determinista. Los invariantes (a)-(e) de AG01 pasan a ser los Mandamientos
-// 1-5; una tanda posterior añadió 6-8; esta añade el 9 (PLAN FANTASMA).
+// 1-5; una tanda posterior añadió 6-8, luego el 9 (PLAN FANTASMA); esta añade
+// el 10 (CIFRA PEDIDA — QA testdev8).
 //
 // Contrato: pura, nunca lanza, idempotente (aplicarla dos veces da el mismo
 // resultado). Código PURO, edge-safe, SIN llamadas a ningún LLM.
@@ -50,13 +51,20 @@ export interface CommandmentContext {
   /**
    * Respuesta CRUDA del modelo, antes de cualquier capa (grounding incluido).
    * Mandamiento 9 (PLAN FANTASMA) la usa para revertir cuando el enforcement
-   * vació un plan hasta dejarlo sin cifras ni acción concreta. Opcional: sin
-   * ella, M9 no tiene nada a lo que revertir y no se activa nunca.
+   * vació un plan hasta dejarlo sin cifras ni acción concreta. Mandamiento 10
+   * (CIFRA PEDIDA) la usa con el mismo espíritu. Opcional: sin ella, ninguno
+   * de los dos tiene nada a lo que revertir y no se activan nunca.
    */
   raw?: string;
+  /**
+   * Mensaje del usuario que originó este turno. Mandamiento 10 (CIFRA PEDIDA)
+   * lo usa para saber qué concepto financiero se preguntó. Opcional: sin él,
+   * M10 no tiene qué comprobar y no se activa nunca.
+   */
+  userMessage?: string;
 }
 
-export type CommandmentId = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;
+export type CommandmentId = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10;
 export type CommandmentAction = "corregido" | "logueado";
 
 export interface CommandmentViolation {
@@ -344,8 +352,58 @@ function esPlanFantasma(text: string, raw: string | undefined): boolean {
   return sinCifras || mutilado;
 }
 
+// ── Mandamiento 10 — LA CIFRA PEDIDA NUNCA SE BORRA ──────────────────────────
+//
+// QA real (testdev8): "¿cuánto me queda al mes?" ×3 produjo, en el tercer
+// turno, una respuesta cuyo enforcement había eliminado el sobrante (250 €),
+// dejando un demostrativo huérfano ("Esa es tu capacidad real para destinar a
+// ahorro...") sin ningún número al que "esa" pudiera referirse. Si la
+// PREGUNTA del usuario pide un concepto financiero identificable
+// (`conceptsInSentence`, guardrail/context.ts) que el motor SÍ calculó, ese
+// número no puede desaparecer del texto final. Y si, pase lo que pase, el
+// texto queda con una anáfora sin antecedente numérico en su propia frase, es
+// una respuesta rota — se revierte al RAW (mismo mecanismo que M9: el
+// registro de mutaciones ya demuestra que algo cambió, así que hay a qué
+// volver). Si el RAW tampoco traía la cifra o la misma anáfora huérfana,
+// revertir no arregla nada — no se activa.
+const ANAFORA_SIN_ANTECEDENTE_RE = /\b(esa|ese|esta|este|esto|eso)\s+(cifra|cantidad|monto|numero|valor)\b|\beso\b/i;
+
+/** ¿Alguna frase de `text` usa un demostrativo/anáfora sin ningún número en la misma frase? */
+function tieneAnaforaSinAntecedente(text: string): boolean {
+  return segmentSentences(text).some(
+    (seg) => ANAFORA_SIN_ANTECEDENTE_RE.test(seg.text) && !/\d/.test(seg.text),
+  );
+}
+
+/** ¿`text` NO contiene, con ningún número, el concepto que el usuario pidió (y el motor sí calculó)? */
+function cifraPedidaFueEliminada(
+  userMessage: string,
+  text: string,
+  conceptos: Record<string, number>,
+): boolean {
+  const conocidos = conceptsInSentence(userMessage).filter((c) => c in conceptos);
+  if (conocidos.length === 0) return false;
+  const cifras = findNumberMentions(text);
+  return !conocidos.some((c) => cifras.some((m) => Math.abs(m.value - conceptos[c]) <= 0.01));
+}
+
+/** ¿`text` es una respuesta ROTA respecto a `raw` — cifra pedida ausente o anáfora huérfana — Y `raw` no tenía el mismo problema? */
+function esRespuestaRotaCifraPedida(
+  userMessage: string | undefined,
+  text: string,
+  raw: string | undefined,
+  conceptos: Record<string, number>,
+): boolean {
+  if (!userMessage || raw === undefined || raw === text) return false;
+  const rotaAhora = cifraPedidaFueEliminada(userMessage, text, conceptos) || tieneAnaforaSinAntecedente(text);
+  if (!rotaAhora) return false;
+  const rawTeniaLoQueHaceFalta =
+    !cifraPedidaFueEliminada(userMessage, raw, conceptos) && !tieneAnaforaSinAntecedente(raw);
+  return rawTeniaLoQueHaceFalta;
+}
+
 /**
- * Verifica y corrige los 9 Mandamientos sobre `text`, en orden. Devuelve el
+ * Verifica y corrige los 10 Mandamientos sobre `text`, en orden. Devuelve el
  * texto corregido y el detalle de cada violación. Nunca lanza; si una
  * corrección vacía la respuesta, el texto resultante puede ser "" (el llamante
  * decide el fallback de carril).
@@ -459,6 +517,26 @@ export function enforceCommandments(
       out = revertido;
       anotar(9, "plan vacío tras enforcement — revertido al original", before, out);
       violaciones.push({ mandamiento: 9, accion: "corregido", detalle: "plan sin sustancia tras enforcement — revertido al texto original" });
+    }
+
+    // Mandamiento 10 — ÚLTIMO de todos: corre incluso después de M9, sobre lo
+    // que M9 haya dejado. Revierte al texto ORIGINAL del modelo con el mismo
+    // criterio (M4/M5/M1 reaplicados sobre el raw).
+    if (esRespuestaRotaCifraPedida(ctx.userMessage, out, ctx.raw, ctx.conceptos)) {
+      const before = out;
+      let revertido = ctx.raw as string;
+      const leakRaw = stripProviderLeaks(revertido);
+      if (leakRaw.corregido) revertido = leakRaw.texto;
+      if (isDelegativeClosing(revertido)) revertido = stripDelegativeClosing(revertido);
+      const closingRaw = maxOneClosingQuestion(revertido, ctx.missing);
+      if (closingRaw.corregido) revertido = closingRaw.texto;
+      out = revertido;
+      anotar(10, "cifra pedida eliminada o anáfora sin antecedente — revertido al original", before, out);
+      violaciones.push({
+        mandamiento: 10,
+        accion: "corregido",
+        detalle: "la cifra que pidió el usuario fue eliminada, o quedó una referencia sin antecedente — revertido al texto original",
+      });
     }
   }
 

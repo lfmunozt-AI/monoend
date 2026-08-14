@@ -27,7 +27,7 @@ import {
   loanPayment,
 } from "./operations";
 import { classifyExpenses, parseExpenseList, type ExpenseItem } from "./expenses";
-import type { ScenarioState } from "./scenario";
+import { itemsGastoActivos, type ScenarioState } from "./scenario";
 
 // ── Supuestos del modelo financiero (documentados y configurables) ──────────
 // Estas constantes definen las recomendaciones por defecto. Se centralizan aquí
@@ -547,8 +547,16 @@ export function buildScenarioContext(
     }
   }
 
-  // ── Lista de gastos en el mensaje → clasificación ─────────────────────────
-  const items = parseExpenseList(userMessage);
+  // ── Desglose de gastos → clasificación ─────────────────────────────────────
+  // BLOQUEANTE 4 (QA testdev8) — antes se parseaba SOLO `userMessage`: en una
+  // sesión nueva (o cualquier turno que no repita la lista), el usuario podía
+  // tener 5 partidas ya persistidas en `scenario.gastos_items` y el bloque
+  // "TU REALIDAD" seguía sin desglose — el modelo respondía "no tengo
+  // registrado ningún detalle" con el detalle completo en el estado. La
+  // fuente canónica es el estado YA fusionado (`mergeScenario` ya mezcló lo
+  // persistido con lo nuevo de este turno y deduplicó — BLOQUEANTE 5b), no
+  // una re-lectura del mensaje.
+  const items = itemsGastoActivos(scenario.gastos_items).map((i) => ({ name: i.name, amount: i.amount }));
   if (items.length >= 2) {
     const cls = classifyExpenses(items);
     const listaTxt = (g: ExpenseItem[]) => g.map((i) => `${i.name} ${i.amount}`).join(", ");

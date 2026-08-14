@@ -78,6 +78,7 @@ export {
   detectLabel,
   isPercent,
   isTimeUnit,
+  conceptsInSentence,
   type Moneda,
 } from "./context";
 export { detectInjection, type InjectionResult } from "./injection";

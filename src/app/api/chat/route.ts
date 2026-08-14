@@ -9,6 +9,8 @@ import {
   classifyTurn,
   esTonoEmocional,
   getEnforcementMode,
+  conceptsInSentence,
+  findNumberMentions,
 } from '@/lib/guardrail'
 import { buildScenarioContext } from '@/lib/calculator/orchestrator'
 import {
@@ -17,6 +19,7 @@ import {
   esConfirmacionCorta,
   registrarPropuestaPendiente,
   esRespuestaRepetida,
+  contarRepeticionesMensajeUsuario,
   actualizarDigresiones,
   notaRetornoMeta,
   notaSinCifrasDePlan,
@@ -330,6 +333,36 @@ export async function POST(request: Request) {
   // directamente en vez de confiar solo en que el modelo se autochequee.
   const notaSinCifras = notaSinCifrasDePlan(seed)
 
+  // BLOQUEANTE 3/4 (QA testdev8) — DERIVADAS RECALCULADAS DEL ESTADO
+  // PERSISTIDO, ANTES de saber si este turno trae datos nuevos. Causa raíz:
+  // `verified` (buildScenarioContext con TODAS las derivadas — cuota, brecha,
+  // desglose de gastos…) solo se inyectaba al modelo vía el tool_result de la
+  // LLAMADA 2, es decir SOLO cuando el turno disparaba un tool_call. Una
+  // pregunta pura ("¿me dices la cuota?", "¿qué gastos tengo?") no aporta
+  // datos nuevos → nunca hay tool_call → la LLAMADA 1 respondía viendo solo
+  // `summarizeScenario` (sin cuota calculada, sin desglose) y el modelo pedía
+  // datos que el motor ya podía calcular, o negaba tener un desglose que sí
+  // tenía. `verifiedSeed` recalcula TODO desde `seed` (crédito, desglose,
+  // brecha…) para que la PRIMERA llamada ya lo vea, la traiga o no el mensaje.
+  const verifiedSeed = buildScenarioContext(seed as ScenarioState, cleanMessage)
+  const notaDatosCalculados = verifiedSeed.bloque
+    ? `DATOS CALCULADOS DISPONIBLES (motor — recalculado del estado persistido; incluye TODO lo que ya se puede derivar, aunque este mensaje no aporte nada nuevo):\n${verifiedSeed.bloque}\n` +
+      'PROHIBIDO pedir un dato que ya puedas calcular con lo de arriba (una cuota, un desglose, una brecha…) — úsalo directamente.'
+    : null
+
+  // MAYOR 7 (QA testdev8) — el usuario repitió LITERALMENTE la misma pregunta
+  // ("¿cuánto me queda al mes?" ×3) y el sistema comparaba RESPUESTAS
+  // consecutivas (R3 vs R2, distintas) en vez del MENSAJE del usuario (R1 y R3
+  // sí eran la misma pregunta) — la repetición real nunca se detectaba.
+  const mensajesUsuarioPrevios = contextMessages.filter((m) => m.role === 'user').map((m) => m.content)
+  const repeticionesMensajeUsuario = contarRepeticionesMensajeUsuario(cleanMessage, mensajesUsuarioPrevios)
+  const notaRepeticionMensaje =
+    repeticionesMensajeUsuario >= 2
+      ? 'El usuario ha hecho esta MISMA pregunta 3 veces o más en esta conversación. Reconócelo explícitamente y pregúntale qué parte de tu respuesta anterior no quedó clara — PROHIBIDO repetir el mismo texto otra vez.'
+      : repeticionesMensajeUsuario === 1
+        ? 'El usuario ya hizo esta MISMA pregunta antes en esta conversación. PROHIBIDO repetir la misma respuesta o construcción de cierre: responde distinto y más directo esta vez.'
+        : null
+
   console.warn('[chat] carril', JSON.stringify({
     user_id: user.id,
     conversation_id: convId,
@@ -374,8 +407,10 @@ export async function POST(request: Request) {
   const systemPrompt1 = [
     basePrompt,
     `ESTADO ACTUAL CONOCIDO (lo que ya sabemos del usuario):\n${summarizeScenario(seed)}`,
+    notaDatosCalculados,
     notaDigresion,
     notaSinCifras,
+    notaRepeticionMensaje,
     notaTonoEmocional,
     idiomaObligatorio,
   ].filter(Boolean).join('\n\n')
@@ -493,12 +528,26 @@ export async function POST(request: Request) {
   ]
   const verified = buildScenarioContext(scenario, cleanMessage, { valoresExtra })
 
+  // BLOQUEANTE 3/4 — misma nota que `notaDatosCalculados` (calculada sobre
+  // `seed`, antes de este turno) pero con el estado YA fusionado: estrictamente
+  // más completa cuando este turno SÍ trajo datos nuevos. Va en las llamadas
+  // que ocurren después de conocer el delta (LLAMADA 2 y el regen sin tool).
+  const notaDatosCalculadosPostMerge = verified.bloque
+    ? `DATOS CALCULADOS DISPONIBLES (motor — recalculado del estado tras este turno; incluye TODO lo que ya se puede derivar):\n${verified.bloque}\n` +
+      'PROHIBIDO pedir un dato que ya puedas calcular con lo de arriba (una cuota, un desglose, una brecha…) — úsalo directamente.'
+    : null
+
   // PIEZA 3 — ECO DE CONFIRMACIÓN: la primera línea de la respuesta devuelve lo
   // que SÍ quedó claro este turno (el delta que se va a persistir, no el
   // delta crudo — así nunca se ecoa un gasto en discrepancia), salvo en turno
   // emocional (PIEZA 7 de la 5ª tanda: el eco espera al turno siguiente).
+  // MAYOR 6 — si el delta trae una corrección de ítem, se le pasa el total YA
+  // recalculado (y si quedó en conflicto) para que el eco lo enuncie.
   const notaEco = !esEmocional
-    ? renderDatosRecienEntendidos(deltaAPersistir, cleanMessage)
+    ? renderDatosRecienEntendidos(deltaAPersistir, cleanMessage, {
+        gastosMensualesNuevo: scenario.gastos_mensuales,
+        enConflicto: !!scenario.gastos_conflict,
+      })
     : null
 
   // PIEZA 7 (6ª tanda) — si el usuario pide un plan de recorte y solo hay
@@ -524,7 +573,7 @@ export async function POST(request: Request) {
     const toolResult = JSON.stringify(buildToolResult(scenario, verified))
     // PIEZA 1/3 — la nota de ambigüedad y el eco de confirmación van en ESTA
     // llamada (aún no se ha generado nada con el delta de este turno).
-    const systemPrompt2 = [basePrompt, notaDigresion, notaSinCifras, notaAmbigua, notaEco, notaDesglose, notaDetalleSinConfirmarVal, notaConflicto, notaTonoEmocional, idiomaObligatorio]
+    const systemPrompt2 = [basePrompt, notaDatosCalculadosPostMerge, notaDigresion, notaSinCifras, notaAmbigua, notaEco, notaDesglose, notaDetalleSinConfirmarVal, notaConflicto, notaRepeticionMensaje, notaTonoEmocional, idiomaObligatorio]
       .filter(Boolean).join('\n\n')
     const messages2 = [
       ...allMessages,
@@ -546,7 +595,7 @@ export async function POST(request: Request) {
     // del delta, resuelto después). Se regenera UNA vez con la nota inyectada —
     // mismo patrón que el REINTENTO ÚNICO ACOTADO de las derivadas de decisión,
     // más abajo.
-    const systemPromptRegen = [basePrompt, `ESTADO ACTUAL CONOCIDO (lo que ya sabemos del usuario):\n${summarizeScenario(seed)}`, notaDigresion, notaSinCifras, notaAmbigua, notaEco, notaDesglose, notaDetalleSinConfirmarVal, notaConflicto, notaTonoEmocional, idiomaObligatorio]
+    const systemPromptRegen = [basePrompt, `ESTADO ACTUAL CONOCIDO (lo que ya sabemos del usuario):\n${summarizeScenario(seed)}`, notaDatosCalculadosPostMerge, notaDigresion, notaSinCifras, notaAmbigua, notaEco, notaDesglose, notaDetalleSinConfirmarVal, notaConflicto, notaRepeticionMensaje, notaTonoEmocional, idiomaObligatorio]
       .filter(Boolean).join('\n\n')
     const regen = await callLLMWithTools(
       allMessages,
@@ -749,6 +798,52 @@ export async function POST(request: Request) {
           antes,
           despues: finalContent,
         })
+      }
+    }
+  }
+
+  // BLOQUEANTE 1/2 (QA testdev8) — CIFRA PEDIDA AUSENTE. El usuario preguntó
+  // por un concepto financiero identificable (gastos, ingreso, sobrante,
+  // cuota, capacidad, brecha…) que el motor SÍ calculó, y la respuesta final
+  // no la contiene con ningún valor. Mandamiento 10 (commandments.ts) ya
+  // revierte al RAW cuando una capa de enforcement fue la que la borró; esto
+  // cubre el otro origen del MISMO síntoma — el propio modelo respondió con la
+  // cifra EQUIVOCADA desde el origen (p. ej. dio el sobrante cuando
+  // preguntaron por el total de gastos): revertir al raw no arregla nada
+  // porque el raw ya estaba mal. Reintento acotado, mismo patrón que el de
+  // arriba: se le dice explícitamente qué preguntó y qué cifra usar.
+  if (carril !== 'META' && finalContent.trim() !== '') {
+    const conceptosPedidos = conceptsInSentence(cleanMessage).filter((c) => c in verified.conceptos)
+    const cifraAusente = conceptosPedidos.length > 0 && !conceptosPedidos.some((c) =>
+      findNumberMentions(finalContent).some((m) => Math.abs(m.value - verified.conceptos[c]) <= 0.01),
+    )
+    if (cifraAusente) {
+      const cifrasPedidas = conceptosPedidos.map((c) => `${c} = ${verified.conceptos[c]}`).join(', ')
+      console.warn('[chat] cifra_pedida_ausente', JSON.stringify({
+        user_id: userId,
+        conversation_id: convId,
+        carril,
+        conceptos_pedidos: conceptosPedidos,
+        cifras: cifrasPedidas,
+      }))
+      const instruccionCifraPedida =
+        `El usuario preguntó específicamente por: ${conceptosPedidos.join(', ')}. Tu respuesta anterior no incluyó esa cifra exacta — respondiste otra cosa. ` +
+        `Responde con EXACTAMENTE estos valores ya calculados, en la primera frase (no los recalcules, no inventes otros): ${cifrasPedidas}.`
+      const cifraRetryGenStart = Date.now()
+      const retry = await callLLMWithTools(
+        respondingMessages,
+        `${respondingSystemPrompt}\n\n${instruccionCifraPedida}`,
+        [registrarDatosFinancieros],
+        { maxTokens: 500, toolChoice: 'none' },
+      )
+      latencyGenerationMs += Date.now() - cifraRetryGenStart
+      if (retry.content) {
+        const cifraRetryValStart = Date.now()
+        safety = await runSafetyPipeline(retry.content)
+        latencyValidationMs += Date.now() - cifraRetryValStart
+        finalContent = safety.finalContent
+        llmResult = { content: retry.content, tokensUsed: llmResult.tokensUsed + retry.tokensUsed, model: retry.model }
+        responseRawForTelemetry = retry.content
       }
     }
   }

@@ -206,7 +206,11 @@ const CONCEPT_KEYWORDS: [RegExp, string][] = [
   // FIX 4 (7ª tanda) — "te sobra 200€" (verbo SOBRAR) faltaba: solo el
   // sustantivo "sobrante" estaba cubierto, así que "sobra" caía sin concepto
   // y el 200 (correcto) se mis-atribuía al concepto vecino más cercano.
-  [/\b(sobrante|sobra|sobran|excedente|surplus|left ?over)\b/, "sobrante"],
+  // MANDAMIENTO 10 (QA testdev8) — "¿cuánto me queda al mes?" es la forma
+  // NATURAL de preguntar por el sobrante; sin "queda/quedan" el concepto no se
+  // reconocía en la PREGUNTA del usuario y el guardarraíl no podía exigir que
+  // la respuesta trajera la cifra pedida.
+  [/\b(sobrante|sobra|sobran|excedente|surplus|left ?over|queda|quedan)\b/, "sobrante"],
   [/\b(recorte|corte|cut)\b/, "recorte"],
   [/\b(capacidad (?:de ahorro )?anual|capacidad anual|annual capacity|yearly (?:savings|capacity))\b/, "capacidad_anual"],
   // FIX 3 (7ª tanda) — "ingresas"/"ingresa" (verbo INGRESAR, distinto de
