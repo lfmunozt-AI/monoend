@@ -339,10 +339,18 @@ Todos ejecutados sobre el código de `agent/08` con `extractScenarioDelta` / `me
 
 **Mis cuatro formas inventadas** (agregado + palabra intermedia + detalle):
 
+> **ERRATA (AG01, ronda 2 — 2026-08-14).** Las dos primeras filas de esta tabla estaban
+> **mal**: las anoté como correctas sin haber visto su salida (quedaron en la parte truncada
+> del volcado de la sonda). Re-ejecutadas en la ronda 2 sobre `develop`, `8a8f048` y
+> `a97206e` — las tres idénticas — **fallan**: `"…rondan los 1000…"` → 1700 con `luz = 1000`,
+> y `"…he gastado 900 en total…"` → 1800 con un ítem `"este he gastado" = 900`. Ambas
+> `COMPLETE`. No es regresión de ninguna tanda; agrava el alcance de R1. Detalle y
+> consecuencias en `REVISION_AG01_qa_testdev8_ronda2.md` §5.
+
 | Mensaje | Resultado |
 |---|---|
-| `"mis gastos rondan los 1000 al mes: luz 300, agua 300, gas 400"` | ✅ 1000, 3 ítems |
-| `"este mes he gastado 900 en total: renta 500, comida 250, bus 150"` | ✅ 900, 3 ítems |
+| `"mis gastos rondan los 1000 al mes: luz 300, agua 300, gas 400"` | ❌ *(ver errata arriba)* — 1700, `luz = 1000` |
+| `"este mes he gastado 900 en total: renta 500, comida 250, bus 150"` | ❌ *(ver errata arriba)* — 1800, ítem `"este he gastado" = 900` |
 | `"mis gastos del mes pasado fueron de 1500: hipoteca 800, comida 400, luz 300"` | ❌ **hipoteca 1500, total 2200** — ver R1 (preexistente) |
 | `"gasto unos 2 000 al mes: alquiler 1000, comida 600, transporte 400"` | ⚠️ 2000 y 3 ítems correctos (**mejora** sobre `develop`, que daba `alquiler 2` / total 1002) pero `AMBIGUOUS` con ítem sospechoso fantasma — ver M2 |
 
