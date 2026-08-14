@@ -6,12 +6,13 @@
 // Ninguna capa intermedia vuelve a ser responsable de la garantía global; su
 // trabajo es no introducir violaciones, esta es la red de seguridad
 // determinista. Los invariantes (a)-(e) de AG01 pasan a ser los Mandamientos
-// 1-5; una tanda posterior añadió 6-8; esta añade el 9 (PLAN FANTASMA).
+// 1-5; una tanda posterior añadió 6-8, luego el 9 (PLAN FANTASMA); esta añade
+// el 10 (CIFRA PEDIDA — QA testdev8).
 //
 // Contrato: pura, nunca lanza, idempotente (aplicarla dos veces da el mismo
 // resultado). Código PURO, edge-safe, SIN llamadas a ningún LLM.
 
-import { segmentSentences, splitSentences, conceptsInSentence, hasReferenceMarker, isPercent, isTimeUnit } from "./context";
+import { segmentSentences, splitSentences, conceptsInSentence, cifraPedidaAusente, hasReferenceMarker, isPercent, isTimeUnit } from "./context";
 import {
   cleanup,
   endsWithRequestOrProposal,
@@ -50,13 +51,20 @@ export interface CommandmentContext {
   /**
    * Respuesta CRUDA del modelo, antes de cualquier capa (grounding incluido).
    * Mandamiento 9 (PLAN FANTASMA) la usa para revertir cuando el enforcement
-   * vació un plan hasta dejarlo sin cifras ni acción concreta. Opcional: sin
-   * ella, M9 no tiene nada a lo que revertir y no se activa nunca.
+   * vació un plan hasta dejarlo sin cifras ni acción concreta. Mandamiento 10
+   * (CIFRA PEDIDA) la usa con el mismo espíritu. Opcional: sin ella, ninguno
+   * de los dos tiene nada a lo que revertir y no se activan nunca.
    */
   raw?: string;
+  /**
+   * Mensaje del usuario que originó este turno. Mandamiento 10 (CIFRA PEDIDA)
+   * lo usa para saber qué concepto financiero se preguntó. Opcional: sin él,
+   * M10 no tiene qué comprobar y no se activa nunca.
+   */
+  userMessage?: string;
 }
 
-export type CommandmentId = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;
+export type CommandmentId = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10;
 export type CommandmentAction = "corregido" | "logueado";
 
 export interface CommandmentViolation {
@@ -344,8 +352,85 @@ function esPlanFantasma(text: string, raw: string | undefined): boolean {
   return sinCifras || mutilado;
 }
 
+// ── Mandamiento 10 — LA CIFRA PEDIDA NUNCA SE BORRA ──────────────────────────
+//
+// QA real (testdev8): "¿cuánto me queda al mes?" ×3 produjo, en el tercer
+// turno, una respuesta cuyo enforcement había eliminado el sobrante (250 €),
+// dejando un demostrativo huérfano ("Esa es tu capacidad real para destinar a
+// ahorro...") sin ningún número al que "esa" pudiera referirse.
+//
+// REDISEÑO (revisión AG01, bloqueante 1) — la primera versión revertía al
+// RAW: texto SIN VALIDAR. Si el RAW traía la cifra pedida en la MISMA frase
+// que otra cifra inventada ("Te quedan 250 € al mes aunque arrastras un
+// déficit de 9500 €"), M10 resucitaba TAMBIÉN la inventada — anulando el
+// Mandamiento 3 con G1b (cifras no trazables) vigente y bloqueante de piloto.
+// V17 (propuesta por esa revisión): "ninguna capa de reparación puede
+// reintroducir una cifra que una capa anterior eliminó por falta de
+// respaldo". M10 NUNCA vuelve al RAW: opera exclusivamente sobre el texto YA
+// VALIDADO (`out`), frase a frase, y solo puede escribir una cifra que ya
+// esté en `conceptos` (verificada por el motor, nunca por el LLM — V5).
+//
+// Por cada frase con una anáfora sin antecedente numérico:
+//   (a) el concepto que pidió el usuario (`conceptosPedidosEnPregunta`, tabla
+//       EXCLUSIVA de pregunta — nunca la de grounding de salida, ver M3/M4 de
+//       la misma revisión) SÍ está en `conceptos` y aún no aparece en NINGÚN
+//       lugar del texto → la anáfora se SUSTITUYE por esa cifra verificada,
+//       en sitio.
+//   (b) no hay ningún concepto verificado al que la anáfora pueda
+//       corresponder → la frase se ELIMINA (mismo criterio que el
+//       Mandamiento 3: sin respaldo, no se publica — nunca se revive
+//       contenido del RAW).
+// Si tras esto la respuesta queda sin sustancia, es tarea de `ensureSubstance`
+// / el reintento acotado de route.ts (que comparte `cifraPedidaAusente` con
+// este módulo) — nunca de M10 resucitar el RAW.
+const ANAFORA_SIN_ANTECEDENTE_RE = /\b(esa|ese|esta|este|esto|eso)\s+(cifra|cantidad|monto|numero|valor)\b|\beso\b/i;
+
+function esNum(n: number): string {
+  return String(n).replace(".", ",");
+}
+
+/** ¿La frase usa un demostrativo/anáfora sin ningún número en sí misma? */
+function fraseConAnaforaSinAntecedente(sentence: string): boolean {
+  return ANAFORA_SIN_ANTECEDENTE_RE.test(sentence) && !/\d/.test(sentence);
+}
+
 /**
- * Verifica y corrige los 9 Mandamientos sobre `text`, en orden. Devuelve el
+ * Repara las anáforas sin antecedente de `text` frase a frase, SOBRE EL
+ * TEXTO YA VALIDADO — nunca sobre el raw. Solo puede insertar una cifra que
+ * ya viva en `conceptos`; si no hay ninguna disponible, la frase se elimina.
+ */
+function repararAnaforasSinAntecedente(
+  text: string,
+  userMessage: string | undefined,
+  conceptos: Record<string, number>,
+): { texto: string; corregido: boolean } {
+  if (!userMessage) return { texto: text, corregido: false };
+  const { ausente, conceptosPedidos } = cifraPedidaAusente(userMessage, text, conceptos);
+  // Sin nada pedido y verificado que reinsertar, solo cabe la eliminación (b)
+  // — pero si además la cifra pedida YA está en el texto (`!ausente`), el
+  // concepto elegible para sustituir la anáfora ya cumplió su papel en otra
+  // frase: tampoco hay nada que reinsertar aquí, se elimina si aparece.
+  const concepto = ausente ? conceptosPedidos.find((c) => c in conceptos) : undefined;
+
+  let corregido = false;
+  const partes: string[] = [];
+  for (const seg of segmentSentences(text)) {
+    if (!fraseConAnaforaSinAntecedente(seg.text)) {
+      partes.push(seg.text);
+      continue;
+    }
+    corregido = true;
+    if (concepto !== undefined) {
+      // (a) — sustituye la anáfora por la cifra verificada, en sitio.
+      partes.push(seg.text.replace(ANAFORA_SIN_ANTECEDENTE_RE, `${esNum(conceptos[concepto])} €`));
+    }
+    // (b) — sin concepto verificado al que anclarla: la frase se descarta.
+  }
+  return { texto: cleanup(partes.join("")), corregido };
+}
+
+/**
+ * Verifica y corrige los 10 Mandamientos sobre `text`, en orden. Devuelve el
  * texto corregido y el detalle de cada violación. Nunca lanza; si una
  * corrección vacía la respuesta, el texto resultante puede ser "" (el llamante
  * decide el fallback de carril).
@@ -459,6 +544,20 @@ export function enforceCommandments(
       out = revertido;
       anotar(9, "plan vacío tras enforcement — revertido al original", before, out);
       violaciones.push({ mandamiento: 9, accion: "corregido", detalle: "plan sin sustancia tras enforcement — revertido al texto original" });
+    }
+
+    // Mandamiento 10 — ÚLTIMO de todos: corre incluso después de M9, sobre lo
+    // que M9 haya dejado. NUNCA vuelve al raw (V17) — repara la anáfora en
+    // sitio con una cifra verificada, o elimina la frase sin respaldo.
+    const anafora = repararAnaforasSinAntecedente(out, ctx.userMessage, ctx.conceptos);
+    if (anafora.corregido) {
+      anotar(10, "anáfora sin antecedente — cifra verificada reinsertada o frase eliminada", out, anafora.texto);
+      out = anafora.texto;
+      violaciones.push({
+        mandamiento: 10,
+        accion: "corregido",
+        detalle: "anáfora sin antecedente numérico: cifra verificada reinsertada, o frase sin respaldo eliminada",
+      });
     }
   }
 

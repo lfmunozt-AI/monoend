@@ -27,7 +27,7 @@ import {
   loanPayment,
 } from "./operations";
 import { classifyExpenses, parseExpenseList, type ExpenseItem } from "./expenses";
-import type { ScenarioState } from "./scenario";
+import { itemsGastoActivos, TOLERANCIA_REDONDEO_EUR, type ScenarioState } from "./scenario";
 
 // ── Supuestos del modelo financiero (documentados y configurables) ──────────
 // Estas constantes definen las recomendaciones por defecto. Se centralizan aquí
@@ -547,8 +547,42 @@ export function buildScenarioContext(
     }
   }
 
-  // ── Lista de gastos en el mensaje → clasificación ─────────────────────────
-  const items = parseExpenseList(userMessage);
+  // ── Desglose de gastos → clasificación ─────────────────────────────────────
+  // BLOQUEANTE 4 (QA testdev8) — antes se parseaba SOLO `userMessage`: en una
+  // sesión nueva (o cualquier turno que no repita la lista), el usuario podía
+  // tener 5 partidas ya persistidas en `scenario.gastos_items` y el bloque
+  // "TU REALIDAD" seguía sin desglose — el modelo respondía "no tengo
+  // registrado ningún detalle" con el detalle completo en el estado. La
+  // fuente canónica es el estado YA fusionado (`mergeScenario` ya mezcló lo
+  // persistido con lo nuevo de este turno y deduplicó — BLOQUEANTE 5b), no
+  // una re-lectura del mensaje.
+  // FIX 2b (revisión AG01, QA testdev8) — GUARDA DE SANIDAD BLOQUEANTE. La
+  // rederivación en `mergeScenario` (BLOQUEANTE 2) cierra el caso común, pero
+  // es defensa en profundidad, no la única garantía: si por cualquier vía
+  // `gastos_mensuales` (el "agregado fiable") y la suma de los ítems activos
+  // divergen más allá del redondeo — y no hay un conflicto ya declarado, que
+  // tiene su propia supresión vía `gastosEnConflicto` — el bloque de "datos
+  // verificados" NO puede exponer ambas cifras a la vez (V18). Antes esto
+  // solo se registraba con `console.warn` y se publicaba igual — "loguear no
+  // es mitigar". Ahora se BLOQUEA: se emite solo el agregado fiable, sin
+  // clasificación por partida, y el incidente queda en telemetría igual.
+  const itemsActivos = itemsGastoActivos(scenario.gastos_items);
+  const sumaItemsActivos = round2(itemsActivos.reduce((acc, i) => acc + i.amount, 0));
+  // Sin ítems (agregado puro, sin desglose) no hay nada que comparar — nunca
+  // es incoherencia, y el bloque de clasificación no se emite de todos modos
+  // (exige ≥2 ítems más abajo).
+  const desgloseCoherente =
+    itemsActivos.length === 0 ||
+    gastosEnConflicto ||
+    scenario.gastos_mensuales === undefined ||
+    Math.abs(sumaItemsActivos - scenario.gastos_mensuales) <= TOLERANCIA_REDONDEO_EUR;
+  if (!desgloseCoherente) {
+    console.warn("[buildScenarioContext] BLOQUEADO: desglose de gastos incoherente con el agregado — no se expone al modelo", JSON.stringify({
+      gastos_mensuales: scenario.gastos_mensuales,
+      suma_items_activos: sumaItemsActivos,
+    }));
+  }
+  const items = desgloseCoherente ? itemsActivos.map((i) => ({ name: i.name, amount: i.amount })) : [];
   if (items.length >= 2) {
     const cls = classifyExpenses(items);
     const listaTxt = (g: ExpenseItem[]) => g.map((i) => `${i.name} ${i.amount}`).join(", ");

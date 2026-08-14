@@ -175,8 +175,16 @@ const TERMINA_EN_CONECTOR_RE =
 // exclusión por valor RECLAMADO (V13, ver `parseExpenseListDetallado`) y la
 // evidencia estructural obligatoria (FIX 2b): una lista negra de adverbios
 // siempre será incompleta.
+// BLOQUEANTE 5a (QA testdev8) — "fueron"/"fue"/"eran"/"era"/"serán"/"será" son
+// las mismas cópulas verbales de `CONECTOR_DECLARATIVO` (scenario.ts): cuando
+// el patrón declarativo que las reconoce no llega a matchear (p. ej. un
+// agregado con miles-con-espacio que rompía el regex ANTES de este fix), el
+// mensaje entero caía al parser de listas y una de estas palabras terminaba
+// emparejada como si fuera el NOMBRE de una partida ("fueron": 2). Nunca son
+// un nombre de gasto válido — se añaden aquí como defensa en profundidad,
+// igual que el resto de conectores/artículos ya cubiertos.
 const STOPWORD_NAME_RE =
-  /^(?:a|al|de|del|en|el|la|los|las|un|una|unos|unas|y|e|o|por|para|con|sin|que|es|son|mi|tu|su|mis|tus|sus|entre|sobre|meses?|mes|a[ñn]os?|anos?|d[ií]as?|semanas?|trimestres?|months?|years?|days?|weeks?)$/i;
+  /^(?:a|al|de|del|en|el|la|los|las|un|una|unos|unas|y|e|o|por|para|con|sin|que|es|son|fueron|fue|eran|era|seran|sera|mi|tu|su|mis|tus|sus|entre|sobre|meses?|mes|a[ñn]os?|anos?|d[ií]as?|semanas?|trimestres?|months?|years?|days?|weeks?)$/i;
 
 // PIEZA 4 (8ª tanda) — ruido a ignorar durante el tokenizado: unidades de
 // tiempo/moneda que no son ni nombre ni monto ("al mes", "€", "euros"). Se

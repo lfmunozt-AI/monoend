@@ -35,6 +35,8 @@ import {
   CAMPOS_HECHOS,
   CAMPOS_DIALOGO,
   CAMPOS_TRANSITORIOS,
+  itemsGastoActivos,
+  contarRepeticionesMensajeUsuario,
   type ScenarioState,
 } from "./scenario";
 import { buildScenarioContext } from "./orchestrator";
@@ -2056,4 +2058,197 @@ test("split + merge es IDEMPOTENTE: partir y volver a fusionar devuelve el mismo
   // afirmaría una garantía falsa.
   const comoLoDevuelveLaBD = (x: unknown) => JSON.parse(JSON.stringify(x));
   assert.deepEqual(comoLoDevuelveLaBD(reconstruido), comoLoDevuelveLaBD(s), "ida y vuelta sin pérdida ni deformación");
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// QA testdev8 (14 ago) — bloqueantes 3/4/5 y mayores 6/7
+// ═══════════════════════════════════════════════════════════════════════════
+
+test("BLOQUEANTE 5a: 'mis gastos fueron 2 200: arriendo 900, comida 500, luz 400, internet 300, ocio 100' → 5 ítems correctos, sin 'fueron'", () => {
+  const delta = extractScenarioDelta(
+    "mis gastos fueron 2 200: arriendo 900, comida 500, luz 400, internet 300, ocio 100",
+  );
+  assert.equal(delta.gastos_mensuales, 2200, "el agregado con miles-con-espacio se lee completo");
+  assert.ok(delta.gastos_items, "debe traer desglose");
+  assert.equal(delta.gastos_items!.length, 5, "5 partidas reales, no 11 ni ítems espurios");
+  assert.ok(
+    !delta.gastos_items!.some((i) => i.name.toLowerCase() === "fueron"),
+    "'fueron' nunca es nombre de partida",
+  );
+  const arriendo = delta.gastos_items!.find((i) => i.name.toLowerCase() === "arriendo");
+  assert.ok(arriendo, "debe existir la partida arriendo");
+  assert.equal(arriendo!.amount, 900, "arriendo no se confunde con el resto del agregado partido");
+  const suma = delta.gastos_items!.reduce((acc, i) => acc + i.amount, 0);
+  assert.equal(suma, 2200, "suma de ítems = agregado declarado");
+});
+
+test("BLOQUEANTE 5b: un ítem repetido en un turno posterior SUPERSEDE al anterior (dedup por nombre, el log completo se conserva)", () => {
+  let s = mergeScenario({}, extractScenarioDelta("arriendo 900, comida 500, luz 400, internet 300, ocio 100"));
+  assert.equal(itemsGastoActivos(s.gastos_items).length, 5);
+  assert.equal(s.gastos_mensuales, 2200);
+
+  const deltaTool = toolArgsToScenarioDelta({
+    gastos_detalle: [
+      { nombre: "arriendo", monto: 900 },
+      { nombre: "comida", monto: 500 },
+      { nombre: "luz", monto: 400 },
+      { nombre: "internet", monto: 300 },
+      { nombre: "ocio", monto: 150 },
+    ],
+  });
+  s = mergeScenario(s, deltaTool);
+
+  const activos = itemsGastoActivos(s.gastos_items);
+  assert.equal(activos.length, 5, "sigue habiendo 5 categorías activas, no 10");
+  assert.equal(s.gastos_items!.length, 10, "el log completo SÍ acumula — nunca se borra (V7)");
+  const ocio = activos.find((i) => i.name.toLowerCase() === "ocio");
+  assert.equal(ocio?.amount, 150, "el más reciente gana");
+  const sumaActivos = activos.reduce((acc, i) => acc + i.amount, 0);
+  assert.equal(sumaActivos, 2250, "la suma de ítems activos coincide con el nuevo total declarado");
+  assert.equal(s.gastos_mensuales, 2250, "gastos_mensuales se recalcula del desglose ya deduplicado");
+});
+
+test("MAYOR 6: renderDatosRecienEntendidos ENUNCIA la corrección de un ítem (antes devolvía null si no había otro dato nuevo)", () => {
+  const delta = { gastos_item_correccion: { name: "ocio", amount: 150 } };
+  const nota = renderDatosRecienEntendidos(delta, "me equivoqué, el ocio son 150");
+  assert.ok(nota, "debe generar una nota");
+  assert.ok(nota!.includes("ocio") && nota!.includes("150"));
+  assert.match(nota!, /CORRECCIÓN/i);
+});
+
+test("MAYOR 6: una corrección de ítem que ya NO cuadra con el agregado declarado abre el ciclo de conflicto (no se pisa en silencio)", () => {
+  let s = mergeScenario(
+    {},
+    extractScenarioDelta("mis gastos son 2200: arriendo 900, comida 500, luz 400, internet 300, ocio 100"),
+  );
+  assert.equal(s.gastos_mensuales, 2200);
+  assert.equal(s.gastos_agregado_origen?.valor, 2200);
+  assert.equal(s.gastos_conflict, undefined, "sin conflicto todavía");
+
+  const delta2 = extractScenarioDelta("me equivoqué, el ocio son 150", "es", s);
+  assert.deepEqual(delta2.gastos_item_correccion, { name: "ocio", amount: 150 });
+
+  s = mergeScenario(s, delta2);
+  const ocio = itemsGastoActivos(s.gastos_items).find((i) => i.name.toLowerCase() === "ocio");
+  assert.equal(ocio?.amount, 150, "la corrección SÍ se aplica al ítem");
+  assert.ok(s.gastos_conflict, "la divergencia con el agregado declarado abre el ciclo de conflicto");
+  assert.equal(s.gastos_conflict!.detalle, 2250);
+  assert.equal(s.gastos_conflict!.agregado, 2200);
+});
+
+test("MAYOR 7: contarRepeticionesMensajeUsuario detecta la PREGUNTA repetida, no la respuesta", () => {
+  const previos = ["¿cuánto me queda al mes?", "¿me haces un resumen?"];
+  assert.equal(contarRepeticionesMensajeUsuario("¿cuánto me queda al mes?", previos), 1);
+  assert.equal(
+    contarRepeticionesMensajeUsuario("¿cuánto me queda al mes?", [...previos, "¿cuánto me queda al mes?"]),
+    2,
+    "R1 y R3 idénticas, aunque R2 (que no cuenta aquí) fuera distinta",
+  );
+  assert.equal(contarRepeticionesMensajeUsuario("otra pregunta completamente distinta", previos), 0);
+});
+
+test("BLOQUEANTE 4: el desglose persistido se expone en TU REALIDAD aunque el mensaje de este turno no traiga lista", () => {
+  const scenario = mergeScenario(
+    {},
+    extractScenarioDelta("mis gastos son 2200: arriendo 900, comida 500, luz 400, internet 300, ocio 100"),
+  );
+  const ctx = buildScenarioContext(scenario, "¿qué gastos tengo?");
+  assert.ok(
+    ctx.bloque.includes("gastos_vitales") || ctx.bloque.includes("gastos_no_vitales"),
+    "el desglose por partida debe aparecer aunque el mensaje sea una pregunta pura",
+  );
+  assert.ok(ctx.bloque.includes("arriendo"), "las partidas individuales deben verse en la fórmula");
+});
+
+test("BLOQUEANTE 3: la cuota se recalcula del estado persistido aunque el mensaje no aporte nada nuevo (sesión nueva, crédito completo)", () => {
+  let s = mergeScenario({}, extractScenarioDelta("quiero financiar un carro de 30000 a 48 meses"));
+  s = mergeScenario(s, extractScenarioDelta("el banco me ofrece 18%", "es", s));
+  assert.equal(s.credito?.monto, 30000);
+  assert.equal(s.credito?.plazo_meses, 48);
+  assert.equal(s.credito?.tae_pct, 18);
+  assert.equal(s.credito?.tae_es_referencia, false);
+  assert.ok(!s.missing.includes("tae"), "con TAE real, 'tae' ya no falta");
+
+  const ctx = buildScenarioContext(s, "¿me dices la cuota mensual que pagas?");
+  assert.ok("cuota" in ctx.conceptos, "la cuota se calcula aunque el mensaje sea una pregunta pura, sin datos nuevos");
+  assert.ok(
+    Math.abs(ctx.conceptos.cuota - 881.25) < 1,
+    `cuota esperada ~881.25 (30.000€ a 48 meses, TAE 18%), obtuvo ${ctx.conceptos.cuota}`,
+  );
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Revisión adversarial AG01 sobre la tanda QA testdev8 — bloqueante 2, mayor 3, m1
+// ═══════════════════════════════════════════════════════════════════════════
+
+test("BLOQUEANTE 2 (revisión AG01): T1 lista parcial → T2 lista parcial con nombres nuevos → suma(items activos) == suma(buckets) == gastos_mensuales", () => {
+  let s = mergeScenario({}, extractScenarioDelta("gano 3000, arriendo 900, comida 500"));
+  s = mergeScenario(s, extractScenarioDelta("luz 100, internet 50", "es", s));
+
+  const activos = itemsGastoActivos(s.gastos_items);
+  const sumaItems = activos.reduce((acc, i) => acc + i.amount, 0);
+  const sumaBuckets = (s.gastos_detalle?.vitales ?? 0) + (s.gastos_detalle?.noVitales ?? 0) + (s.gastos_detalle?.desconocidos ?? 0);
+
+  assert.equal(sumaItems, 1550, "4 partidas acumuladas: 900+500+100+50");
+  assert.equal(sumaBuckets, 1550, "los buckets reflejan TODOS los ítems acumulados, no solo el último turno");
+  assert.equal(s.gastos_mensuales, 1550, "gastos_mensuales ya no se queda en 150 (solo T2)");
+
+  // El bloque que ve el modelo no puede contradecirse: sobrante correcto.
+  const ctxV = buildScenarioContext(s, "luz 100, internet 50");
+  assert.ok(ctxV.bloque.includes("gastos_mensuales: 1550"));
+  assert.ok(ctxV.bloque.includes("sobrante_mensual: 1450"), "sobrante real: 3000 - 1550, nunca 2850");
+  assert.ok(!ctxV.bloque.includes("gastos_mensuales: 150"), "la cifra vieja e incoherente no sobrevive");
+});
+
+test("MAYOR 3 (revisión AG01): el mensaje del bloqueante 5 ya NO produce una pregunta de aclaración fantasma", () => {
+  const msg = "mis gastos fueron 2 200: arriendo 900, comida 500, luz 400, internet 300, ocio 100";
+  const delta = extractScenarioDelta(msg);
+  const analisis = analizarExtraccion(msg, delta);
+  assert.equal(analisis.extraction_status, "COMPLETE", "sin fronteras, el re-parseo marcaba '2 200' como pegado consigo mismo");
+  assert.equal(analisis.itemSospechoso, null);
+});
+
+test("MAYOR 3 (revisión AG01): 'gasto unos 2 000 al mes: alquiler 1000, comida 600, transporte 400' → COMPLETE", () => {
+  const msg = "gasto unos 2 000 al mes: alquiler 1000, comida 600, transporte 400";
+  const delta = extractScenarioDelta(msg);
+  const analisis = analizarExtraccion(msg, delta);
+  assert.equal(analisis.extraction_status, "COMPLETE");
+  assert.equal(analisis.itemSospechoso, null);
+});
+
+test("m1 (revisión AG01): precedencia tool > regex en la dedup de gastos_items", () => {
+  let s = mergeScenario(
+    {},
+    toolArgsToScenarioDelta({
+      gastos_detalle: [
+        { nombre: "ocio", monto: 150 },
+        { nombre: "casa", monto: 900 },
+      ],
+    }),
+  );
+  let activos = itemsGastoActivos(s.gastos_items);
+  assert.equal(activos.find((i) => i.name === "ocio")?.amount, 150);
+  assert.equal(activos.find((i) => i.name === "ocio")?.source, "tool");
+
+  // T2 por regex intenta pisar los mismos nombres con otros importes.
+  s = mergeScenario(s, extractScenarioDelta("ocio 100, casa 900"));
+  activos = itemsGastoActivos(s.gastos_items);
+  assert.equal(activos.length, 2, "sigue habiendo 2 categorías activas, el regex no añadió duplicados");
+  assert.equal(activos.find((i) => i.name === "ocio")?.amount, 150, "el tool_call previo GANA — el regex no lo sustituye");
+  assert.equal(activos.find((i) => i.name === "ocio")?.source, "tool");
+});
+
+test("m1 (revisión AG01): un tool_call posterior SÍ sustituye a un ítem previo por tool o por regex", () => {
+  let s = mergeScenario({}, extractScenarioDelta("ocio 100, casa 900"));
+  let activos = itemsGastoActivos(s.gastos_items);
+  assert.equal(activos.find((i) => i.name === "ocio")?.amount, 100);
+
+  s = mergeScenario(
+    s,
+    toolArgsToScenarioDelta({ gastos_detalle: [{ nombre: "ocio", monto: 150 }, { nombre: "casa", monto: 900 }] }),
+  );
+  activos = itemsGastoActivos(s.gastos_items);
+  assert.equal(activos.length, 2);
+  assert.equal(activos.find((i) => i.name === "ocio")?.amount, 150, "tool SÍ sustituye a un regex previo");
+  assert.equal(activos.find((i) => i.name === "ocio")?.source, "tool");
 });

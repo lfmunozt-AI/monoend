@@ -34,6 +34,13 @@ export interface GastoItemEntry {
   source: "regex" | "tool";
   /** Turno (1-indexado) en el que se aportó, para poder auditar cuándo se dijo qué. */
   turn: number;
+  /**
+   * BLOQUEANTE 5b (QA testdev8) — este ítem fue REEMPLAZADO por uno posterior
+   * con el mismo nombre normalizado (el más reciente gana). Se ARCHIVA, nunca
+   * se borra — `gastos_items` sigue siendo el log completo (PIEZA 5, 8ª
+   * tanda); `itemsGastoActivos` filtra los vigentes para cálculo/clasificación.
+   */
+  superseded?: boolean;
 }
 
 /**
@@ -172,6 +179,23 @@ export function similitudTexto(a: string, b: string): number {
 export function esRespuestaRepetida(actual: string, anterior: string | undefined, umbral = 0.9): boolean {
   if (!anterior) return false;
   return similitudTexto(actual, anterior) >= umbral;
+}
+
+/**
+ * MAYOR 7 (QA testdev8) — cuenta cuántos mensajes ANTERIORES del USUARIO en
+ * esta conversación son casi idénticos (≥90%) al mensaje actual. Más fiable
+ * que comparar la respuesta del asistente: "¿cuánto me queda al mes?" ×3
+ * produjo R1/R2/R3 donde R1 y R3 eran idénticas pero R2 no — comparar cada
+ * respuesta solo contra la INMEDIATA anterior (`esRespuestaRepetida`) nunca
+ * detecta ese patrón, porque R3 se compara contra R2 (distinta). La pregunta
+ * del usuario, en cambio, fue literalmente la misma las tres veces.
+ */
+export function contarRepeticionesMensajeUsuario(
+  actual: string,
+  anteriores: string[],
+  umbral = 0.9,
+): number {
+  return anteriores.filter((m) => similitudTexto(actual, m) >= umbral).length;
 }
 
 /**
@@ -535,20 +559,36 @@ const CONECTOR_DECLARATIVO =
   "per\\s+month|monthly|in\\s+total|a\\s+month" +
   "))*";
 
-const GASTO_AGREGADO_DETALLE_RE = new RegExp(
-  "\\b(?:gastos?|gaste|gastamos|gastaron|gastabamos|despesas?|expenses?|spent)\\b" +
-    CONECTOR_DECLARATIVO +
-    "\\s*[:=]?\\s*(\\d[\\d.,]*)" +
-    CONECTOR_DECLARATIVO +
-    "\\s*:",
-);
-const PRECIO_CTX = /\b(precio|cuesta|vale|financiar|credito|prestamo|emprestimo|loan|financ|carro|coche|auto|casa|piso|vivienda)\b/;
 // PIEZA 3 (8ª tanda) — misma convención de miles-con-espacio que el parser
 // general (`guardrail/numbers.ts`, DIGIT_RE): "2 500" es 2500, no "2" seguido
 // de un huérfano "500" (caso 10 — NO se toca la regla general, solo se hace
 // que esta cifra la use también). La alternativa de espacio va PRIMERO
 // (probada antes que el dígito llano) y exige grupos de EXACTAMENTE 3 dígitos.
+//
+// Definida ANTES de `GASTO_AGREGADO_DETALLE_RE` (movida aquí, BLOQUEANTE 5a,
+// QA testdev8) — ese patrón necesita la MISMA captura consciente de espacio
+// que esta constante ya resuelve; antes usaba `(\d[\d.,]*)` a pelo, que corta
+// en el espacio y deja "2" en vez de "2200" (ver más abajo).
 const AMOUNT = /(\d{1,3}(?: \d{3})+(?:,\d+)?|\d[\d.,]*)/;
+
+// BLOQUEANTE 5a (QA testdev8) — "mis gastos fueron 2 200: arriendo 900,
+// comida 500..." no matcheaba en absoluto: el grupo de captura del agregado
+// era `(\d[\d.,]*)` (sin la alternativa de miles-con-espacio de `AMOUNT`), así
+// que solo capturaba "2" y el resto del patrón ("200: arriendo...") ya no
+// encajaba con `CONECTOR_DECLARATIVO + "\s*:"` — el regex entero fallaba y el
+// mensaje caía al parser de listas, donde "fueron" se colaba como nombre de
+// partida y "2"/"200" se separaban mal (ver STOPWORD_NAME_RE más abajo, y
+// `esNombreValido`/`emparejarNombreMonto` en expenses.ts). Reutiliza
+// `AMOUNT.source` para que el agregado declarado ("2 200") se lea como 2200
+// igual que cualquier otro monto del sistema.
+const GASTO_AGREGADO_DETALLE_RE = new RegExp(
+  "\\b(?:gastos?|gaste|gastamos|gastaron|gastabamos|despesas?|expenses?|spent)\\b" +
+    CONECTOR_DECLARATIVO +
+    "\\s*[:=]?\\s*" + AMOUNT.source +
+    CONECTOR_DECLARATIVO +
+    "\\s*:",
+);
+const PRECIO_CTX = /\b(precio|cuesta|vale|financiar|credito|prestamo|emprestimo|loan|financ|carro|coche|auto|casa|piso|vivienda)\b/;
 
 // PIEZA 1 (5ª tanda) — MARCADOR ANUAL. "gano 27600 al año" NO es "gano 27600
 // al mes": asumir mensual sin más es exactamente el tipo de suposición que el
@@ -670,6 +710,18 @@ function itemsAGastoItemEntries(
   source: "regex" | "tool",
 ): GastoItemEntry[] {
   return items.map((i) => ({ name: i.name, amount: i.amount, category: classifyExpense(i.name), source, turn: 0 }));
+}
+
+/**
+ * BLOQUEANTE 5b (QA testdev8) — el subconjunto VIGENTE de `gastos_items`: uno
+ * por nombre normalizado, el más reciente (`superseded` los descarta). El log
+ * completo nunca se toca (PIEZA 5, 8ª tanda: "se ACUMULA, nunca se pisa") —
+ * esta es la vista que consume cualquier cálculo/clasificación/conteo
+ * (`buildScenarioContext`, `tiene_detalle_gastos`, la corrección de un ítem,
+ * el eco de "desglose sin confirmar"...).
+ */
+export function itemsGastoActivos(items: GastoItemEntry[] | undefined): GastoItemEntry[] {
+  return (items ?? []).filter((i) => !i.superseded);
 }
 
 /**
@@ -974,7 +1026,7 @@ export function extractScenarioDelta(
     if (esConfirmacionCorta(message)) {
       delta.detalle_confirmado_explicito = true;
     } else if (prev?.gastos_items) {
-      const correccion = detectarCorreccionDeItem(message, prev.gastos_items);
+      const correccion = detectarCorreccionDeItem(message, itemsGastoActivos(prev.gastos_items));
       if (correccion) {
         delta.gastos_item_correccion = correccion;
         delta.detalle_confirmado_explicito = true;
@@ -1522,6 +1574,22 @@ export interface AnalisisExtraccion {
 }
 
 /**
+ * MAYOR 3 (revisión AG01, QA testdev8) — el rango que `GASTO_AGREGADO_DETALLE_RE`
+ * reclamó como agregado declarado ("gastos fueron 2 200:"), si lo hay. Sin
+ * excluir este rango, el re-parseo de `analizarExtraccion` (más abajo) lee
+ * "2 200" como si fuera parte del DESGLOSE — el propio agregado, ya asignado
+ * correctamente por `extractScenarioDelta`, se marca a sí mismo como una
+ * cifra "pegada" (`itemSospechoso`) y dispara una AMBIGUOUS/pregunta de
+ * aclaración fantasma sobre un número que el motor ya leyó bien.
+ */
+function rangoAgregadoDeclarado(message: string): Rango | null {
+  const n = norm(message);
+  const m = GASTO_AGREGADO_DETALLE_RE.exec(n);
+  if (!m) return null;
+  return { start: m.index, end: m.index + m[0].length };
+}
+
+/**
  * PIEZA 1 — punto de entrada ÚNICO para analizar la honestidad de la
  * extracción de este turno: corre las cuatro señales (huérfanos,
  * discrepancia, ítem sospechoso de pegado, valores inválidos) y resume el
@@ -1532,8 +1600,13 @@ export interface AnalisisExtraccion {
 export function analizarExtraccion(message: string, delta: Partial<ScenarioState>): AnalisisExtraccion {
   const huerfanos = detectarNumerosHuerfanos(message, delta);
   const discrepancia = detectarDiscrepanciaGastos(delta);
+  // MAYOR 3 — excluye el rango del agregado declarado (si lo hay) del
+  // re-parseo: la misma frontera que `extractScenarioDelta` ya aplicó al
+  // extraer el delta real, para que el detector de pegado juzgue la MISMA
+  // lista que se persiste, no una relectura sin fronteras.
+  const rangoAgregado = rangoAgregadoDeclarado(message);
   const itemSospechoso = delta.gastos_es_detalle
-    ? parseExpenseListDetallado(message, delta.gastos_mensuales).itemSospechoso
+    ? parseExpenseListDetallado(message, delta.gastos_mensuales, rangoAgregado ? [rangoAgregado] : undefined).itemSospechoso
     : null;
   const camposInvalidos = detectarValoresInvalidos(message);
   const extraction_status = computeExtractionStatus({ huerfanos, discrepancia, itemSospechoso, camposInvalidos });
@@ -1577,6 +1650,14 @@ export function deltaSinGastosPorDiscrepancia(
 export function renderDatosRecienEntendidos(
   delta: Partial<ScenarioState>,
   message: string,
+  /**
+   * MAYOR 6 (QA testdev8) — resultado YA fusionado de una corrección de ítem
+   * (`delta.gastos_item_correccion`): el delta por sí solo no trae el nuevo
+   * total ni si generó conflicto — ambos salen de `mergeScenario`. Opcional:
+   * sin esto, la corrección se sigue enunciando (nombre + importe corregido),
+   * solo sin el total recalculado.
+   */
+  postCorreccion?: { gastosMensualesNuevo?: number; enConflicto?: boolean },
 ): string | null {
   const partes: string[] = [];
   if (delta.ingreso_mensual !== undefined) partes.push(`ingreso mensual: ${delta.ingreso_mensual} €`);
@@ -1603,12 +1684,29 @@ export function renderDatosRecienEntendidos(
     if (delta.meta.monto !== undefined) partes.push(`monto de la meta: ${delta.meta.monto} €`);
     if (delta.meta.plazo_meses !== undefined) partes.push(`plazo de la meta: ${delta.meta.plazo_meses} meses`);
   }
+  // MAYOR 6 (QA testdev8) — "me equivoqué, el ocio son 150" aplicaba el
+  // cambio pero la respuesta NUNCA lo mencionaba: sin esta rama, una
+  // corrección de ítem con `partes` vacío (nada más nuevo este turno) hacía
+  // que la función devolviera `null` — ni una sola frase que la enunciara.
+  if (delta.gastos_item_correccion) {
+    const { name, amount } = delta.gastos_item_correccion;
+    let parte = `corrección: ${name} ahora es ${amount} €`;
+    if (postCorreccion?.gastosMensualesNuevo !== undefined && !postCorreccion.enConflicto) {
+      parte += ` (tus gastos totales pasan a ${postCorreccion.gastosMensualesNuevo} €)`;
+    }
+    partes.push(parte);
+  }
   if (partes.length === 0) return null;
+  const notaCorreccion = delta.gastos_item_correccion
+    ? postCorreccion?.enConflicto
+      ? " Esta es una CORRECCIÓN aceptada: acúsala explícitamente en tu respuesta. Además, el desglose corregido ya NO cuadra con un total que el usuario había declarado antes — díselo con tus propias palabras (el sistema te da los dos valores en conflicto más abajo) y pídele que confirme cuál es el correcto."
+      : " Esta es una CORRECCIÓN aceptada: acúsala explícitamente en tu respuesta (nunca la apliques en silencio)."
+    : "";
   return (
     `DATOS RECIÉN ENTENDIDOS (este turno): ${partes.join("; ")}. ` +
     "Tu PRIMERA línea devuelve esto de forma compacta y natural (con tu propia voz, no copies este " +
     "formato) antes de usar estas cifras — ver la regla de ECO del prompt. Si el usuario corrige un " +
-    "dato, el dato corregido manda. No repitas el eco si ya lo hiciste con los mismos datos."
+    "dato, el dato corregido manda. No repitas el eco si ya lo hiciste con los mismos datos." + notaCorreccion
   );
 }
 
@@ -1702,7 +1800,7 @@ function actualizarFactStatus(
 // desglose, o T1 desglose→T2 agregado — bidireccional, el propio gate).
 
 const CAP_SUPERSEDED = 5; // §8
-const TOLERANCIA_REDONDEO_EUR = 1; // §6
+export const TOLERANCIA_REDONDEO_EUR = 1; // §6
 const MATERIALIDAD_MAX_PCT = 5; // §6
 const INTENTOS_PARA_ESCAPE = 2; // §6
 
@@ -2028,22 +2126,120 @@ export function mergeScenario(
   // auditar cuándo se dijo qué. El turno es 1-indexado y se deriva del máximo
   // ya visto — `extractScenarioDelta`/`toolArgsToScenarioDelta` no conocen el
   // historial, así que dejan `turn: 0` como placeholder.
+  //
+  // BLOQUEANTE 5b (QA testdev8) — "acumula" nunca debió significar "duplica":
+  // sin dedup, un ítem del mismo nombre repetido en un turno posterior
+  // (corrección, re-lectura, segunda entrega del mismo desglose) se sumaba
+  // aparte del original — 11 ítems para 5 categorías reales, la suma de
+  // `gastos_items` ya no cuadraba con `gastos_detalle`. Los duplicados por
+  // NOMBRE normalizado se ARCHIVAN (`superseded: true`, nunca se borran — V7,
+  // mismo principio que `gastos_superseded`); el más reciente gana. Dentro
+  // del propio delta de este turno también se dedup (última ocurrencia gana):
+  // un tool_call no debería repetir nombre, pero es la misma garantía barata.
   if (delta.gastos_items !== undefined && delta.gastos_items.length > 0) {
     const turnoAnterior = base.gastos_items?.reduce((max, i) => Math.max(max, i.turn), 0) ?? 0;
-    const nuevos = delta.gastos_items.map((item) => ({ ...item, turn: turnoAnterior + 1 }));
-    base.gastos_items = [...(base.gastos_items ?? []), ...nuevos];
+    const nuevos = Array.from(
+      new Map(delta.gastos_items.map((item) => [norm(item.name), { ...item, turn: turnoAnterior + 1 }])).values(),
+    );
+    // m1 (revisión AG01, QA testdev8) — PRECEDENCIA tool > regex (encargo
+    // O.5): un ítem nuevo por regex NUNCA sustituye a uno activo que llegó
+    // por tool_call del LLM — el tool_call entiende lenguaje natural mejor
+    // que el fallback determinista, así que ante el mismo nombre, gana.
+    const activosPrevios = new Map(
+      itemsGastoActivos(base.gastos_items).map((i) => [norm(i.name), i] as const),
+    );
+    const nuevosAplicables = nuevos.filter((n) => {
+      const previo = activosPrevios.get(norm(n.name));
+      return !(previo && previo.source === "tool" && n.source === "regex");
+    });
+    const nombresASuperseder = new Set(nuevosAplicables.map((i) => norm(i.name)));
+    const previos = (base.gastos_items ?? []).map((i) =>
+      !i.superseded && nombresASuperseder.has(norm(i.name)) ? { ...i, superseded: true } : i,
+    );
+    base.gastos_items = [...previos, ...nuevosAplicables];
+  }
+
+  // BLOQUEANTE 2 (revisión AG01, QA testdev8) — `reconciliarGastos` calcula el
+  // total del desglose SOLO del delta de ESTE turno, mientras `gastos_items`
+  // acumula entre turnos (BLOQUEANTE 5b): un desglose entregado en dos tandas
+  // con nombres NUEVOS (sin repetir ninguno) dejaba `gastos_mensuales`
+  // reflejando SOLO la última tanda mientras el bloque "TU REALIDAD"
+  // (buildScenarioContext, B4) clasificaba TODOS los ítems acumulados — dos
+  // cifras de gasto incompatibles en el mismo bloque de datos verificados
+  // (V18: el bloque de datos verificados es internamente consistente).
+  //
+  // Cuando la fuente vigente ES el desglose (`gastos_es_detalle`) y NO hay un
+  // conflicto/supuesto activo (`reconciliarGastos` ya decidió que las fuentes
+  // no disputan), el total y los buckets se REDERIVAN de los ítems ACTIVOS ya
+  // acumulados y deduplicados — nunca del delta de un solo turno. Esto NO
+  // cambia si `reconciliarGastos` detecta un conflicto (esa decisión queda
+  // intacta, V2-V7/G1c); solo corrige el valor de REPOSO una vez que ya
+  // determinó que no hay disputa.
+  if (base.gastos_es_detalle && !base.gastos_conflict && !base.gastos_assumed) {
+    const activos = itemsGastoActivos(base.gastos_items);
+    if (activos.length > 0) {
+      const cls = classifyExpenses(activos);
+      base.gastos_detalle = { vitales: cls.vitales.total, noVitales: cls.noVitales.total, desconocidos: cls.desconocidos.total };
+      base.gastos_mensuales = round2(cls.vitales.total + cls.noVitales.total + cls.desconocidos.total);
+    }
   }
 
   // FIX 5 (9ª tanda) — corrección de UNA partida ("la luz son 150"): sustituye
   // solo ese ítem (conserva turno y categoría original salvo el importe) y
   // recalcula buckets/agregado a partir del desglose YA corregido — nunca se
-  // reescribe el resto de partidas.
+  // reescribe el resto de partidas. Opera sobre los ítems ACTIVOS (BLOQUEANTE
+  // 5b) — con duplicados sin filtrar, `classifyExpenses` sumaría cada partida
+  // más de una vez.
+  //
+  // MAYOR 6 (QA testdev8) — si el nuevo total YA NO CUADRA con un agregado que
+  // el usuario había declarado antes por separado (`gastos_agregado_origen`),
+  // la corrección NO se pisa en silencio: se abre el mismo ciclo de conflicto
+  // que usa `reconciliarGastos` (misma tolerancia/materialidad), para que
+  // `notaConflictoGastos` obligue al modelo a señalar la divergencia en vez de
+  // aceptar el nuevo desglose como si el agregado nunca hubiera existido.
   if (delta.gastos_item_correccion && base.gastos_items) {
     const { name, amount } = delta.gastos_item_correccion;
     base.gastos_items = base.gastos_items.map((i) => (i.name === name ? { ...i, amount } : i));
-    const cls = classifyExpenses(base.gastos_items);
-    base.gastos_detalle = { vitales: cls.vitales.total, noVitales: cls.noVitales.total, desconocidos: cls.desconocidos.total };
-    base.gastos_mensuales = round2(cls.vitales.total + cls.noVitales.total + cls.desconocidos.total);
+    const activos = itemsGastoActivos(base.gastos_items);
+    const cls = classifyExpenses(activos);
+    const nuevoTotal = round2(cls.vitales.total + cls.noVitales.total + cls.desconocidos.total);
+    const agregadoDeclarado = base.gastos_agregado_origen?.valor;
+
+    if (agregadoDeclarado !== undefined) {
+      const { diff, diffPct } = calcularMaterialidad(agregadoDeclarado, nuevoTotal);
+      if (Math.abs(diff) > TOLERANCIA_REDONDEO_EUR) {
+        base.gastos_detalle = { vitales: cls.vitales.total, noVitales: cls.noVitales.total, desconocidos: cls.desconocidos.total };
+        base.gastos_detalle_origen = { valor: nuevoTotal, turn: base.turn, completa: true };
+        if (diffPct <= MATERIALIDAD_MAX_PCT) {
+          base.gastos_conflict = {
+            agregado: agregadoDeclarado,
+            agregadoTurn: base.gastos_agregado_origen!.turn,
+            detalle: nuevoTotal,
+            detalleTurn: base.turn,
+            diff,
+            diffPct,
+            attempts: 0,
+            detalleCompleta: true,
+          };
+        } else {
+          // §6 — divergencia >5%: ninguna de las dos cifras queda como verdad.
+          base.gastos_mensuales = undefined;
+          base.gastos_detalle = undefined;
+          base.gastos_es_detalle = undefined;
+          base.gastos_agregado_origen = undefined;
+          base.gastos_detalle_origen = undefined;
+        }
+      } else {
+        base.gastos_detalle = { vitales: cls.vitales.total, noVitales: cls.noVitales.total, desconocidos: cls.desconocidos.total };
+        base.gastos_mensuales = nuevoTotal;
+        base.gastos_agregado_origen = { valor: nuevoTotal, turn: base.turn };
+        base.gastos_detalle_origen = { valor: nuevoTotal, turn: base.turn, completa: true };
+      }
+    } else {
+      base.gastos_detalle = { vitales: cls.vitales.total, noVitales: cls.noVitales.total, desconocidos: cls.desconocidos.total };
+      base.gastos_mensuales = nuevoTotal;
+      base.gastos_detalle_origen = { valor: nuevoTotal, turn: base.turn, completa: true };
+    }
   }
 
   // ── PIEZA 6 — META ACTIVA ÚNICA ─────────────────────────────────────────────
@@ -2149,17 +2345,40 @@ export function mergeScenario(
   // `detalle_confirmado`, ya cableados en `notaConflictoGastos`/
   // `notaDetalleSinConfirmar`/`buildScenarioContext`) — nunca por este flag.
   base.tiene_agregado_gastos = base.gastos_mensuales !== undefined;
-  base.tiene_detalle_gastos = (base.gastos_items?.length ?? 0) > 0;
+  // BLOQUEANTE 5b — cuenta ítems ACTIVOS (deduplicados), no el log completo.
+  base.tiene_detalle_gastos = itemsGastoActivos(base.gastos_items).length > 0;
 
-  // GUARDA DE AUTOCONSISTENCIA — invariante interno: si hay ítems, el flag de
-  // posesión DEBE ser true. Si esto llega a ser false, es un bug (no una
-  // situación válida de negocio) — se loguea como error para que aparezca en
-  // la revisión nocturna, nunca en silencio.
-  if ((base.gastos_items?.length ?? 0) > 0 && !base.tiene_detalle_gastos) {
-    console.error("[autoconsistencia] tiene_detalle_gastos=false con gastos_items no vacío — bug de posesión/usabilidad", JSON.stringify({
-      gastos_items_length: base.gastos_items?.length,
+  // GUARDA DE AUTOCONSISTENCIA — invariante interno: si hay ítems ACTIVOS, el
+  // flag de posesión DEBE ser true. Si esto llega a ser false, es un bug (no
+  // una situación válida de negocio) — se loguea como error para que aparezca
+  // en la revisión nocturna, nunca en silencio.
+  if (itemsGastoActivos(base.gastos_items).length > 0 && !base.tiene_detalle_gastos) {
+    console.error("[autoconsistencia] tiene_detalle_gastos=false con gastos_items activos no vacío — bug de posesión/usabilidad", JSON.stringify({
+      gastos_items_activos: itemsGastoActivos(base.gastos_items).length,
       tiene_detalle_gastos: base.tiene_detalle_gastos,
     }));
+  }
+
+  // BLOQUEANTE 5b — GUARDA DE SANIDAD: la suma de los ítems ACTIVOS debe
+  // coincidir con la suma de `gastos_detalle` (los buckets vitales/no
+  // vitales/desconocidos). Un desajuste aquí indica que la deduplicación dejó
+  // algo suelto, o que `gastos_detalle` se fijó desde una fuente distinta a
+  // `gastos_items` (p. ej. un turno con solo agregado, sin desglose nuevo) —
+  // en ese último caso NO es un bug, así que solo se avisa cuando de verdad
+  // hay ítems activos que comparar. Nunca bloquea el turno: solo se loguea.
+  if (!base.gastos_conflict) {
+    const activos = itemsGastoActivos(base.gastos_items);
+    if (activos.length > 0 && base.gastos_detalle) {
+      const sumaItems = round2(activos.reduce((acc, i) => acc + i.amount, 0));
+      const sumaBuckets = round2(base.gastos_detalle.vitales + base.gastos_detalle.noVitales + base.gastos_detalle.desconocidos);
+      if (Math.abs(sumaItems - sumaBuckets) > TOLERANCIA_REDONDEO_EUR) {
+        console.warn("[gastos_items] suma de ítems activos no coincide con gastos_detalle", JSON.stringify({
+          suma_items_activos: sumaItems,
+          suma_buckets: sumaBuckets,
+          items_activos: activos.length,
+        }));
+      }
+    }
   }
 
   // PIEZA 6 (8ª tanda) — FACT_STATUS: el eco como promotor de confianza. Se
@@ -2411,7 +2630,7 @@ export function notaDetalleSinConfirmar(
   if (!s) return null;
   if (!s.tiene_detalle_gastos || s.detalle_confirmado || s.gastos_conflict) return null;
   if (!pideRecorte(message)) return null;
-  const items = s.gastos_items ?? [];
+  const items = itemsGastoActivos(s.gastos_items);
   const listaItems = items.length > 0 ? items.map((i) => `${i.name}: ${i.amount} €`).join(", ") : null;
   return (
     "El usuario pide un plan de recorte, pero el desglose por partida TODAVÍA NO ESTÁ CONFIRMADO. " +

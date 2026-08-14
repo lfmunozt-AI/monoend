@@ -246,6 +246,7 @@ export async function applyEnforcement(
     esSimulacion,
     mutations,
     raw,
+    userMessage: input.userMessage,
   });
   texto = commandments.texto;
 
