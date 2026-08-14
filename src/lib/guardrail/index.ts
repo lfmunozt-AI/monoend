@@ -79,6 +79,8 @@ export {
   isPercent,
   isTimeUnit,
   conceptsInSentence,
+  conceptosPedidosEnPregunta,
+  cifraPedidaAusente,
   type Moneda,
 } from "./context";
 export { detectInjection, type InjectionResult } from "./injection";

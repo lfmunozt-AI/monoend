@@ -1574,6 +1574,22 @@ export interface AnalisisExtraccion {
 }
 
 /**
+ * MAYOR 3 (revisión AG01, QA testdev8) — el rango que `GASTO_AGREGADO_DETALLE_RE`
+ * reclamó como agregado declarado ("gastos fueron 2 200:"), si lo hay. Sin
+ * excluir este rango, el re-parseo de `analizarExtraccion` (más abajo) lee
+ * "2 200" como si fuera parte del DESGLOSE — el propio agregado, ya asignado
+ * correctamente por `extractScenarioDelta`, se marca a sí mismo como una
+ * cifra "pegada" (`itemSospechoso`) y dispara una AMBIGUOUS/pregunta de
+ * aclaración fantasma sobre un número que el motor ya leyó bien.
+ */
+function rangoAgregadoDeclarado(message: string): Rango | null {
+  const n = norm(message);
+  const m = GASTO_AGREGADO_DETALLE_RE.exec(n);
+  if (!m) return null;
+  return { start: m.index, end: m.index + m[0].length };
+}
+
+/**
  * PIEZA 1 — punto de entrada ÚNICO para analizar la honestidad de la
  * extracción de este turno: corre las cuatro señales (huérfanos,
  * discrepancia, ítem sospechoso de pegado, valores inválidos) y resume el
@@ -1584,8 +1600,13 @@ export interface AnalisisExtraccion {
 export function analizarExtraccion(message: string, delta: Partial<ScenarioState>): AnalisisExtraccion {
   const huerfanos = detectarNumerosHuerfanos(message, delta);
   const discrepancia = detectarDiscrepanciaGastos(delta);
+  // MAYOR 3 — excluye el rango del agregado declarado (si lo hay) del
+  // re-parseo: la misma frontera que `extractScenarioDelta` ya aplicó al
+  // extraer el delta real, para que el detector de pegado juzgue la MISMA
+  // lista que se persiste, no una relectura sin fronteras.
+  const rangoAgregado = rangoAgregadoDeclarado(message);
   const itemSospechoso = delta.gastos_es_detalle
-    ? parseExpenseListDetallado(message, delta.gastos_mensuales).itemSospechoso
+    ? parseExpenseListDetallado(message, delta.gastos_mensuales, rangoAgregado ? [rangoAgregado] : undefined).itemSospechoso
     : null;
   const camposInvalidos = detectarValoresInvalidos(message);
   const extraction_status = computeExtractionStatus({ huerfanos, discrepancia, itemSospechoso, camposInvalidos });
@@ -1779,7 +1800,7 @@ function actualizarFactStatus(
 // desglose, o T1 desglose→T2 agregado — bidireccional, el propio gate).
 
 const CAP_SUPERSEDED = 5; // §8
-const TOLERANCIA_REDONDEO_EUR = 1; // §6
+export const TOLERANCIA_REDONDEO_EUR = 1; // §6
 const MATERIALIDAD_MAX_PCT = 5; // §6
 const INTENTOS_PARA_ESCAPE = 2; // §6
 
@@ -2120,11 +2141,47 @@ export function mergeScenario(
     const nuevos = Array.from(
       new Map(delta.gastos_items.map((item) => [norm(item.name), { ...item, turn: turnoAnterior + 1 }])).values(),
     );
-    const nombresNuevos = new Set(nuevos.map((i) => norm(i.name)));
-    const previos = (base.gastos_items ?? []).map((i) =>
-      !i.superseded && nombresNuevos.has(norm(i.name)) ? { ...i, superseded: true } : i,
+    // m1 (revisión AG01, QA testdev8) — PRECEDENCIA tool > regex (encargo
+    // O.5): un ítem nuevo por regex NUNCA sustituye a uno activo que llegó
+    // por tool_call del LLM — el tool_call entiende lenguaje natural mejor
+    // que el fallback determinista, así que ante el mismo nombre, gana.
+    const activosPrevios = new Map(
+      itemsGastoActivos(base.gastos_items).map((i) => [norm(i.name), i] as const),
     );
-    base.gastos_items = [...previos, ...nuevos];
+    const nuevosAplicables = nuevos.filter((n) => {
+      const previo = activosPrevios.get(norm(n.name));
+      return !(previo && previo.source === "tool" && n.source === "regex");
+    });
+    const nombresASuperseder = new Set(nuevosAplicables.map((i) => norm(i.name)));
+    const previos = (base.gastos_items ?? []).map((i) =>
+      !i.superseded && nombresASuperseder.has(norm(i.name)) ? { ...i, superseded: true } : i,
+    );
+    base.gastos_items = [...previos, ...nuevosAplicables];
+  }
+
+  // BLOQUEANTE 2 (revisión AG01, QA testdev8) — `reconciliarGastos` calcula el
+  // total del desglose SOLO del delta de ESTE turno, mientras `gastos_items`
+  // acumula entre turnos (BLOQUEANTE 5b): un desglose entregado en dos tandas
+  // con nombres NUEVOS (sin repetir ninguno) dejaba `gastos_mensuales`
+  // reflejando SOLO la última tanda mientras el bloque "TU REALIDAD"
+  // (buildScenarioContext, B4) clasificaba TODOS los ítems acumulados — dos
+  // cifras de gasto incompatibles en el mismo bloque de datos verificados
+  // (V18: el bloque de datos verificados es internamente consistente).
+  //
+  // Cuando la fuente vigente ES el desglose (`gastos_es_detalle`) y NO hay un
+  // conflicto/supuesto activo (`reconciliarGastos` ya decidió que las fuentes
+  // no disputan), el total y los buckets se REDERIVAN de los ítems ACTIVOS ya
+  // acumulados y deduplicados — nunca del delta de un solo turno. Esto NO
+  // cambia si `reconciliarGastos` detecta un conflicto (esa decisión queda
+  // intacta, V2-V7/G1c); solo corrige el valor de REPOSO una vez que ya
+  // determinó que no hay disputa.
+  if (base.gastos_es_detalle && !base.gastos_conflict && !base.gastos_assumed) {
+    const activos = itemsGastoActivos(base.gastos_items);
+    if (activos.length > 0) {
+      const cls = classifyExpenses(activos);
+      base.gastos_detalle = { vitales: cls.vitales.total, noVitales: cls.noVitales.total, desconocidos: cls.desconocidos.total };
+      base.gastos_mensuales = round2(cls.vitales.total + cls.noVitales.total + cls.desconocidos.total);
+    }
   }
 
   // FIX 5 (9ª tanda) — corrección de UNA partida ("la luz son 150"): sustituye

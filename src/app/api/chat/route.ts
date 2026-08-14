@@ -9,8 +9,7 @@ import {
   classifyTurn,
   esTonoEmocional,
   getEnforcementMode,
-  conceptsInSentence,
-  findNumberMentions,
+  cifraPedidaAusente,
 } from '@/lib/guardrail'
 import { buildScenarioContext } from '@/lib/calculator/orchestrator'
 import {
@@ -805,18 +804,15 @@ export async function POST(request: Request) {
   // BLOQUEANTE 1/2 (QA testdev8) — CIFRA PEDIDA AUSENTE. El usuario preguntó
   // por un concepto financiero identificable (gastos, ingreso, sobrante,
   // cuota, capacidad, brecha…) que el motor SÍ calculó, y la respuesta final
-  // no la contiene con ningún valor. Mandamiento 10 (commandments.ts) ya
-  // revierte al RAW cuando una capa de enforcement fue la que la borró; esto
-  // cubre el otro origen del MISMO síntoma — el propio modelo respondió con la
-  // cifra EQUIVOCADA desde el origen (p. ej. dio el sobrante cuando
-  // preguntaron por el total de gastos): revertir al raw no arregla nada
-  // porque el raw ya estaba mal. Reintento acotado, mismo patrón que el de
-  // arriba: se le dice explícitamente qué preguntó y qué cifra usar.
+  // no la contiene con ningún valor. El Mandamiento 10 (commandments.ts) ya
+  // repara la anáfora sin antecedente cuando la hay; esto cubre el resto de
+  // formas del MISMO síntoma — p. ej. el propio modelo respondió con la
+  // cifra EQUIVOCADA desde el origen (dio el sobrante cuando preguntaron por
+  // el total de gastos), sin anáfora que reparar. `cifraPedidaAusente` es la
+  // MISMA función pura que usa el Mandamiento 10 (guardrail/context.ts) —
+  // un solo criterio, testeado sin mock de LLM (revisión AG01, hallazgo m3).
   if (carril !== 'META' && finalContent.trim() !== '') {
-    const conceptosPedidos = conceptsInSentence(cleanMessage).filter((c) => c in verified.conceptos)
-    const cifraAusente = conceptosPedidos.length > 0 && !conceptosPedidos.some((c) =>
-      findNumberMentions(finalContent).some((m) => Math.abs(m.value - verified.conceptos[c]) <= 0.01),
-    )
+    const { ausente: cifraAusente, conceptosPedidos } = cifraPedidaAusente(cleanMessage, finalContent, verified.conceptos)
     if (cifraAusente) {
       const cifrasPedidas = conceptosPedidos.map((c) => `${c} = ${verified.conceptos[c]}`).join(', ')
       console.warn('[chat] cifra_pedida_ausente', JSON.stringify({

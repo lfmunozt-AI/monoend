@@ -12,7 +12,7 @@
 // Contrato: pura, nunca lanza, idempotente (aplicarla dos veces da el mismo
 // resultado). Código PURO, edge-safe, SIN llamadas a ningún LLM.
 
-import { segmentSentences, splitSentences, conceptsInSentence, hasReferenceMarker, isPercent, isTimeUnit } from "./context";
+import { segmentSentences, splitSentences, conceptsInSentence, cifraPedidaAusente, hasReferenceMarker, isPercent, isTimeUnit } from "./context";
 import {
   cleanup,
   endsWithRequestOrProposal,
@@ -357,49 +357,76 @@ function esPlanFantasma(text: string, raw: string | undefined): boolean {
 // QA real (testdev8): "¿cuánto me queda al mes?" ×3 produjo, en el tercer
 // turno, una respuesta cuyo enforcement había eliminado el sobrante (250 €),
 // dejando un demostrativo huérfano ("Esa es tu capacidad real para destinar a
-// ahorro...") sin ningún número al que "esa" pudiera referirse. Si la
-// PREGUNTA del usuario pide un concepto financiero identificable
-// (`conceptsInSentence`, guardrail/context.ts) que el motor SÍ calculó, ese
-// número no puede desaparecer del texto final. Y si, pase lo que pase, el
-// texto queda con una anáfora sin antecedente numérico en su propia frase, es
-// una respuesta rota — se revierte al RAW (mismo mecanismo que M9: el
-// registro de mutaciones ya demuestra que algo cambió, así que hay a qué
-// volver). Si el RAW tampoco traía la cifra o la misma anáfora huérfana,
-// revertir no arregla nada — no se activa.
+// ahorro...") sin ningún número al que "esa" pudiera referirse.
+//
+// REDISEÑO (revisión AG01, bloqueante 1) — la primera versión revertía al
+// RAW: texto SIN VALIDAR. Si el RAW traía la cifra pedida en la MISMA frase
+// que otra cifra inventada ("Te quedan 250 € al mes aunque arrastras un
+// déficit de 9500 €"), M10 resucitaba TAMBIÉN la inventada — anulando el
+// Mandamiento 3 con G1b (cifras no trazables) vigente y bloqueante de piloto.
+// V17 (propuesta por esa revisión): "ninguna capa de reparación puede
+// reintroducir una cifra que una capa anterior eliminó por falta de
+// respaldo". M10 NUNCA vuelve al RAW: opera exclusivamente sobre el texto YA
+// VALIDADO (`out`), frase a frase, y solo puede escribir una cifra que ya
+// esté en `conceptos` (verificada por el motor, nunca por el LLM — V5).
+//
+// Por cada frase con una anáfora sin antecedente numérico:
+//   (a) el concepto que pidió el usuario (`conceptosPedidosEnPregunta`, tabla
+//       EXCLUSIVA de pregunta — nunca la de grounding de salida, ver M3/M4 de
+//       la misma revisión) SÍ está en `conceptos` y aún no aparece en NINGÚN
+//       lugar del texto → la anáfora se SUSTITUYE por esa cifra verificada,
+//       en sitio.
+//   (b) no hay ningún concepto verificado al que la anáfora pueda
+//       corresponder → la frase se ELIMINA (mismo criterio que el
+//       Mandamiento 3: sin respaldo, no se publica — nunca se revive
+//       contenido del RAW).
+// Si tras esto la respuesta queda sin sustancia, es tarea de `ensureSubstance`
+// / el reintento acotado de route.ts (que comparte `cifraPedidaAusente` con
+// este módulo) — nunca de M10 resucitar el RAW.
 const ANAFORA_SIN_ANTECEDENTE_RE = /\b(esa|ese|esta|este|esto|eso)\s+(cifra|cantidad|monto|numero|valor)\b|\beso\b/i;
 
-/** ¿Alguna frase de `text` usa un demostrativo/anáfora sin ningún número en la misma frase? */
-function tieneAnaforaSinAntecedente(text: string): boolean {
-  return segmentSentences(text).some(
-    (seg) => ANAFORA_SIN_ANTECEDENTE_RE.test(seg.text) && !/\d/.test(seg.text),
-  );
+function esNum(n: number): string {
+  return String(n).replace(".", ",");
 }
 
-/** ¿`text` NO contiene, con ningún número, el concepto que el usuario pidió (y el motor sí calculó)? */
-function cifraPedidaFueEliminada(
-  userMessage: string,
+/** ¿La frase usa un demostrativo/anáfora sin ningún número en sí misma? */
+function fraseConAnaforaSinAntecedente(sentence: string): boolean {
+  return ANAFORA_SIN_ANTECEDENTE_RE.test(sentence) && !/\d/.test(sentence);
+}
+
+/**
+ * Repara las anáforas sin antecedente de `text` frase a frase, SOBRE EL
+ * TEXTO YA VALIDADO — nunca sobre el raw. Solo puede insertar una cifra que
+ * ya viva en `conceptos`; si no hay ninguna disponible, la frase se elimina.
+ */
+function repararAnaforasSinAntecedente(
   text: string,
-  conceptos: Record<string, number>,
-): boolean {
-  const conocidos = conceptsInSentence(userMessage).filter((c) => c in conceptos);
-  if (conocidos.length === 0) return false;
-  const cifras = findNumberMentions(text);
-  return !conocidos.some((c) => cifras.some((m) => Math.abs(m.value - conceptos[c]) <= 0.01));
-}
-
-/** ¿`text` es una respuesta ROTA respecto a `raw` — cifra pedida ausente o anáfora huérfana — Y `raw` no tenía el mismo problema? */
-function esRespuestaRotaCifraPedida(
   userMessage: string | undefined,
-  text: string,
-  raw: string | undefined,
   conceptos: Record<string, number>,
-): boolean {
-  if (!userMessage || raw === undefined || raw === text) return false;
-  const rotaAhora = cifraPedidaFueEliminada(userMessage, text, conceptos) || tieneAnaforaSinAntecedente(text);
-  if (!rotaAhora) return false;
-  const rawTeniaLoQueHaceFalta =
-    !cifraPedidaFueEliminada(userMessage, raw, conceptos) && !tieneAnaforaSinAntecedente(raw);
-  return rawTeniaLoQueHaceFalta;
+): { texto: string; corregido: boolean } {
+  if (!userMessage) return { texto: text, corregido: false };
+  const { ausente, conceptosPedidos } = cifraPedidaAusente(userMessage, text, conceptos);
+  // Sin nada pedido y verificado que reinsertar, solo cabe la eliminación (b)
+  // — pero si además la cifra pedida YA está en el texto (`!ausente`), el
+  // concepto elegible para sustituir la anáfora ya cumplió su papel en otra
+  // frase: tampoco hay nada que reinsertar aquí, se elimina si aparece.
+  const concepto = ausente ? conceptosPedidos.find((c) => c in conceptos) : undefined;
+
+  let corregido = false;
+  const partes: string[] = [];
+  for (const seg of segmentSentences(text)) {
+    if (!fraseConAnaforaSinAntecedente(seg.text)) {
+      partes.push(seg.text);
+      continue;
+    }
+    corregido = true;
+    if (concepto !== undefined) {
+      // (a) — sustituye la anáfora por la cifra verificada, en sitio.
+      partes.push(seg.text.replace(ANAFORA_SIN_ANTECEDENTE_RE, `${esNum(conceptos[concepto])} €`));
+    }
+    // (b) — sin concepto verificado al que anclarla: la frase se descarta.
+  }
+  return { texto: cleanup(partes.join("")), corregido };
 }
 
 /**
@@ -520,22 +547,16 @@ export function enforceCommandments(
     }
 
     // Mandamiento 10 — ÚLTIMO de todos: corre incluso después de M9, sobre lo
-    // que M9 haya dejado. Revierte al texto ORIGINAL del modelo con el mismo
-    // criterio (M4/M5/M1 reaplicados sobre el raw).
-    if (esRespuestaRotaCifraPedida(ctx.userMessage, out, ctx.raw, ctx.conceptos)) {
-      const before = out;
-      let revertido = ctx.raw as string;
-      const leakRaw = stripProviderLeaks(revertido);
-      if (leakRaw.corregido) revertido = leakRaw.texto;
-      if (isDelegativeClosing(revertido)) revertido = stripDelegativeClosing(revertido);
-      const closingRaw = maxOneClosingQuestion(revertido, ctx.missing);
-      if (closingRaw.corregido) revertido = closingRaw.texto;
-      out = revertido;
-      anotar(10, "cifra pedida eliminada o anáfora sin antecedente — revertido al original", before, out);
+    // que M9 haya dejado. NUNCA vuelve al raw (V17) — repara la anáfora en
+    // sitio con una cifra verificada, o elimina la frase sin respaldo.
+    const anafora = repararAnaforasSinAntecedente(out, ctx.userMessage, ctx.conceptos);
+    if (anafora.corregido) {
+      anotar(10, "anáfora sin antecedente — cifra verificada reinsertada o frase eliminada", out, anafora.texto);
+      out = anafora.texto;
       violaciones.push({
         mandamiento: 10,
         accion: "corregido",
-        detalle: "la cifra que pidió el usuario fue eliminada, o quedó una referencia sin antecedente — revertido al texto original",
+        detalle: "anáfora sin antecedente numérico: cifra verificada reinsertada, o frase sin respaldo eliminada",
       });
     }
   }

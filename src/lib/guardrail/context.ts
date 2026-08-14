@@ -2,7 +2,7 @@
 // tiempo, marcador de referencia y etiqueta por proximidad. Código PURO,
 // compartido por las piezas 1 y 2.
 
-import type { NumberMention } from "./numbers";
+import { findNumberMentions, type NumberMention } from "./numbers";
 
 /** Moneda/contexto normalizado de una cifra. `null` = no determinado. */
 export type Moneda = "EUR" | "USD" | "pesos" | "%" | "$" | null;
@@ -206,11 +206,7 @@ const CONCEPT_KEYWORDS: [RegExp, string][] = [
   // FIX 4 (7ª tanda) — "te sobra 200€" (verbo SOBRAR) faltaba: solo el
   // sustantivo "sobrante" estaba cubierto, así que "sobra" caía sin concepto
   // y el 200 (correcto) se mis-atribuía al concepto vecino más cercano.
-  // MANDAMIENTO 10 (QA testdev8) — "¿cuánto me queda al mes?" es la forma
-  // NATURAL de preguntar por el sobrante; sin "queda/quedan" el concepto no se
-  // reconocía en la PREGUNTA del usuario y el guardarraíl no podía exigir que
-  // la respuesta trajera la cifra pedida.
-  [/\b(sobrante|sobra|sobran|excedente|surplus|left ?over|queda|quedan)\b/, "sobrante"],
+  [/\b(sobrante|sobra|sobran|excedente|surplus|left ?over)\b/, "sobrante"],
   [/\b(recorte|corte|cut)\b/, "recorte"],
   [/\b(capacidad (?:de ahorro )?anual|capacidad anual|annual capacity|yearly (?:savings|capacity))\b/, "capacidad_anual"],
   // FIX 3 (7ª tanda) — "ingresas"/"ingresa" (verbo INGRESAR, distinto de
@@ -240,6 +236,55 @@ export function conceptsInSentence(sentence: string): string[] {
     if (re.test(n) && !out.includes(concepto)) out.push(concepto);
   }
   return out;
+}
+
+// ── MAYOR 3/4 (revisión AG01, QA testdev8) — concepto de la PREGUNTA ────────
+//
+// CAUSA — la primera versión añadió "queda|quedan" directamente a
+// CONCEPT_KEYWORDS para que "¿cuánto me queda al mes?" reconociera el
+// sobrante. Pero CONCEPT_KEYWORDS también alimenta el GROUNDING DE SALIDA
+// (validate.ts, commandments.ts, policy.ts): "queda"/"quedan" es un verbo
+// demasiado genérico y también aparece en frases correctas de la RESPUESTA
+// que no hablan de sobrante ("Te queda un saldo pendiente de 30000 €") — esas
+// frases se borraban enteras por "no coincidir con sobrante". FIX: una tabla
+// EXTRA, separada, anclada a 1ª/2ª persona + periodicidad mensual, que SOLO
+// se usa para leer la PREGUNTA del usuario — nunca se mezcla con
+// CONCEPT_KEYWORDS ni se usa para el grounding de la respuesta.
+const PREGUNTA_KEYWORDS_EXTRA: [RegExp, string][] = [
+  [/\b(?:me|te|nos)\s+quedan?\b[^.!?]{0,40}\b(?:al\s+mes|mensual(?:es)?|por\s+mes|libres?)\b/, "sobrante"],
+  [/\bcu[aá]nto\s+(?:me|te|nos)\s+queda\b/, "sobrante"],
+];
+
+/**
+ * Conceptos financieros que la PREGUNTA del usuario pide — superset de
+ * `conceptsInSentence` con anclas EXCLUSIVAS de pregunta (jamás usadas para
+ * el grounding de una respuesta). Úsese solo sobre `userMessage`.
+ */
+export function conceptosPedidosEnPregunta(message: string): string[] {
+  const base = conceptsInSentence(message);
+  const n = norm(message);
+  const extra = PREGUNTA_KEYWORDS_EXTRA.filter(([re]) => re.test(n)).map(([, c]) => c);
+  return [...new Set([...base, ...extra])];
+}
+
+/**
+ * BLOQUEANTE 1/2 (QA testdev8) — ¿el concepto que pidió `userMessage` (y que
+ * el motor SÍ calculó, está en `conceptos`) sigue ausente de `text` con
+ * cualquier valor? Función PURA compartida: la usa el reintento de route.ts
+ * (regenera vía LLM) y el Mandamiento 10 (repara la anáfora sin volver al
+ * RAW) — un solo lugar, un solo criterio, y directamente testeable sin mock
+ * de LLM (revisión AG01, hallazgo m3: "tests que son grep, no comportamiento").
+ */
+export function cifraPedidaAusente(
+  userMessage: string,
+  text: string,
+  conceptos: Record<string, number>,
+): { ausente: boolean; conceptosPedidos: string[] } {
+  const conceptosPedidos = conceptosPedidosEnPregunta(userMessage).filter((c) => c in conceptos);
+  if (conceptosPedidos.length === 0) return { ausente: false, conceptosPedidos: [] };
+  const cifras = findNumberMentions(text);
+  const ausente = !conceptosPedidos.some((c) => cifras.some((m) => Math.abs(m.value - conceptos[c]) <= 0.01));
+  return { ausente, conceptosPedidos };
 }
 
 /**

@@ -7,6 +7,8 @@ import assert from "node:assert/strict";
 
 import { enforceCommandments, type CommandmentContext } from "./commandments";
 import type { Mutation } from "./policy";
+import { applyEnforcement } from "./pipeline";
+import { cifraPedidaAusente, conceptsInSentence, conceptosPedidosEnPregunta } from "./context";
 
 function ctx(overrides: Partial<CommandmentContext> = {}): CommandmentContext {
   return {
@@ -232,43 +234,121 @@ test("idempotencia: caso del déficit fantasma también es idempotente", () => {
   assert.equal(once.texto, twice.texto);
 });
 
-// ── Mandamiento 10 (QA testdev8) — LA CIFRA PEDIDA NUNCA SE BORRA ────────────
-test("Mandamiento 10: cifra pedida ('¿cuánto me queda al mes?' → sobrante) eliminada por una capa anterior → revierte al RAW", () => {
-  const raw = "Te quedan 250 € al mes libres para ahorro o pago de deudas.";
-  const trasEnforcement = "Esa es tu capacidad real para destinar a ahorro o pago de deudas.";
-  const r = enforceCommandments(
-    trasEnforcement,
-    ctx({ conceptos: { sobrante: 250 }, userMessage: "¿cuánto me queda al mes?", raw }),
+// ── Mandamiento 10 (QA testdev8, REDISEÑADO tras revisión AG01 — bloqueante 1) ─
+//
+// La primera versión revertía al RAW (texto sin validar) y podía resucitar
+// una cifra inventada que el Mandamiento 3 había eliminado con razón —
+// violaba G1b. El rediseño NUNCA vuelve al raw: repara la anáfora en sitio
+// con una cifra de `conceptos` (verificada), o elimina la frase sin
+// respaldo. Los cuatro tests obligatorios de la revisión, TODOS con el
+// pipeline completo (`applyEnforcement`, no `enforceCommandments` aislado) y
+// pasando `userMessage`/`raw` como hace `pipeline.ts:249` en producción —
+// invocar sin esos dos argumentos es exactamente el "test que no prueba
+// nada" que la revisión señaló como defecto (V11, cuarto caso de la serie).
+
+test("Mandamiento 10 · OBLIGATORIO 1 — regresión del déficit fantasma CON el pipeline completo: NO republica el déficit inventado", async () => {
+  const userMessage = "¿cuánto me queda al mes?";
+  const conceptos = { sobrante: 250 }; // SIN 'deficit' — el motor nunca lo calculó
+  const raw = "Te quedan 250 € al mes aunque arrastras un déficit de 9500 € que hay que cerrar.";
+  const r = await applyEnforcement(raw, {
+    userMessage,
+    carril: "FINANCIERO",
+    lang: "es",
+    missing: [],
+    valores: [250],
+    conceptos,
+    esSimulacion: false,
+  });
+  assert.ok(!r.texto.includes("9500") && !r.texto.includes("9.500"), `el déficit fantasma NUNCA se publica: ${r.texto}`);
+  // La cifra pedida (250) no la reconstruye M10 aquí — la frase entera cayó
+  // por la contradicción de signo (grounding), sin anáfora que reparar. Esa
+  // es justamente la señal que dispara el reintento acotado de route.ts
+  // (`cifraPedidaAusente`, la MISMA función que usa M10): se prueba aquí,
+  // en frío, que la señal es correcta — sin necesitar mock de LLM.
+  const seguimiento = cifraPedidaAusente(userMessage, r.texto, conceptos);
+  assert.equal(seguimiento.ausente, true, "el sistema SABE que aún falta publicar el sobrante");
+  assert.deepEqual(seguimiento.conceptosPedidos, ["sobrante"]);
+});
+
+test("Mandamiento 10 · OBLIGATORIO 2 — anáfora cuya cifra SÍ está en conceptos → reinsertada (nunca la cifra ausente/inventada)", async () => {
+  const r = await applyEnforcement(
+    "Te quedan 250 € al mes y podrías ahorrar 9.999 € al año sin esfuerzo. Eso te deja margen.",
+    {
+      userMessage: "¿cuánto me queda al mes?",
+      carril: "FINANCIERO",
+      lang: "es",
+      missing: [],
+      valores: [250],
+      conceptos: { sobrante: 250 },
+      esSimulacion: false,
+    },
   );
-  assert.ok(r.texto.includes("250"), "la cifra pedida vuelve a aparecer");
+  assert.ok(r.texto.includes("250"), `la cifra verificada se reinserta: ${r.texto}`);
+  assert.ok(!r.texto.includes("9.999") && !r.texto.includes("9999"), `la cifra inventada NUNCA se publica: ${r.texto}`);
   assert.ok(r.violaciones.some((v) => v.mandamiento === 10));
 });
 
-test("Mandamiento 10: la respuesta YA trae la cifra pedida → no interviene", () => {
-  const raw = "Te quedan 250 € al mes.";
-  const texto = "Te quedan 250 € al mes, así que puedes destinarlos a tu meta.";
-  const r = enforceCommandments(
-    texto,
-    ctx({ conceptos: { sobrante: 250 }, userMessage: "¿cuánto me queda al mes?", raw }),
-  );
-  assert.equal(r.texto, texto);
-  assert.ok(!r.violaciones.some((v) => v.mandamiento === 10));
+test("Mandamiento 10 · OBLIGATORIO 3 — anáfora cuya cifra NO está en conceptos → la frase se ELIMINA (nunca se inventa)", async () => {
+  const r = await applyEnforcement("Con ese monto podrás cerrar tu meta antes de lo previsto.", {
+    userMessage: "¿cuál es mi situación?",
+    carril: "FINANCIERO",
+    lang: "es",
+    missing: [],
+    valores: [],
+    conceptos: {},
+    esSimulacion: false,
+  });
+  assert.ok(!/\bese\s+monto\b/i.test(r.texto), "la anáfora sin respaldo no sobrevive");
+  assert.ok(!/\d/.test(r.texto), "ninguna cifra inventada se cuela en su lugar");
 });
 
-test("Mandamiento 10: si el RAW tampoco traía la cifra pedida, no revierte (no hay nada útil a lo que volver)", () => {
-  const raw = "Tu situación financiera es estable este mes.";
-  const texto = "Esa cifra es la que necesitas para tu meta.";
-  const r = enforceCommandments(
-    texto,
-    ctx({ conceptos: { sobrante: 250 }, userMessage: "¿cuánto me queda al mes?", raw }),
-  );
-  assert.equal(r.texto, texto, "no revierte: el raw tampoco tenía la cifra ni resolvía la anáfora");
+test("Mandamiento 10 · OBLIGATORIO 4 — regresión del Mandamiento 3 CON el pipeline completo: sigue bloqueando el concepto sin cálculo", async () => {
+  const r = await applyEnforcement("Tienes un déficit mensual de 9500 €. ¿Confirmamos el plan?", {
+    userMessage: "¿tengo déficit?",
+    carril: "FINANCIERO",
+    lang: "es",
+    missing: [],
+    valores: [10000, 9500, 500],
+    conceptos: { ingreso: 10000, gastos: 9500, sobrante: 500 },
+    esSimulacion: false,
+  });
+  assert.ok(!r.texto.includes("9500") && !r.texto.includes("9.500"), `M3 sigue bloqueando el déficit fantasma: ${r.texto}`);
 });
 
 test("Mandamiento 10: sin userMessage no hay nada que comprobar — nunca se activa", () => {
-  const raw = "Te quedan 250 € al mes.";
-  const texto = "Esa es tu capacidad real.";
-  const r = enforceCommandments(texto, ctx({ conceptos: { sobrante: 250 }, raw }));
+  const texto = "Eso te deja margen.";
+  const r = enforceCommandments(texto, ctx({ conceptos: { sobrante: 250 } }));
   assert.equal(r.texto, texto);
   assert.ok(!r.violaciones.some((v) => v.mandamiento === 10));
+});
+
+// ── MAYOR 4 (revisión AG01, QA testdev8) — "queda/quedan" NUNCA en el ──────
+// grounding de SALIDA (CONCEPT_KEYWORDS); solo en la tabla exclusiva de
+// PREGUNTA (conceptosPedidosEnPregunta, guardrail/context.ts).
+test("MAYOR 4: 'Te queda un saldo pendiente de 30000 € y te quedan 250 € al mes.' sobrevive intacta (antes se borraba entera)", () => {
+  const texto = "Te queda un saldo pendiente de 30000 € y te quedan 250 € al mes.";
+  const r = enforceCommandments(
+    texto,
+    ctx({ conceptos: { ingreso: 2500, gastos: 2250, sobrante: 250, cuota: 881.25, plazo: 48, monto: 30000 } }),
+  );
+  assert.equal(r.texto, texto, "los 30.000 € son 'monto', un concepto verificado — la frase es correcta");
+  assert.deepEqual(r.violaciones, []);
+});
+
+test("MAYOR 4: 'queda/quedan' NO está en conceptsInSentence (grounding de salida) pero SÍ en conceptosPedidosEnPregunta (lectura de pregunta)", () => {
+  assert.deepEqual(
+    conceptsInSentence("Te quedan 250 € al mes."),
+    [],
+    "el grounding de SALIDA no debe reconocer 'quedan' — rompía frases legítimas de la respuesta",
+  );
+  assert.deepEqual(conceptosPedidosEnPregunta("¿cuánto me queda al mes?"), ["sobrante"]);
+  assert.deepEqual(conceptosPedidosEnPregunta("¿cuánto tengo de gastos?").sort(), ["gastos"]);
+  assert.deepEqual(
+    cifraPedidaAusente("¿cuánto me queda al mes?", "Tomo nota. Seguimos con tu plan.", { sobrante: 250 }),
+    { ausente: true, conceptosPedidos: ["sobrante"] },
+  );
+  assert.deepEqual(
+    cifraPedidaAusente("¿cuánto me queda al mes?", "Te quedan 250 € libres este mes.", { sobrante: 250 }),
+    { ausente: false, conceptosPedidos: ["sobrante"] },
+  );
 });

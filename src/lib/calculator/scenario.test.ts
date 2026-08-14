@@ -2176,3 +2176,79 @@ test("BLOQUEANTE 3: la cuota se recalcula del estado persistido aunque el mensaj
     `cuota esperada ~881.25 (30.000€ a 48 meses, TAE 18%), obtuvo ${ctx.conceptos.cuota}`,
   );
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Revisión adversarial AG01 sobre la tanda QA testdev8 — bloqueante 2, mayor 3, m1
+// ═══════════════════════════════════════════════════════════════════════════
+
+test("BLOQUEANTE 2 (revisión AG01): T1 lista parcial → T2 lista parcial con nombres nuevos → suma(items activos) == suma(buckets) == gastos_mensuales", () => {
+  let s = mergeScenario({}, extractScenarioDelta("gano 3000, arriendo 900, comida 500"));
+  s = mergeScenario(s, extractScenarioDelta("luz 100, internet 50", "es", s));
+
+  const activos = itemsGastoActivos(s.gastos_items);
+  const sumaItems = activos.reduce((acc, i) => acc + i.amount, 0);
+  const sumaBuckets = (s.gastos_detalle?.vitales ?? 0) + (s.gastos_detalle?.noVitales ?? 0) + (s.gastos_detalle?.desconocidos ?? 0);
+
+  assert.equal(sumaItems, 1550, "4 partidas acumuladas: 900+500+100+50");
+  assert.equal(sumaBuckets, 1550, "los buckets reflejan TODOS los ítems acumulados, no solo el último turno");
+  assert.equal(s.gastos_mensuales, 1550, "gastos_mensuales ya no se queda en 150 (solo T2)");
+
+  // El bloque que ve el modelo no puede contradecirse: sobrante correcto.
+  const ctxV = buildScenarioContext(s, "luz 100, internet 50");
+  assert.ok(ctxV.bloque.includes("gastos_mensuales: 1550"));
+  assert.ok(ctxV.bloque.includes("sobrante_mensual: 1450"), "sobrante real: 3000 - 1550, nunca 2850");
+  assert.ok(!ctxV.bloque.includes("gastos_mensuales: 150"), "la cifra vieja e incoherente no sobrevive");
+});
+
+test("MAYOR 3 (revisión AG01): el mensaje del bloqueante 5 ya NO produce una pregunta de aclaración fantasma", () => {
+  const msg = "mis gastos fueron 2 200: arriendo 900, comida 500, luz 400, internet 300, ocio 100";
+  const delta = extractScenarioDelta(msg);
+  const analisis = analizarExtraccion(msg, delta);
+  assert.equal(analisis.extraction_status, "COMPLETE", "sin fronteras, el re-parseo marcaba '2 200' como pegado consigo mismo");
+  assert.equal(analisis.itemSospechoso, null);
+});
+
+test("MAYOR 3 (revisión AG01): 'gasto unos 2 000 al mes: alquiler 1000, comida 600, transporte 400' → COMPLETE", () => {
+  const msg = "gasto unos 2 000 al mes: alquiler 1000, comida 600, transporte 400";
+  const delta = extractScenarioDelta(msg);
+  const analisis = analizarExtraccion(msg, delta);
+  assert.equal(analisis.extraction_status, "COMPLETE");
+  assert.equal(analisis.itemSospechoso, null);
+});
+
+test("m1 (revisión AG01): precedencia tool > regex en la dedup de gastos_items", () => {
+  let s = mergeScenario(
+    {},
+    toolArgsToScenarioDelta({
+      gastos_detalle: [
+        { nombre: "ocio", monto: 150 },
+        { nombre: "casa", monto: 900 },
+      ],
+    }),
+  );
+  let activos = itemsGastoActivos(s.gastos_items);
+  assert.equal(activos.find((i) => i.name === "ocio")?.amount, 150);
+  assert.equal(activos.find((i) => i.name === "ocio")?.source, "tool");
+
+  // T2 por regex intenta pisar los mismos nombres con otros importes.
+  s = mergeScenario(s, extractScenarioDelta("ocio 100, casa 900"));
+  activos = itemsGastoActivos(s.gastos_items);
+  assert.equal(activos.length, 2, "sigue habiendo 2 categorías activas, el regex no añadió duplicados");
+  assert.equal(activos.find((i) => i.name === "ocio")?.amount, 150, "el tool_call previo GANA — el regex no lo sustituye");
+  assert.equal(activos.find((i) => i.name === "ocio")?.source, "tool");
+});
+
+test("m1 (revisión AG01): un tool_call posterior SÍ sustituye a un ítem previo por tool o por regex", () => {
+  let s = mergeScenario({}, extractScenarioDelta("ocio 100, casa 900"));
+  let activos = itemsGastoActivos(s.gastos_items);
+  assert.equal(activos.find((i) => i.name === "ocio")?.amount, 100);
+
+  s = mergeScenario(
+    s,
+    toolArgsToScenarioDelta({ gastos_detalle: [{ nombre: "ocio", monto: 150 }, { nombre: "casa", monto: 900 }] }),
+  );
+  activos = itemsGastoActivos(s.gastos_items);
+  assert.equal(activos.length, 2);
+  assert.equal(activos.find((i) => i.name === "ocio")?.amount, 150, "tool SÍ sustituye a un regex previo");
+  assert.equal(activos.find((i) => i.name === "ocio")?.source, "tool");
+});

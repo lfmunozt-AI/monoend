@@ -76,8 +76,7 @@ test("BLOQUEANTE 3/4: la LLAMADA 1 recibe las derivadas recalculadas del estado 
 
 test("BLOQUEANTE 1/2: reintento acotado cuando la cifra pedida por el usuario está ausente de la respuesta", () => {
   const src = leerRoute();
-  assert.match(src, /conceptsInSentence\(cleanMessage\)/);
-  assert.match(src, /cifraAusente/);
+  assert.match(src, /cifraPedidaAusente\(cleanMessage, finalContent, verified\.conceptos\)/);
 });
 
 test("MAYOR 7: se detecta la repetición del MENSAJE del usuario, no solo de la respuesta", () => {
