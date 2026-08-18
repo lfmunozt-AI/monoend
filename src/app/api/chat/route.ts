@@ -804,13 +804,14 @@ export async function POST(request: Request) {
   // BLOQUEANTE 1/2 (QA testdev8) — CIFRA PEDIDA AUSENTE. El usuario preguntó
   // por un concepto financiero identificable (gastos, ingreso, sobrante,
   // cuota, capacidad, brecha…) que el motor SÍ calculó, y la respuesta final
-  // no la contiene con ningún valor. El Mandamiento 10 (commandments.ts) ya
-  // repara la anáfora sin antecedente cuando la hay; esto cubre el resto de
-  // formas del MISMO síntoma — p. ej. el propio modelo respondió con la
-  // cifra EQUIVOCADA desde el origen (dio el sobrante cuando preguntaron por
-  // el total de gastos), sin anáfora que reparar. `cifraPedidaAusente` es la
-  // MISMA función pura que usa el Mandamiento 10 (guardrail/context.ts) —
-  // un solo criterio, testeado sin mock de LLM (revisión AG01, hallazgo m3).
+  // no la contiene con ningún valor. V18 — el Mandamiento 10 (commandments.ts)
+  // es un SENSOR, nunca edita: solo detecta y loguea la misma condición. Esta
+  // es la ÚNICA vía real de corrección — el modelo redacta, nunca una capa
+  // determinista. Cubre cualquier forma del síntoma: una anáfora huérfana, o
+  // el modelo respondiendo con la cifra EQUIVOCADA desde el origen (dio el
+  // sobrante cuando preguntaron por el total de gastos). `cifraPedidaAusente`
+  // es la MISMA función pura que usa el Mandamiento 10 para detectar
+  // (guardrail/context.ts) — un solo criterio, testeado sin mock de LLM.
   if (carril !== 'META' && finalContent.trim() !== '') {
     const { ausente: cifraAusente, conceptosPedidos } = cifraPedidaAusente(cleanMessage, finalContent, verified.conceptos)
     if (cifraAusente) {
