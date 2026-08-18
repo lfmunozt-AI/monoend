@@ -11,6 +11,7 @@ import {
   esConfirmacionCorta,
   esPropuestaDePlan,
   esRespuestaRepetida,
+  esEstructuraRepetida,
   actualizarDigresiones,
   notaRetornoMeta,
   notaSinCifrasDePlan,
@@ -231,9 +232,14 @@ test("BUG 3: crédito de carro sin meta → meta derivada (título, monto, plazo
   assert.ok(!s.missing.includes("plazo") || s.credito?.plazo_meses === 36, "el plazo ya lo trae el crédito");
 });
 
-test("BUG 3: sin objeto reconocible en el mensaje → título genérico 'compra financiada'", () => {
+// ACTUALIZADO (follow-up, tono/jerga interna QA testdev10) — "compra
+// financiada" era el título genérico que se filtraba tal cual a la salida
+// del modelo ("Tu meta activa es una compra financiada"). Ya no se inventa
+// un título de relleno: sin objeto reconocible, `titulo` queda SIN VALOR
+// (el monto/plazo siguen ahí; el modelo nombra la meta con su propia voz).
+test("BUG 3: sin objeto reconocible en el mensaje → SIN título de relleno (nunca 'compra financiada')", () => {
   const s = mergeScenario(undefined, extractScenarioDelta("Quiero financiar 30000 a 36 meses."));
-  assert.equal(s.meta?.titulo, "compra financiada");
+  assert.equal(s.meta?.titulo, undefined);
   assert.equal(s.meta?.monto, 30000);
 });
 
@@ -352,6 +358,25 @@ test("esRespuestaRepetida: sin respuesta anterior → false (nada que comparar)"
   assert.equal(esRespuestaRepetida("Cualquier cosa.", undefined), false);
 });
 
+// ── esEstructuraRepetida (MAYOR, tono, QA testdev10) — caso real: la misma
+// construcción de apertura 4 veces con cifras distintas cada vez.
+test("esEstructuraRepetida: misma apertura, cifras distintas → true (esRespuestaRepetida NO lo cazaría)", () => {
+  const anterior = "Reducir a la mitad el ocio liberaría 75 €, dejando una capacidad de 375 €.";
+  const actual = "Reducir a la mitad el transporte liberaría 40 €, dejando una capacidad de 290 €.";
+  assert.equal(esRespuestaRepetida(actual, anterior), false, "texto crudo, con cifras distintas, cae bajo el 90%");
+  assert.equal(esEstructuraRepetida(actual, anterior), true, "misma construcción de apertura, normalizando dígitos");
+});
+
+test("esEstructuraRepetida: aperturas distintas → false", () => {
+  const anterior = "Reducir a la mitad el ocio liberaría 75 €, dejando una capacidad de 375 €.";
+  const actual = "Con tu ritmo actual, la meta se atrasa 3 meses — no es motivo para abandonarla.";
+  assert.equal(esEstructuraRepetida(actual, anterior), false);
+});
+
+test("esEstructuraRepetida: sin respuesta anterior → false", () => {
+  assert.equal(esEstructuraRepetida("Cualquier cosa.", undefined), false);
+});
+
 // ── PIEZA 6 — META ACTIVA ÚNICA CON TRANSICIÓN EXPLÍCITA ─────────────────────
 //
 // Diseño de Luis: la meta activa es UNA. Se cierra al confirmar el plan; se
@@ -458,7 +483,10 @@ test("PIEZA 7: la nota de reconducción aparece al 3.º turno fuera, no antes", 
 
   const nota = notaRetornoMeta({ ...activa, digresiones_seguidas: 3 });
   assert.ok(nota, "al tercero se reconduce");
-  assert.match(nota!, /3 turnos fuera de la meta activa 'Carro'/);
+  // ACTUALIZADO (follow-up, tono/jerga interna QA testdev10) — el aviso ya
+  // no usa la frase "meta activa" (prohibida en la salida, ver
+  // consigliere.ts); el título de la meta va solo, sin la etiqueta.
+  assert.match(nota!, /3 turnos fuera de 'Carro'/);
   assert.match(nota!, /reconduce con naturalidad/);
 });
 
