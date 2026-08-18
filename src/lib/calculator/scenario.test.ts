@@ -2340,3 +2340,87 @@ test("MENOR §8: gastos_items respeta el cap de 5 versiones por partida — el a
   assert.ok(versionesDeCasa.length <= 5, `'casa' también respeta el cap: ${versionesDeCasa.length}`);
   assert.equal(itemsGastoActivos(s.gastos_items).find((it) => it.name === "casa")?.amount, 900);
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// P1 (follow-up ronda 4) — LA ESTRUCTURA ES EL ANCLA, SIN REQUERIR KEYWORD.
+// `GASTO_CTX` deja de ser requisito de `detectarAgregadoEstructural`: una
+// cifra + ":" + lista real de ≥2 partidas ES el agregado, con o sin verbo de
+// gasto reconocido. 12 fraseos: los 7 del diagnóstico + 5 nuevos, uno de
+// ellos SIN ninguna palabra de gasto.
+// ═══════════════════════════════════════════════════════════════════════════
+
+const CASOS_AGREGADO_SIN_KEYWORD: Array<[string, number]> = [
+  // Los 7 del diagnóstico de esta tanda
+  ["gastando 1200 al mes: internet 300, agua 400, gas 500", 1200],
+  ["mis desembolsos son 1200: internet 300, agua 400, gas 500", 1200],
+  ["mis salidas mensuales 1200: internet 300, agua 400, gas 500", 1200],
+  ["pago 1200 en total: internet 300, agua 400, gas 500", 1200],
+  ["se me van 1200: internet 300, agua 400, gas 500", 1200],
+  ["presupuesto mensual 1200: internet 300, agua 400, gas 500", 1200],
+  ["mis gastos fueron 1200: internet 300, agua 400, gas 500", 1200],
+  // 5 fraseos NUEVOS — el primero SIN ninguna palabra de gasto en absoluto.
+  ["1200: internet 300, agua 400, gas 500", 1200],
+  ["estoy gastando 1300 mensuales: renta 700, comida 400, transporte 200", 1300],
+  ["he acabado gastando 1600 este mes: hipoteca 900, super 450, gasolina 250", 1600],
+  ["gastándome 1600 al mes: hipoteca 900, super 450, gasolina 250", 1600],
+  ["mis egresos son 1600: hipoteca 900, super 450, gasolina 250", 1600],
+];
+
+for (const [msg, esperado] of CASOS_AGREGADO_SIN_KEYWORD) {
+  test(`P1 sin ancla léxica: "${msg}" → agregado ${esperado}, 3 ítems, CONSISTENT`, () => {
+    const delta = extractScenarioDelta(msg);
+    assert.equal(delta.gastos_mensuales, esperado);
+    assert.equal(delta.gastos_items?.length, 3);
+    const suma = delta.gastos_items!.reduce((acc, i) => acc + i.amount, 0);
+    assert.equal(suma, esperado, "suma de ítems = agregado — nunca el doble (sin señal de duda)");
+    const analisis = analizarExtraccion(msg, delta);
+    assert.equal(analisis.extraction_status, "COMPLETE");
+  });
+}
+
+test("P1: REGRESIÓN — dos listas seguidas ('vitales: ... . no vitales: ...') NUNCA inventan un agregado cruzado", () => {
+  // Caso real atrapado por test:regression (escenario deficit_detalle_manda):
+  // el punto entre "comida 2000." y "no vitales:" no lleva mayúscula
+  // después — `segmentSentences` (numeric-safe pero exige mayúscula tras el
+  // punto) no lo reconocía como límite, y el "2000" de "comida" se colaba
+  // como agregado de "no vitales:", duplicando el gasto. El límite de
+  // cláusula de esta función es más simple y NO exige mayúscula.
+  const msg = "vitales: alquiler 2000, seguro 1000, comida 2000. no vitales: ocio 3000, ropa 1000, gimnasio 2000";
+  const delta = extractScenarioDelta(msg);
+  assert.equal(delta.gastos_mensuales, undefined, "ni 'vitales:' ni 'no vitales:' tienen una cifra propia que declarar");
+  assert.equal(delta.gastos_items?.length, 6, "las 6 partidas de ambas listas se conservan igual");
+  assert.equal(delta.gastos_items?.reduce((a, i) => a + i.amount, 0), 11000);
+});
+
+test("P1: regresión — 'gasto 2 500 €' sigue dando 2500 (sin ':', sin lista — no pasa por la regla estructural)", () => {
+  const delta = extractScenarioDelta("gasto 2 500 €");
+  assert.equal(delta.gastos_mensuales, 2500);
+});
+
+test("P1: regresión — una lista SIN cifra previa ('internet 300, agua 400') sigue siendo solo detalle, sin agregado inventado", () => {
+  const delta = extractScenarioDelta("internet 300, agua 400");
+  assert.equal(delta.gastos_mensuales, undefined);
+  assert.equal(delta.gastos_items?.length, 2);
+});
+
+test("P1: regresión — las 15 partidas de testdev7 (sin ':') no se ven afectadas por la regla estructural", () => {
+  const delta = extractScenarioDelta(MENSAJE_REAL_TESTDEV7_SCENARIO);
+  assert.equal(delta.gastos_es_detalle, true);
+  const s = mergeScenario(undefined, delta);
+  assert.equal(s.gastos_items?.length, 15);
+  assert.equal(s.gastos_items?.reduce((a, i) => a + i.amount, 0), 2250);
+});
+
+test("P1: regresión — G1c bidireccional (agregado→detalle y detalle→agregado) da el MISMO conflicto", () => {
+  let s1 = mergeScenario({}, extractScenarioDelta("mis gastos son 2200"));
+  s1 = mergeScenario(s1, extractScenarioDelta("arriendo 900, comida 500, luz 400, internet 300, ocio 150", "es", s1));
+  assert.ok(s1.gastos_conflict, "T1 agregado → T2 detalle: conflicto detectado");
+  assert.equal(s1.gastos_conflict?.agregado, 2200);
+  assert.equal(s1.gastos_conflict?.detalle, 2250);
+
+  let s2 = mergeScenario({}, extractScenarioDelta("arriendo 900, comida 500, luz 400, internet 300, ocio 150"));
+  s2 = mergeScenario(s2, extractScenarioDelta("mis gastos son 2200", "es", s2));
+  assert.ok(s2.gastos_conflict, "T1 detalle → T2 agregado: conflicto detectado (bidireccional)");
+  assert.equal(s2.gastos_conflict?.agregado, 2200);
+  assert.equal(s2.gastos_conflict?.detalle, 2250);
+});

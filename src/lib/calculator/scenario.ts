@@ -621,34 +621,85 @@ const GASTO_AGREGADO_DETALLE_RE = new RegExp(
 // forma una lista real, esta función no se dispara). `CONECTOR_DECLARATIVO`/
 // `GASTO_AGREGADO_DETALLE_RE` quedan como RESPALDO — el llamante los prueba
 // después, no antes.
+//
+// FIX P1 (ronda 4, revisión adversarial) — la primera versión seguía
+// exigiendo `GASTO_CTX.exec(n)` como ANCLA obligatoria antes de buscar el
+// ":". Cualquier forma verbal fuera de esa lista cerrada (gerundio
+// "gastando", participio compuesto, sinónimos nominales "desembolsos",
+// "egresos", "salidas"…) hacía que la función devolviera `null` sin más,
+// cayendo al parser de listas y duplicando el gasto real — el mismo defecto
+// que esta regla existe para cerrar, solo que el punto único de fallo subió
+// de "conector" a "keyword". Medido: "estoy gastando 1300 mensuales: renta
+// 700, comida 400, transporte 200" → 2600 € `COMPLETE` (el doble, sin ninguna
+// señal de duda).
+//
+// LA ESTRUCTURA ES EVIDENCIA SUFICIENTE POR SÍ SOLA — ninguna otra
+// construcción del idioma tiene la forma "cifra + ':' + ≥2 partidas con
+// importe propio". `GASTO_CTX` deja de ser requisito: si aparece en la
+// misma cláusula, es refuerzo (confirma), pero su ausencia NUNCA bloquea la
+// detección.
+//
+// BOUNDING — probado primero con `segmentSentences` (el segmentador
+// numeric-safe del guardarraíl) y descartado: exige mayúscula tras el punto
+// para reconocer un límite de frase, y texto real de usuario no la respeta
+// ("vitales: alquiler 2000, seguro 1000, comida 2000. no vitales: ocio 3000,
+// ropa 1000, gimnasio 2000" — la "n" minúscula de "no" hacía que las DOS
+// mitades se leyeran como una sola frase, y el "2000" de "comida" se colaba
+// como agregado de "no vitales:", duplicando el gasto — regresión real,
+// atrapada por `test:regression`). `ultimoLimiteDeClausula` es más simple y
+// deliberadamente NO exige mayúscula: cualquier ".", "!" o "?" que no esté
+// entre dígitos (no corta "1.200") cierra la cláusula anterior, sin importar
+// qué letra siga. Nunca cruza a una cláusula previa no relacionada ("Mi
+// ingreso es 3000. Gastos: internet 300, agua 400." jamás debe leer 3000
+// como el agregado de gastos), y dentro de dos listas seguidas en el mismo
+// mensaje ("vitales: ...armony. no vitales: ...") cada ":" solo ve su propia
+// cláusula.
+function ultimoLimiteDeClausula(text: string, hastaIdx: number): number {
+  for (let i = hastaIdx - 1; i >= 0; i--) {
+    const ch = text[i];
+    if (ch === "\n") return i + 1;
+    if (ch === "." || ch === "!" || ch === "?") {
+      const antes = text[i - 1] ?? "";
+      const despues = text[i + 1] ?? "";
+      if (/\d/.test(antes) && /\d/.test(despues)) continue; // "1.200" — no corta.
+      return i + 1;
+    }
+  }
+  return 0;
+}
+
 function detectarAgregadoEstructural(
   message: string,
   n: string,
 ): { agregado: number; rango: Rango; restoDesdeColon: string } | null {
-  const kw = GASTO_CTX.exec(n);
-  if (!kw) return null;
-
   const colonRe = /:/g;
-  colonRe.lastIndex = kw.index;
   let colonMatch: RegExpExecArray | null;
   while ((colonMatch = colonRe.exec(n)) !== null) {
     const colonIdx = colonMatch.index;
-    // La cifra es el ÚLTIMO número entre la keyword y este ":" — el más
-    // cercano al ":" es el candidato natural (duraciones/plazos mencionados
-    // antes, "en los últimos 3 meses gasté 1200:", quedan descartados por
-    // sí solos: "3" no es el último número del tramo).
-    const tramo = n.slice(kw.index, colonIdx);
+    // La cláusula que contiene el ":" acota dónde buscar la cifra — es la
+    // única frontera necesaria; ninguna keyword de gasto es requisito.
+    const inicioClausula = ultimoLimiteDeClausula(n, colonIdx);
+    // La cifra es el ÚLTIMO número entre el inicio de la cláusula y este
+    // ":" — el más cercano al ":" es el candidato natural (duraciones/
+    // plazos mencionados antes, "en los últimos 3 meses gasté 1200:",
+    // quedan descartados por sí solos: "3" no es el último número del
+    // tramo).
+    const tramo = n.slice(inicioClausula, colonIdx);
     const numeros = [...tramo.matchAll(new RegExp(AMOUNT.source, "g"))];
     if (numeros.length === 0) continue;
     const agregado = parseDigitAmount(numeros[numeros.length - 1][0]);
     if (!Number.isFinite(agregado) || agregado <= 0) continue;
 
     // Estructura confirmada SOLO si lo que sigue a ":" es una lista real de
-    // ≥2 partidas — el propio parseo es el validador, no una suposición.
+    // ≥2 partidas — el propio parseo es el validador, no una suposición. Si
+    // la cifra no coincide con la suma de la lista, no es un bug de esta
+    // función: es el caso de conflicto normal (G1c/reconciliarGastos), que
+    // ya sabe resolverlo — no doble conteo, porque el rango de la cifra
+    // queda reclamado y el parser de listas nunca vuelve a leerla.
     const restoDesdeColon = message.slice(colonIdx + 1);
     if (parseExpenseList(restoDesdeColon).length < 2) continue;
 
-    return { agregado, rango: { start: kw.index, end: colonIdx + 1 }, restoDesdeColon };
+    return { agregado, rango: { start: inicioClausula, end: colonIdx + 1 }, restoDesdeColon };
   }
   return null;
 }
