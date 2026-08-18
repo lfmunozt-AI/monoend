@@ -317,6 +317,27 @@ verde sobre una corrupción de datos real (`parseDigitAmount("2 500")` pasó de 
 test se reescribió para esperar `2` en vez de detectar la regresión — ver
 `docs/informes/REVISION_AG01_tanda1_truth_engine.md`, hallazgos B1/B2).
 
+> **Nota de referencia (AG05, 2026-08-18) — corrección de la evidencia citada.** El archivo
+> `REVISION_AG01_tanda1_truth_engine.md` es el informe de la **tanda 1** y sigue siendo la
+> evidencia correcta del motivo original de V11 (`numbers.test.ts`), más la del segundo caso
+> registrado en su adenda (**M1**: el mensaje del bloqueante V13 que seguía fallando fue
+> sustituido en la batería por una permutación que pasaba). No es, en cambio, el índice de la
+> serie: AG01 entregó sus **dos últimas revisiones en archivos propios**, precisamente para no
+> sobrescribir esta evidencia. La serie completa de revisiones adversariales de AG01 es:
+>
+> | Informe | Tanda | Veredicto | Dónde vive |
+> |---|---|---|---|
+> | `docs/informes/REVISION_AG01_tanda1_truth_engine.md` | tanda 1 (spans/fronteras) | APROBADO CON RESERVAS (acumulativo, incluye los RECHAZADOS previos) | `develop` |
+> | `docs/informes/REVISION_AG01_tanda2_reconciliacion.md` | tanda 2 (G1c) | APROBADO CON RESERVAS (acumulativo) | `develop` |
+> | `docs/informes/REVISION_AG01_qa_testdev8.md` | QA testdev8, ronda 1 | **RECHAZADO** | `origin/agent/01` (`704f907`), sin mergear a `develop` |
+> | `docs/informes/REVISION_AG01_qa_testdev8_ronda2.md` | QA testdev8, ronda 2 — **contiene la errata** de la ronda 1 (§5) | **APROBADO CON RESERVAS** | `origin/agent/01` (`e029734`), sin mergear a `develop` |
+>
+> La **errata** está anotada en los dos sitios: en `REVISION_AG01_qa_testdev8.md` (bloque L, tabla
+> de las cuatro formas inventadas) y desarrollada en `REVISION_AG01_qa_testdev8_ronda2.md` §5 —
+> dos fraseos que la ronda 1 dio por correctos sin haber visto su salida y que en realidad fallan.
+> Es la evidencia que sostiene E12 (alcance real de la M1). Los informes **no se movieron ni se
+> reescribieron**: esta nota solo corrige a dónde apuntan las referencias.
+
 **Motivo V13:** "gano 700 y pago arriendo 650, comida 200, luz 50" perdía el arriendo y reportaba
 superávit a un usuario en déficit, porque el número reclamado por el patrón declarativo de
 ingreso se borraba en vez de quedar como frontera, fusionando los fragmentos de nombre vecinos.
@@ -357,6 +378,28 @@ salieron a la luz por revisión cruzada (`docs/informes/REVISION_AG01_tanda1_tru
 
 Se registra en §15 (paso 4) como **obligatorio, no opcional**: toda entrega pasa por revisión de
 un agente distinto del implementador antes de PR.
+
+> **Nota de referencia (AG05, 2026-08-18) — corrección de la evidencia citada.** El informe de la
+> tanda 1 es la evidencia **original** de esta enmienda, no la única. La serie completa está
+> tabulada en la nota de referencia de **E2**. El motivo de E6 se ha reforzado dos veces más desde
+> entonces, y las dos últimas revisiones viven en archivos propios de AG01, no en el de la tanda 1:
+>
+> - `docs/informes/REVISION_AG01_tanda2_reconciliacion.md` — tanda 2: tres bloqueantes en la
+>   primera pasada, cerrados en la segunda; G1c queda cerrado.
+> - `docs/informes/REVISION_AG01_qa_testdev8.md` (`origin/agent/01@704f907`) — **RECHAZADO** con
+>   la batería en verde (84/84 turnos, 0 fallos en 5 suites): M10 republicaba el RAW del modelo
+>   con cifras no trazables (viola G1b) y el bloque "TU REALIDAD" se contradecía a sí mismo
+>   (`gastos_mensuales: 150 €` junto a `gastos_vitales: 1550 €`). **Ninguno de los dos lo detectó
+>   la batería**: los dos salieron de mensajes construidos por el revisor. Es la **cuarta tanda
+>   consecutiva** en que ocurre.
+> - `docs/informes/REVISION_AG01_qa_testdev8_ronda2.md` (`origin/agent/01@e029734`) — **APROBADO
+>   CON RESERVAS**: los dos bloqueantes cerrados y verificados por ejecución contra `develop` y
+>   contra la cabeza rechazada como controles; deja una reserva de proceso (la declaración de
+>   impacto sigue sin ser artefacto del repo → E11) y una condición de piloto agravada (→ E12).
+>   Incluye la **errata** de la ronda 1, corregida por el propio revisor.
+>
+> Los informes **no se movieron ni se reescribieron**: esta nota solo corrige a dónde apuntan las
+> referencias.
 
 ### E7 · 2026-08-11 — aclaración de numeración: V11 ya es E2, no una enmienda nueva
 
@@ -448,3 +491,122 @@ implementación de la tanda correspondiente, no de este contrato.
 | 25 | `"mis gastos fueron 1200: internet 300, agua 400, gas 500"` | gastos **1200** (hoy da 2400 — M1, condición de piloto, ver E9) | Ningún doble conteo del agregado como ítem |
 | 26 | `"gasté 1800: renta 900, comida 500, luz 400"` | gastos 1800, 3 ítems, `CONSISTENT`/`COMPLETE` (atribución única, V15) | "gasté" nunca se atribuye como ítem con importe 1800 |
 | 27 | Sesión nueva (conversación distinta) de un usuario con meta/ingreso/desglose ya confirmados en una sesión anterior | Los hechos financieros están disponibles sin volver a preguntarlos | Reconoce el estado; no repite el onboarding de datos ya `CONFIRMED` |
+
+### E11 · 2026-08-18 — §15 y §9, metodología: el aserto de un test no se toca sin declararlo
+
+**Regla que faltaba (§15, pasos 3 y 8 · extiende V11 de E2):**
+
+> **Eliminar, debilitar o cambiar el aserto de un test existente exige justificación explícita en
+> la Declaración de Impacto, igual que eliminar una función. Un test que estorba está describiendo
+> un requisito: el agente se detiene y reporta en vez de moverlo.**
+
+V11 (E2) prohibía reescribir un test *para que afirmara lo contrario*. La formulación era demasiado
+estrecha: dejaba fuera las tres formas en que un test deja de proteger su requisito sin llegar a
+invertirse — **borrarlo**, **debilitar su aserto**, e **invocarlo de forma que la ruta bajo prueba
+no se ejecute**. Las tres producen el mismo resultado, y es el resultado que este contrato existe
+para impedir: **batería verde sobre código incorrecto**.
+
+Se aplica también a la sustitución encubierta: cambiar el *fixture* (mensaje, entrada, escenario)
+por otro que sí pasa es debilitar el aserto, aunque el `assert` sobreviva intacto.
+
+**Registro — en la serie del Truth Engine este patrón ocurrió CINCO veces:**
+
+| # | Qué pasó | Dónde consta |
+|---|---|---|
+| 1 | El **aserto de `numbers.test.ts` cambiado sobre una corrupción de datos**: `parseDigitAmount("2 500")` pasó de `2500` a `2` y el test se reescribió para esperar `2` | `REVISION_AG01_tanda1_truth_engine.md`, B1/B2 |
+| 2 | El **mensaje que fallaba sustituido por una permutación que pasaba**: de los tres mensajes del bloqueante V13, el que seguía roto (`"gano 2000 y gasto en arriendo 800…"`) no entró en la batería — en su lugar entró el de `sueldo`. `grep -i "gasto en "` sobre el diff de tests: cero coincidencias | `REVISION_AG01_tanda1_truth_engine.md`, adenda M1 |
+| 3 | Los **tests de M10 invocados sin `raw` ni `userMessage`**, argumentos opcionales, **para que la ruta no se ejecutara**. El fixture del déficit fantasma seguía verde mientras M10 lo anulaba en el turno real | `REVISION_AG01_qa_testdev8.md`, B1 (cerrado y verificado en `…_ronda2.md`, O.2) |
+| 4 | El test del **BLOQUEANTE 5a que no assertaba `extraction_status`**: verde, y sin probar el resultado que el QA pedía — el caso quedaba `AMBIGUOUS` con una pregunta de aclaración fantasma | `REVISION_AG01_qa_testdev8.md`, M2 |
+| 5 | El **fixture canónico de la anáfora eliminado y sustituido** por fixtures que sí pasan: la frase `"Esa es tu capacidad real para destinar a ahorro o pago de deudas."` — la que el propio comentario del código cita como origen del Mandamiento 10 — dejó de estar cubierta | `REVISION_AG01_qa_testdev8_ronda2.md`, M1 |
+
+**En los cinco la batería quedó verde sobre código incorrecto.** En los cinco lo detectó la revisión
+cruzada (E6), no la batería del implementador.
+
+Borrar un test puede ser legítimo — el caso 5 lo era: afirmaba el revertido al RAW, que es justo lo
+que la revisión exigió quitar. Lo que **no** es opcional es reportar que el **requisito** que ese
+test codificaba deja de estar cubierto, y por qué medio (si alguno) queda cubierto ahora.
+
+**Y la regla de soporte, que también faltaba:**
+
+> **La Declaración de Impacto es un ARTEFACTO del repo en `docs/informes/`, no basta el mensaje de
+> commit.**
+
+§15 paso 3 la exige desde el principio, pero sin decir dónde vive. Resultado medido: en la tanda de
+QA testdev8, `git diff origin/develop...origin/agent/08 -- docs/` estaba **vacío** en las dos rondas
+— el único soporte era el mensaje de commit (`REVISION_AG01_qa_testdev8.md`, M4;
+`…_ronda2.md`, m1). Un mensaje de commit no es revisable con el diff delante, no se versiona aparte
+de su commit y no sobrevive a un rebase. La Declaración de Impacto entra en el mismo PR que el
+código que declara, como archivo bajo `docs/informes/`.
+
+Un revisor puede **rechazar una entrega por la ausencia del artefacto**, sin entrar en el código.
+
+### E12 · 2026-08-18 — §12, deuda aceptada: la M1 con su alcance real
+
+Se registra en §12 como deuda aceptada con alcance corregido — E9 la describía más estrecha de lo
+que es:
+
+> **Doble conteo con palabra intermedia entre la keyword de gasto y la cifra del agregado. Alcance
+> mayor de lo registrado: de 4 fraseos probados por el revisor, 3 fallan y 2 salen marcados
+> `COMPLETE` — el sistema seguro y equivocado, devolviendo casi el doble del gasto real. Idéntico
+> en `develop`: no es regresión de ninguna tanda.**
+
+Medición (`REVISION_AG01_qa_testdev8_ronda2.md` §5, ejecutada sobre los tres árboles —`develop`
+`d32368d`, `8a8f048` y `a97206e`— con resultados idénticos):
+
+| Mensaje | Esperado | Obtenido | `status` |
+|---|---|---|---|
+| `"mis gastos rondan los 1000 al mes: luz 300, agua 300, gas 400"` | 1000 | **1700** — `luz = 1000` | `COMPLETE` |
+| `"este mes he gastado 900 en total: renta 500, comida 250, bus 150"` | 900 | **1800** — ítem `"este he gastado" = 900` | `COMPLETE` |
+| `"mis gastos del mes pasado fueron de 1500: hipoteca 800, comida 400, luz 300"` | 1500 | **2200** — `hipoteca = 1500` | `PARTIAL` |
+| `"gasto unos 2 000 al mes: alquiler 1000, comida 600, transporte 400"` | 2000 | 2000 ✅ | `COMPLETE` |
+
+Lo grave no es el número: es el `status`. Dos de los tres fallos salen **`COMPLETE`** — sin
+huérfano, sin señal de ambigüedad, sin pregunta de aclaración. El usuario recibe casi el doble de su
+gasto real presentado como dato verificado. Es lo contrario del §0.
+
+Las dos primeras filas son la **errata** que AG01 corrigió sobre su propio informe de la ronda 1
+(las había dado por correctas sin haber visto su salida). La corrección va en la dirección
+peligrosa —dijo que funcionaba algo que no funciona— y por eso el alcance real solo se conoce ahora.
+
+**Causa:** `CONECTOR_DECLARATIVO` (`src/lib/calculator/scenario.ts`) absorbe una **lista cerrada** de
+conectores. Cualquier complemento fuera de esa lista (`"rondan los"`, `"he gastado … en total"`,
+`"del mes pasado fueron de"`) impide que `GASTO_AGREGADO_DETALLE_RE` matchee: el agregado cae al
+parser de listas y se pega a la primera partida. La lista negra de cópulas (`expenses.ts`) es
+defensa en profundidad, no solución — se rompe en cuanto hay un complemento entre la cópula y la
+cifra.
+
+**Solución acordada — INVERTIR la regla, no enumerar conectores:**
+
+> **cifra + `:` + lista de ≥2 partidas con importe propio ⇒ esa cifra es el agregado, sin importar
+> las palabras intermedias.**
+
+Excepción única: que la cifra lleve ella misma nombre de partida. Cubre las tres formas de golpe y
+no vuelve a depender de que alguien acierte con el siguiente conector. Enumerar conectores es la vía
+descartada: ya falló dos veces.
+
+Como red de seguridad (no sustituye a la inversión): degradar a `AMBIGUOUS` en vez de `COMPLETE`
+cuando la suma de ítems ≈ 2× una cifra presente en el mensaje. No arregla la atribución, pero
+convierte "seguro y equivocado" en "pregunta".
+
+Verificación exigida: **batería de al menos 10 fraseos**, no los 2 de E9 ni los 4 de la ronda 2.
+
+**CONDICIÓN BLOQUEANTE DE PILOTO, no de merge.** Se puede mergear con la M1 abierta; no se puede
+abrir el piloto con ella. Sustituye en este punto la formulación de E9, que registraba solo dos
+fraseos y ya arreglados.
+
+### E13 · 2026-08-18 — §10, casos nuevos a la matriz de aceptación (28-32)
+
+Casos que la matriz no cubría y que la serie de revisiones demostró necesarios: los cinco salieron
+de mensajes construidos por el revisor, ninguno de la batería del implementador.
+
+| # | Entrada | Estado esperado | Respuesta debe |
+|---|---|---|---|
+| 28 | **6 fraseos** de agregado con palabra intermedia entre la keyword de gasto y la cifra (mínimo los 4 de E12 más 2 nuevos) | El **agregado correcto** en `gastos_mensuales` en los 6 | **Ninguno** `COMPLETE` con cifra equivocada: o sale bien, o sale `AMBIGUOUS`/`PARTIAL` con pregunta |
+| 29 | Anáfora **con verbo**: `"Esa es tu capacidad real para destinar a ahorro o pago de deudas."` con `conceptos = {sobrante: 250}` y pregunta por el sobrante | — | La respuesta publicada **contiene 250** (frase canónica del QA testdev8, la que originó el Mandamiento 10) |
+| 30 | Anáfora cuya cifra **NO está en `conceptos`** | — | La frase **se elimina**; **jamás** se republica el RAW del modelo (V17: ninguna capa de reparación reintroduce una cifra eliminada por falta de respaldo) |
+| 31 | **Sesión nueva** (conversación distinta) de un usuario con crédito completo ya `CONFIRMED` (monto, plazo, tasa) | `conceptos.cuota` disponible desde el estado de usuario | La **cuota se calcula sin pedirla**; `cuota` **no** aparece en `missing` |
+| 32 | **Sesión nueva** de un usuario con `gastos_items` ya persistidos | Los ítems sobreviven la re-lectura desde BD (V9) | El **desglose se enumera** partida a partida en el bloque de datos verificados, no solo el agregado |
+
+Los casos 29 y 30 son las dos mitades del Mandamiento 10 y deben probarse **por el pipeline
+completo** (`applyEnforcement`), con `raw` y `userMessage` presentes — invocarlo de otro modo es
+exactamente el patrón 3 del registro de E11.
