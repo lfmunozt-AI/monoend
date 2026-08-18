@@ -2447,9 +2447,15 @@ test("Compuerta 2: 'quiero una casa de 150000: arriendo 900, comida 500' — 150
   assert.equal(s.gastos_items?.length, 2);
 });
 
-test("Compuerta 2: 'a 48 meses: cuota 900, seguro 50' — 48 reclamado por el plazo bare (V19: plazo SÍ se persiste)", () => {
+// ACTUALIZADO (follow-up, crédito fantasma) — esta aserción decía
+// `s.credito?.plazo_meses === 48`: exactamente el defecto que esta misma
+// tanda corrige (un plazo suelto sin crédito real NO debe persistir). El
+// resto del test (Compuerta 2 protege a "cuota" de la mala atribución) sigue
+// vigente igual — ver también la cobertura dedicada del fix en
+// "crédito fantasma: 'a 48 meses: ...'" más abajo.
+test("Compuerta 2: 'a 48 meses: cuota 900, seguro 50' — el plazo reclama su rango como frontera de lista, pero ya NO crea crédito fantasma", () => {
   const s = mergeScenario({}, extractScenarioDelta("a 48 meses: cuota 900, seguro 50"));
-  assert.equal(s.credito?.plazo_meses, 48);
+  assert.equal(s.credito, undefined, "un plazo suelto sin crédito real no se persiste (fix crédito fantasma)");
   assert.equal(s.gastos_mensuales, 950);
   assert.equal(s.gastos_items?.length, 2);
   const cuota = s.gastos_items?.find((i) => i.name === "cuota");
@@ -2486,7 +2492,10 @@ test("V19: una lista SIN cifra previa ('internet 300, agua 400, gas 500') → ga
 const CASOS_NUEVOS_ARITMETICA: Array<[string, Partial<{ gastos: number; ingreso: number; metaMonto: number; metaPlazo: number; plazo: number; items: number }>]> = [
   ["sueldo 2500, alquiler 950: comida 600, ocio 200", { gastos: 1750, ingreso: 2500, items: 3 }],
   ["el objetivo es 80000: colegio 400, transporte 300", { gastos: 700, metaMonto: 80000, items: 2 }],
-  ["en 24 meses: cuota 500, mantenimiento 80", { gastos: 580, plazo: 24, items: 2 }], // sin palabra de gasto
+  // ACTUALIZADO (follow-up, crédito fantasma) — `plazo: 24` se retira de la
+  // expectativa: un plazo suelto sin crédito real ya no se persiste (ver
+  // "crédito fantasma: 'a 48 meses: ...'" para la cobertura dedicada).
+  ["en 24 meses: cuota 500, mantenimiento 80", { gastos: 580, items: 2 }], // sin palabra de gasto
   ["cobro 1800, luz 300: agua 150, internet 100", { gastos: 550, ingreso: 1800, items: 3 }],
   ["2500: renta 1200, comida 700, transporte 300, ocio 300", { gastos: 2500, items: 4 }], // sin palabra de gasto
   ["mi meta es 90000 a 60 meses: hipoteca 700, seguro 100", { gastos: 800, metaMonto: 90000, metaPlazo: 60, items: 2 }],
@@ -2511,4 +2520,67 @@ test("regresión: dedup del mensaje de testdev8 sigue en 5 ítems (no 11), suma 
   assert.equal(delta.gastos_mensuales, 2200);
   assert.equal(delta.gastos_items?.length, 5);
   assert.equal(delta.gastos_items?.reduce((a, i) => a + i.amount, 0), 2200);
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Follow-up (crédito fantasma) — un plazo suelto NUNCA crea `credito` por sí
+// solo. Solo completa un crédito que YA EXISTE (monto en este mensaje o en
+// el estado persistido); si no, queda como número huérfano relevante (V14)
+// y `extraction_status` degrada a PARTIAL, en vez de inventar un crédito.
+// ═══════════════════════════════════════════════════════════════════════════
+
+test("crédito fantasma: 'a 48 meses: cuota 900, seguro 50' — credito NULL, gastos 950, 48 huérfano relevante", () => {
+  const delta = extractScenarioDelta("a 48 meses: cuota 900, seguro 50");
+  assert.equal(delta.credito, undefined, "sin monto ni contexto de crédito, no se crea el objeto");
+  const s = mergeScenario({}, delta);
+  assert.equal(s.credito, undefined);
+  assert.equal(s.gastos_mensuales, 950);
+  const cuota = s.gastos_items?.find((i) => i.name === "cuota");
+  assert.equal(cuota?.amount, 900, "el 48 no contamina el importe de la primera partida");
+
+  // 48 no cae en `numerosCandidatos` (el filtro general excluye números
+  // seguidos de unidad de tiempo), pero SÍ debe registrarse como huérfano
+  // relevante de forma explícita — es exactamente el mismo cómputo que usa
+  // route.ts de forma independiente sobre (mensaje, delta).
+  const analisis = analizarExtraccion("a 48 meses: cuota 900, seguro 50", delta);
+  assert.equal(analisis.extraction_status, "PARTIAL");
+  assert.ok(analisis.huerfanos.numerosHuerfanos.includes(48), "el plazo suelto se pregunta, no se pierde");
+});
+
+test("crédito fantasma: 'quiero un carro de 30000 a 48 meses' — no rompe el caso normal (monto+plazo juntos)", () => {
+  const delta = extractScenarioDelta("quiero un carro de 30000 a 48 meses");
+  assert.equal(delta.credito?.monto, 30000);
+  assert.equal(delta.credito?.plazo_meses, 48);
+  const analisis = analizarExtraccion("quiero un carro de 30000 a 48 meses", delta);
+  assert.equal(analisis.extraction_status, "COMPLETE");
+  assert.equal(analisis.huerfanos.extraccionIncompleta, false, "48 asignado a credito.plazo_meses, no es huérfano aquí");
+});
+
+test("crédito fantasma: T1 plazo suelto + T2 'quiero un carro de 30000 a 36 meses' — el crédito real de T2 NO hereda el 48 fantasma de T1", () => {
+  let s = mergeScenario({}, extractScenarioDelta("a 48 meses: cuota 900, seguro 50"));
+  assert.equal(s.credito, undefined, "T1: sin crédito");
+  s = mergeScenario(s, extractScenarioDelta("quiero un carro de 30000 a 36 meses", "es", s));
+  assert.equal(s.credito?.monto, 30000);
+  assert.equal(s.credito?.plazo_meses, 36, "el crédito real de T2 usa SU PROPIO plazo (36), nunca el 48 fantasma de T1 (G1b)");
+});
+
+// ── Hueco verificado (pedido aparte de crédito fantasma) — "quiero un carro
+// de 30000 con TAE 9" no extrae ni monto ni TAE. CONFIRMADO, doble causa
+// independiente: (1) el bloque de Crédito exige `plazo && amount` EN EL
+// MISMO match (sin plazo, no escribe nada) y (2) `PERCENT` exige el símbolo
+// "%" literal (sin él, "9" nunca se lee como tasa). Se probó relajar (1) —
+// bloque de Crédito con monto sin plazo — y rompió 7 tests ya establecidos:
+// `PRECIO_CTX` matchea "carro"/"casa"/"piso" en CUALQUIER posición, incluido
+// como NOMBRE DE PARTIDA dentro de una lista de gastos ("...servicios 250
+// carro 100 ropa"); `plazo && amount` no era solo "el caso normal", era la
+// red de seguridad que evitaba que esa palabra genérica reclamara cualquier
+// número cercano. Revertido — este hueco queda DOCUMENTADO, no corregido en
+// esta tanda: requiere su propia tanda dedicada (acotar `PRECIO_CTX` a una
+// posición de declaración real, no cualquier mención de la palabra), con
+// revisión adversarial propia, no un añadido de última hora al fix de
+// crédito fantasma.
+test("documentado (no corregido): 'quiero un carro de 30000 con TAE 9' no extrae monto ni TAE — el 30000 sigue sin reclamar y el bloque de Meta se lo apropia", () => {
+  const delta = extractScenarioDelta("quiero un carro de 30000 con TAE 9");
+  assert.equal(delta.credito, undefined, "confirmado: sin plazo en el mensaje, el bloque de crédito no escribe nada");
+  assert.equal(delta.meta?.monto, 30000, "confirmado: el 30000 sin reclamar cae en Meta — comportamiento incorrecto, documentado");
 });

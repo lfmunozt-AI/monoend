@@ -884,6 +884,26 @@ export function itemsGastoActivos(items: GastoItemEntry[] | undefined): GastoIte
 }
 
 /**
+ * ¿El mensaje tiene un plazo pegado a ":" + una lista real de ≥2 partidas
+ * ("a 48 meses: cuota 900, seguro 50")? Devuelve los meses si sí, `null` si
+ * no. Único punto de verdad para el patrón estructural "PLAZO BARE + LISTA",
+ * usado en dos sitios que deben estar de acuerdo (`extractScenarioDelta`,
+ * para decidir si el plazo completa un crédito, y `detectarNumerosHuerfanos`,
+ * para registrar ese mismo plazo como huérfano relevante cuando no lo hace —
+ * ver el FIX CRÉDITO FANTASMA en `extractScenarioDelta`).
+ */
+function plazoSueltoConLista(message: string): number | null {
+  const n = norm(message);
+  const plazoListaRe = new RegExp(PLAZO.source + "\\s*:");
+  const plazoMatch = plazoListaRe.exec(n);
+  if (!plazoMatch) return null;
+  const restoTrasPlazo = message.slice(plazoMatch.index + plazoMatch[0].length);
+  if (parseExpenseList(restoTrasPlazo).length < 2) return null;
+  const meses = toMonths(parseDigitAmount(plazoMatch[1]), plazoMatch[2]);
+  return meses > 0 ? meses : null;
+}
+
+/**
  * Extrae SOLO señales de alta confianza del mensaje. Devuelve un delta parcial;
  * lo ambiguo se omite. `lang` se acepta para futura afinación por idioma (hoy los
  * patrones ya cubren ES/PT/EN).
@@ -953,6 +973,19 @@ export function extractScenarioDelta(
   // ── Crédito: monto + plazo ANCLADOS al contexto del crédito (defecto A) ────
   // El monto se busca DESDE la keyword de crédito/compra, no como primer número
   // global: en "gano 2500 ... carro de 30000 a 36 meses" el monto es 30000.
+  //
+  // INVESTIGADO Y REVERTIDO (follow-up, hueco verificado junto al de crédito
+  // fantasma) — se probó relajar esto a "monto solo basta, plazo opcional"
+  // para que "quiero un carro de 30000 con TAE 9%" atribuyera el monto a
+  // `credito` en vez de a `meta`. Rompió 7 tests ya establecidos: `PRECIO_CTX`
+  // matchea palabras sueltas ("carro", "casa", "piso") en CUALQUIER posición,
+  // no solo en una declaración de compra — incluido como NOMBRE DE PARTIDA
+  // dentro de una lista de gastos ("...servicios 250 carro 100 ropa"). El
+  // requisito `plazo && amount` no era solo "el caso normal": era la red de
+  // seguridad que evitaba que esa `carro`/`casa` genérica reclamara CUALQUIER
+  // número cercano como si fuera un crédito. Revertido a su forma original;
+  // el hueco queda confirmado y documentado (no corregido) — ver el informe
+  // de esta tanda.
   if (PRECIO_CTX.test(n)) {
     const precioMatch = PRECIO_CTX.exec(n)!;
     const desdeCredito = n.slice(precioMatch.index).replace(PLAZO, " ");
@@ -991,6 +1024,34 @@ export function extractScenarioDelta(
   // nunca para una mención de duración suelta en cualquier otro punto de la
   // conversación (evita que "vuelvo en 3 meses" abra un crédito fantasma con
   // `missing: ['monto','tae']`).
+  //
+  // FIX CRÉDITO FANTASMA (follow-up) — el bloque de arriba reclamaba el rango
+  // y escribía `delta.credito = {..., plazo_meses}` AUNQUE no existiera
+  // ningún crédito real: "a 48 meses: cuota 900, seguro 50" no declara
+  // monto, objeto ni TAE — es un plazo suelto pegado por casualidad a una
+  // lista de gastos. Ese `credito` fantasma es un HECHO de usuario (persiste
+  // entre turnos, y desde la migración de memoria continua, entre
+  // sesiones), así que un plazo de un mensaje sin relación podía sobrevivir
+  // y contaminar un crédito real declarado después (G1b — un mismo campo
+  // nunca puede quedar poseído por dos declaraciones sin relación). El plazo
+  // solo completa un crédito que YA EXISTE — con monto, en este mismo
+  // mensaje (`delta.credito`, ver bloque anterior) o en el estado persistido
+  // (`prev.credito`) — nunca crea uno desde cero. Si no hay crédito que
+  // completar, el rango se reclama IGUAL (como frontera de cláusula, nunca
+  // como campo) pero NO se escribe en `delta.credito`: "48" queda como
+  // número huérfano relevante — `esCandidataFinanciera` excluye por diseño
+  // todo número seguido de una unidad de tiempo, así que el huérfano NO cae
+  // solo con dejarlo sin asignar; `detectarNumerosHuerfanos` lo registra a
+  // propósito con `plazoSueltoConLista` (mismo patrón, ver más abajo) —
+  // y `extraction_status` degrada a PARTIAL para que se pregunte a qué se
+  // refiere, en vez de inventar un crédito que nadie pidió. Reclamar
+  // el rango en ambos casos (haya o no crédito real) es necesario incluso
+  // sin crédito: sin reclamarlo, el parser de listas de respaldo intenta
+  // emparejar "48" como si fuera el importe de la primera partida ("cuota" =
+  // 48 €, el mismo bug de "pendingAmount huérfano" ya corregido para Meta
+  // en la tanda anterior — un nombre inválido antes del ":" ("a", "meses")
+  // deja la cifra sin dueño, y el emparejador se la atribuye a la SIGUIENTE
+  // palabra válida en vez de descartarla).
   if (!delta.credito?.plazo_meses) {
     const plazoListaRe = new RegExp(PLAZO.source + "\\s*:");
     const plazoMatch = plazoListaRe.exec(n);
@@ -999,10 +1060,13 @@ export function extractScenarioDelta(
       if (parseExpenseList(restoTrasPlazo).length >= 2) {
         const meses = toMonths(parseDigitAmount(plazoMatch[1]), plazoMatch[2]);
         if (meses > 0) {
-          delta.credito = { ...(delta.credito ?? { tae_es_referencia: true }), plazo_meses: meses };
           const r: Rango = { start: plazoMatch.index, end: plazoMatch.index + plazoMatch[0].length };
+          const creditoYaExiste = (delta.credito?.monto ?? prev?.credito?.monto) !== undefined;
+          if (creditoYaExiste) {
+            delta.credito = { ...(delta.credito ?? { tae_es_referencia: true }), plazo_meses: meses };
+            rangosParaMeta.push(r);
+          }
           rangosReclamados.push(r);
-          rangosParaMeta.push(r);
         }
       }
     }
@@ -1635,6 +1699,21 @@ export function detectarNumerosHuerfanos(
   const candidatos = numerosCandidatos(message);
   const asignados = valoresAsignadosEnDelta(message, delta);
   const numerosHuerfanos = candidatos.filter((v) => !coincideConAsignado(v, asignados));
+  // FIX CRÉDITO FANTASMA (follow-up) — "a 48 meses: cuota 900, seguro 50" no
+  // tiene ningún crédito al que pertenecer (`extractScenarioDelta` ya decidió
+  // no escribir `delta.credito` por esa misma razón). `esCandidataFinanciera`
+  // excluye TODO número seguido de una unidad de tiempo de `numerosCandidatos`
+  // — correcto para el caso general (un plazo que SÍ completa un crédito no
+  // debe generar ruido), pero aquí no hay crédito que completar: es un dato
+  // suelto que el usuario escribió y que debe preguntarse, no perderse en
+  // silencio (V14). Se añade explícitamente porque el filtro general, por
+  // diseño, nunca lo deja llegar a `candidatos`.
+  if (!delta.credito) {
+    const plazoSuelto = plazoSueltoConLista(message);
+    if (plazoSuelto !== null && !coincideConAsignado(plazoSuelto, asignados)) {
+      numerosHuerfanos.push(plazoSuelto);
+    }
+  }
   const numerosNoRelevantes = dedupeOverlaps(findNumberMentions(message))
     .filter((m) => razonNoRelevante(message, m) !== null)
     .map((m) => m.value);
