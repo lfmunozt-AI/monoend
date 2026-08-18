@@ -140,6 +140,19 @@ export function toolArgsToScenarioDelta(args: Record<string, unknown>): Partial<
       delta.gastos_items = items.map(
         (i): GastoItemEntry => ({ name: i.name, amount: i.amount, category: classifyExpense(i.name), source: "tool", turn: 0 }),
       );
+    } else if (items.length === 1) {
+      // MENOR (follow-up QA testdev8, V14 — ley de conservación) — un
+      // desglose de UN SOLO ítem ("netflix 15") no llega al umbral de ≥2
+      // para clasificar vitales/no-vitales (`gastos_es_detalle` queda SIN
+      // tocar: no hay agregado que derivar de una sola partida), pero el
+      // dato SÍ lo dio el usuario — antes desaparecía en silencio. Se
+      // registra igual como evidencia de partida (`gastos_items`), visible
+      // para el modelo y acumulable si llegan más partidas en turnos
+      // siguientes.
+      const [unico] = items;
+      delta.gastos_items = [
+        { name: unico.name, amount: unico.amount, category: classifyExpense(unico.name), source: "tool", turn: 0 },
+      ];
     }
   }
 

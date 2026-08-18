@@ -234,19 +234,28 @@ test("idempotencia: caso del déficit fantasma también es idempotente", () => {
   assert.equal(once.texto, twice.texto);
 });
 
-// ── Mandamiento 10 (QA testdev8, REDISEÑADO tras revisión AG01 — bloqueante 1) ─
+// ── Mandamiento 10 (QA testdev8) — SENSOR, NO EDITOR (V18) ──────────────────
 //
-// La primera versión revertía al RAW (texto sin validar) y podía resucitar
-// una cifra inventada que el Mandamiento 3 había eliminado con razón —
-// violaba G1b. El rediseño NUNCA vuelve al raw: repara la anáfora en sitio
-// con una cifra de `conceptos` (verificada), o elimina la frase sin
-// respaldo. Los cuatro tests obligatorios de la revisión, TODOS con el
-// pipeline completo (`applyEnforcement`, no `enforceCommandments` aislado) y
-// pasando `userMessage`/`raw` como hace `pipeline.ts:249` en producción —
-// invocar sin esos dos argumentos es exactamente el "test que no prueba
-// nada" que la revisión señaló como defecto (V11, cuarto caso de la serie).
+// Historial: v1 revertía al RAW (violaba G1b, resucitaba cifras inventadas).
+// v2 (bloqueante 1 de AG01) dejó de volver al raw pero seguía EDITANDO —
+// insertaba la cifra o borraba la frase directamente. DIAGNÓSTICO real con el
+// pipeline completo: con el grounding ya arreglado, esa edición producía
+// falsos positivos peores que el problema — borraba prosa cálida legítima
+// (caso A) y llegó a publicar "250 € es una buena pregunta." (caso B), un
+// disparate. V18 (esta corrección): M10 NUNCA edita `out`. Detecta la
+// condición (a: concepto pedido en conceptos · b: cifra ausente del texto
+// final · c: evidencia en `mutations` de que OTRA capa —no un mandamiento—
+// eliminó algo este turno) y la registra como violación "logueada"; el
+// reintento de `route.ts` (que calcula `cifraPedidaAusente` de forma
+// independiente sobre el texto final real) es la ÚNICA vía de corrección —
+// el modelo redacta, esta capa nunca reescribe.
+//
+// Todos los tests con el pipeline completo (`applyEnforcement`), pasando
+// `userMessage`/`raw` como en producción (`pipeline.ts:249`) — salvo los que
+// necesitan fabricar `mutations` para aislar la condición (c), que usan
+// `enforceCommandments` directamente y lo declaran.
 
-test("Mandamiento 10 · OBLIGATORIO 1 — regresión del déficit fantasma CON el pipeline completo: NO republica el déficit inventado", async () => {
+test("Mandamiento 10 · OBLIGATORIO — regresión del déficit fantasma CON el pipeline completo: NO republica el déficit inventado", async () => {
   const userMessage = "¿cuánto me queda al mes?";
   const conceptos = { sobrante: 250 }; // SIN 'deficit' — el motor nunca lo calculó
   const raw = "Te quedan 250 € al mes aunque arrastras un déficit de 9500 € que hay que cerrar.";
@@ -260,36 +269,147 @@ test("Mandamiento 10 · OBLIGATORIO 1 — regresión del déficit fantasma CON e
     esSimulacion: false,
   });
   assert.ok(!r.texto.includes("9500") && !r.texto.includes("9.500"), `el déficit fantasma NUNCA se publica: ${r.texto}`);
-  // La cifra pedida (250) no la reconstruye M10 aquí — la frase entera cayó
-  // por la contradicción de signo (grounding), sin anáfora que reparar. Esa
-  // es justamente la señal que dispara el reintento acotado de route.ts
-  // (`cifraPedidaAusente`, la MISMA función que usa M10): se prueba aquí,
-  // en frío, que la señal es correcta — sin necesitar mock de LLM.
+  // La cifra pedida (250) no la reconstruye M10 (nunca edita) — la frase
+  // entera cayó por la contradicción de signo (grounding). Esa es la señal
+  // que dispara el reintento acotado de route.ts (`cifraPedidaAusente`, la
+  // MISMA función pura que usa M10 para detectar): se prueba aquí, en frío,
+  // que la señal es correcta — sin necesitar mock de LLM.
   const seguimiento = cifraPedidaAusente(userMessage, r.texto, conceptos);
   assert.equal(seguimiento.ausente, true, "el sistema SABE que aún falta publicar el sobrante");
   assert.deepEqual(seguimiento.conceptosPedidos, ["sobrante"]);
 });
 
-test("Mandamiento 10 · OBLIGATORIO 2 — anáfora cuya cifra SÍ está en conceptos → reinsertada (nunca la cifra ausente/inventada)", async () => {
-  const r = await applyEnforcement(
-    "Te quedan 250 € al mes y podrías ahorrar 9.999 € al año sin esfuerzo. Eso te deja margen.",
-    {
-      userMessage: "¿cuánto me queda al mes?",
-      carril: "FINANCIERO",
-      lang: "es",
-      missing: [],
-      valores: [250],
-      conceptos: { sobrante: 250 },
-      esSimulacion: false,
-    },
-  );
-  assert.ok(r.texto.includes("250"), `la cifra verificada se reinserta: ${r.texto}`);
-  assert.ok(!r.texto.includes("9.999") && !r.texto.includes("9999"), `la cifra inventada NUNCA se publica: ${r.texto}`);
-  assert.ok(r.violaciones.some((v) => v.mandamiento === 10));
+// ── Diagnóstico real (los 4 vectores A-D) ────────────────────────────────────
+
+test("Mandamiento 10 · A — prosa cálida sin evidencia de eliminación → NUNCA se edita, sale intacta", async () => {
+  const raw = "Te quedan 250 €. Ese es tu punto de partida, y es más de lo que crees.";
+  const r = await applyEnforcement(raw, {
+    userMessage: "¿cuánto me queda al mes?",
+    carril: "FINANCIERO",
+    lang: "es",
+    missing: [],
+    valores: [250, 2250],
+    conceptos: { sobrante: 250, gastos: 2250 },
+    esSimulacion: false,
+  });
+  assert.equal(r.texto, raw, "la prosa cálida sobrevive — el 250 YA está en la primera frase, nada que reparar");
+  assert.ok(!r.violaciones.some((v) => v.mandamiento === 10), "sin eliminación de otra capa, M10 ni siquiera loguea");
 });
 
-test("Mandamiento 10 · OBLIGATORIO 3 — anáfora cuya cifra NO está en conceptos → la frase se ELIMINA (nunca se inventa)", async () => {
-  const r = await applyEnforcement("Con ese monto podrás cerrar tu meta antes de lo previsto.", {
+test("Mandamiento 10 · B — pregunta transicional sin evidencia de eliminación → NUNCA se edita (nunca un disparate publicado)", async () => {
+  const raw = "Esta es una buena pregunta. Tus gastos son 2250 €.";
+  const r = await applyEnforcement(raw, {
+    userMessage: "¿cuánto me queda al mes?",
+    carril: "FINANCIERO",
+    lang: "es",
+    missing: [],
+    valores: [250, 2250],
+    conceptos: { sobrante: 250, gastos: 2250 },
+    esSimulacion: false,
+  });
+  assert.equal(r.texto, raw, `jamás "250 € es una buena pregunta" — la frase transicional no se toca: ${r.texto}`);
+  assert.ok(!r.violaciones.some((v) => v.mandamiento === 10));
+});
+
+test("Mandamiento 10 · C — respuesta ya completa, sin mutaciones de ninguna capa → 0 violaciones de M10", async () => {
+  const raw = "Te quedan 250 € al mes para tu meta.";
+  const r = await applyEnforcement(raw, {
+    userMessage: "¿cuánto me queda al mes?",
+    carril: "FINANCIERO",
+    lang: "es",
+    missing: [],
+    valores: [250],
+    conceptos: { sobrante: 250 },
+    esSimulacion: false,
+  });
+  assert.equal(r.texto, raw);
+  assert.deepEqual(r.mutations, []);
+  assert.deepEqual(r.violaciones, []);
+});
+
+// ── FIXTURE CANÓNICA (repuesta, V11) — ahora como test del SENSOR ──────────
+// La frase real del incidente QA que originó el Mandamiento 10. En la ronda
+// anterior este test verificaba que M10 la EDITABA (la reparaba insertando
+// 250). Esa edición se elimina por diseño en esta tanda (V18) — repetir el
+// mismo test tal cual sería afirmar lo contrario de lo que el código ahora
+// hace, justo lo que V11 prohíbe. Se REPONE con el mismo fixture, verificando
+// el comportamiento correcto de la NUEVA arquitectura: detecta + señala,
+// nunca edita.
+test("Mandamiento 10 · CANÓNICO (repuesto, V11) — 'Esa es tu capacidad real...' CON evidencia de eliminación → detecta, logueado, TEXTO NO CAMBIA", () => {
+  const textoD = "Esa es tu capacidad real para destinar a ahorro o pago de deudas.";
+  const r = enforceCommandments(textoD, ctx({
+    conceptos: { sobrante: 250 },
+    userMessage: "¿cuánto me queda al mes?",
+    mutations: [
+      {
+        capa: "grounding",
+        regla: "cifra sin respaldo eliminada",
+        antes: "Esa es tu capacidad real para destinar a ahorro o pago de deudas, un 40% más de lo habitual.",
+        despues: textoD,
+      },
+    ],
+  }));
+  assert.equal(r.texto, textoD, "M10 NUNCA edita — el texto que entra es el que sale, byte a byte");
+  const v10 = r.violaciones.find((v) => v.mandamiento === 10);
+  assert.ok(v10, "la detección SÍ se registra");
+  assert.equal(v10?.accion, "logueado", "nunca 'corregido' — M10 no corrige nada");
+  const seguimiento = cifraPedidaAusente("¿cuánto me queda al mes?", r.texto, { sobrante: 250 });
+  assert.equal(seguimiento.ausente, true, "la señal que consume route.ts:816 para el reintento es correcta");
+});
+
+test("Mandamiento 10 · D SIN evidencia de eliminación de otra capa → M10 NO dispara (condición c)", async () => {
+  const raw = "Esa es tu capacidad real para destinar a ahorro o pago de deudas.";
+  const r = await applyEnforcement(raw, {
+    userMessage: "¿cuánto me queda al mes?",
+    carril: "FINANCIERO",
+    lang: "es",
+    missing: [],
+    valores: [250],
+    conceptos: { sobrante: 250 },
+    esSimulacion: false,
+  });
+  assert.equal(r.texto, raw, "sin nada que ninguna capa haya eliminado, no hay caso — la frase sale tal cual");
+  assert.deepEqual(r.mutations, []);
+  assert.ok(!r.violaciones.some((v) => v.mandamiento === 10));
+});
+
+// ── Cobertura de detección (antes probaba edición; ahora prueba el sensor) ──
+
+test("Mandamiento 10 · variantes de demostrativo+verbo (ES/PT/EN) CON evidencia de eliminación → todas detectadas, ninguna editada", () => {
+  const formas = [
+    "Ese sería el margen disponible este mes.",
+    "Eso te deja margen para maniobrar.",
+    "Esa te permite cubrir imprevistos sin apuros.",
+    "Esta es la base para tu plan de ahorro.",
+    "Esto queda disponible para tu meta.",
+  ];
+  const mutationFabricada = { capa: "grounding", regla: "cifra sin respaldo eliminada", antes: "algo con una cifra inventada", despues: "" };
+  for (const texto of formas) {
+    const r = enforceCommandments(texto, ctx({
+      conceptos: { sobrante: 250 },
+      userMessage: "¿cuánto me queda al mes?",
+      mutations: [mutationFabricada],
+    }));
+    assert.equal(r.texto, texto, `"${texto}" no se edita`);
+    assert.ok(r.violaciones.some((v) => v.mandamiento === 10 && v.accion === "logueado"), `"${texto}" debe detectarse`);
+  }
+});
+
+test("Mandamiento 10 · forma PT con verbo acentuado ('é') se detecta (\\b de ASCII no reconoce 'é' como palabra) sin editar", () => {
+  const texto = "Essa é a tua margem mensal.";
+  const r = enforceCommandments(texto, ctx({
+    conceptos: { sobrante: 250 },
+    userMessage: "quanto me sobra por mês?",
+    lang: "pt",
+    mutations: [{ capa: "grounding", regla: "cifra sin respaldo eliminada", antes: "algo con una cifra inventada", despues: "" }],
+  }));
+  assert.equal(r.texto, texto, "PT con verbo acentuado se detecta sin editar");
+  assert.ok(r.violaciones.some((v) => v.mandamiento === 10 && v.accion === "logueado"));
+});
+
+test("Mandamiento 10 · concepto pedido NO existe en conceptos → M10 nunca dispara (ni edita ni loguea)", async () => {
+  const raw = "Con ese monto podrás cerrar tu meta antes de lo previsto.";
+  const r = await applyEnforcement(raw, {
     userMessage: "¿cuál es mi situación?",
     carril: "FINANCIERO",
     lang: "es",
@@ -298,11 +418,11 @@ test("Mandamiento 10 · OBLIGATORIO 3 — anáfora cuya cifra NO está en concep
     conceptos: {},
     esSimulacion: false,
   });
-  assert.ok(!/\bese\s+monto\b/i.test(r.texto), "la anáfora sin respaldo no sobrevive");
-  assert.ok(!/\d/.test(r.texto), "ninguna cifra inventada se cuela en su lugar");
+  assert.equal(r.texto, raw, "sin concepto verificado que pedir, M10 no tiene nada que hacer — no toca el texto");
+  assert.ok(!r.violaciones.some((v) => v.mandamiento === 10));
 });
 
-test("Mandamiento 10 · OBLIGATORIO 4 — regresión del Mandamiento 3 CON el pipeline completo: sigue bloqueando el concepto sin cálculo", async () => {
+test("Mandamiento 10 · OBLIGATORIO — regresión del Mandamiento 3 CON el pipeline completo: sigue bloqueando el concepto sin cálculo", async () => {
   const r = await applyEnforcement("Tienes un déficit mensual de 9500 €. ¿Confirmamos el plan?", {
     userMessage: "¿tengo déficit?",
     carril: "FINANCIERO",
@@ -317,7 +437,10 @@ test("Mandamiento 10 · OBLIGATORIO 4 — regresión del Mandamiento 3 CON el pi
 
 test("Mandamiento 10: sin userMessage no hay nada que comprobar — nunca se activa", () => {
   const texto = "Eso te deja margen.";
-  const r = enforceCommandments(texto, ctx({ conceptos: { sobrante: 250 } }));
+  const r = enforceCommandments(texto, ctx({
+    conceptos: { sobrante: 250 },
+    mutations: [{ capa: "grounding", regla: "x", antes: "algo con cifra", despues: "" }],
+  }));
   assert.equal(r.texto, texto);
   assert.ok(!r.violaciones.some((v) => v.mandamiento === 10));
 });
