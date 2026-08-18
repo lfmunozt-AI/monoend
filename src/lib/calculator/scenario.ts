@@ -647,17 +647,26 @@ const GASTO_AGREGADO_DETALLE_RE = new RegExp(
 // mitades se leyeran como una sola frase, y el "2000" de "comida" se colaba
 // como agregado de "no vitales:", duplicando el gasto — regresión real,
 // atrapada por `test:regression`). `ultimoLimiteDeClausula` es más simple y
-// deliberadamente NO exige mayúscula: cualquier ".", "!" o "?" que no esté
-// entre dígitos (no corta "1.200") cierra la cláusula anterior, sin importar
-// qué letra siga. Nunca cruza a una cláusula previa no relacionada ("Mi
-// ingreso es 3000. Gastos: internet 300, agua 400." jamás debe leer 3000
-// como el agregado de gastos), y dentro de dos listas seguidas en el mismo
-// mensaje ("vitales: ...armony. no vitales: ...") cada ":" solo ve su propia
-// cláusula.
+// deliberadamente NO exige mayúscula: cualquier ".", "!", "?", "," o ";" que
+// no esté entre dígitos (no corta "1.200") cierra la cláusula anterior, sin
+// importar qué letra siga.
+//
+// COMPUERTA 1 — LA COMA CORTA (follow-up, medición real). Sin la coma como
+// frontera, "gano 2300, arriendo 900: comida 500, luz 120" leía el ÚLTIMO
+// número de TODA la frase antes de ":" — es decir, alcanzaba hasta "900" SÍ,
+// pero en mensajes más largos ("gano 2300: arriendo 900, comida 500" con un
+// ":" pegado al ingreso) el candidato podía saltar por encima de una coma
+// hacia un número de OTRA declaración por completo. La coma (y el punto y
+// coma) ahora cierran la cláusula igual que el punto — "el candidato es la
+// última cifra antes del ':' DENTRO DE SU PROPIA CLÁUSULA, no de toda la
+// frase". Nunca cruza a una cláusula previa no relacionada ("Mi ingreso es
+// 3000. Gastos: internet 300, agua 400." jamás debe leer 3000 como el
+// agregado de gastos), y dentro de dos listas seguidas en el mismo mensaje
+// ("vitales: ... . no vitales: ...") cada ":" solo ve su propia cláusula.
 function ultimoLimiteDeClausula(text: string, hastaIdx: number): number {
   for (let i = hastaIdx - 1; i >= 0; i--) {
     const ch = text[i];
-    if (ch === "\n") return i + 1;
+    if (ch === "\n" || ch === "," || ch === ";") return i + 1;
     if (ch === "." || ch === "!" || ch === "?") {
       const antes = text[i - 1] ?? "";
       const despues = text[i + 1] ?? "";
@@ -668,16 +677,32 @@ function ultimoLimiteDeClausula(text: string, hastaIdx: number): number {
   return 0;
 }
 
+// CAMBIO DE ENFOQUE (follow-up, tercer diseño) — el ancla léxica (keyword) y
+// la posición sola (última cifra antes de ":") intentan deducir QUÉ ES una
+// cifra por su CONTEXTO TEXTUAL, que tiene sinónimos infinitos. La
+// aritmética no los tiene: es la validación estándar de extracción de
+// facturas ("las partidas deben sumar al subtotal"). Compuerta 3 decide, no
+// el contexto: |candidato − suma(items)| ≤ 5% (§6, MATERIALIDAD_MAX_PCT, el
+// mismo umbral ya vigente — no se inventa otro) → el candidato ES el
+// agregado (consistente, o en conflicto material — `reconciliarGastos` ya
+// sabe resolver ambos con lo que esta función devuelve). Por encima del 5%,
+// el candidato NO es un agregado: se descarta sin reclamar nada, y el
+// mensaje entero cae al parser de listas — si el candidato tenía un nombre
+// adyacente ("arriendo 900:"), se incorpora como una partida más (V19: no se
+// pierde el dato, solo se reinterpreta).
 function detectarAgregadoEstructural(
   message: string,
   n: string,
+  rangosReclamados: ReadonlyArray<Rango>,
 ): { agregado: number; rango: Rango; restoDesdeColon: string } | null {
   const colonRe = /:/g;
   let colonMatch: RegExpExecArray | null;
   while ((colonMatch = colonRe.exec(n)) !== null) {
     const colonIdx = colonMatch.index;
-    // La cláusula que contiene el ":" acota dónde buscar la cifra — es la
-    // única frontera necesaria; ninguna keyword de gasto es requisito.
+    // COMPUERTA 1 — la cláusula que contiene el ":" acota dónde buscar la
+    // cifra; ninguna keyword de gasto es requisito (`GASTO_CTX`, si aparece
+    // en la cláusula, sería refuerzo — hoy ni se consulta: la estructura +
+    // la aritmética ya bastan).
     const inicioClausula = ultimoLimiteDeClausula(n, colonIdx);
     // La cifra es el ÚLTIMO número entre el inicio de la cláusula y este
     // ":" — el más cercano al ":" es el candidato natural (duraciones/
@@ -685,19 +710,37 @@ function detectarAgregadoEstructural(
     // quedan descartados por sí solos: "3" no es el último número del
     // tramo).
     const tramo = n.slice(inicioClausula, colonIdx);
-    const numeros = [...tramo.matchAll(new RegExp(AMOUNT.source, "g"))];
-    if (numeros.length === 0) continue;
-    const agregado = parseDigitAmount(numeros[numeros.length - 1][0]);
+    const numeroMatches = [...tramo.matchAll(new RegExp(AMOUNT.source, "g"))];
+    if (numeroMatches.length === 0) continue;
+    const ultimoMatch = numeroMatches[numeroMatches.length - 1];
+    const agregado = parseDigitAmount(ultimoMatch[0]);
     if (!Number.isFinite(agregado) || agregado <= 0) continue;
 
+    // COMPUERTA 2 — NO RECLAMADA (V13). Si otro patrón declarativo (ingreso,
+    // crédito/plazo, meta) ya reclamó este rango de caracteres, esta cifra
+    // NO es candidata a agregado de gastos — pertenece a ese otro campo, y
+    // el resto del delta de ESTE mensaje se sigue extrayendo con normalidad
+    // (V19: la ambigüedad del agregado nunca descarta lo demás).
+    const candStart = inicioClausula + ultimoMatch.index;
+    const candEnd = candStart + ultimoMatch[0].length;
+    const yaReclamado = rangosReclamados.some((r) => candStart < r.end && r.start < candEnd);
+    if (yaReclamado) continue;
+
     // Estructura confirmada SOLO si lo que sigue a ":" es una lista real de
-    // ≥2 partidas — el propio parseo es el validador, no una suposición. Si
-    // la cifra no coincide con la suma de la lista, no es un bug de esta
-    // función: es el caso de conflicto normal (G1c/reconciliarGastos), que
-    // ya sabe resolverlo — no doble conteo, porque el rango de la cifra
-    // queda reclamado y el parser de listas nunca vuelve a leerla.
+    // ≥2 partidas — el propio parseo es el validador, no una suposición.
     const restoDesdeColon = message.slice(colonIdx + 1);
-    if (parseExpenseList(restoDesdeColon).length < 2) continue;
+    const detailItems = parseExpenseList(restoDesdeColon);
+    if (detailItems.length < 2) continue;
+
+    // COMPUERTA 3 — RECONCILIACIÓN ARITMÉTICA. Por encima del umbral de
+    // materialidad de §6, el candidato no es el agregado de ESTA lista —
+    // ninguna reclamación, ningún doble conteo: `continue` prueba el
+    // siguiente ":" (si lo hay), y si ninguno cierra, el llamante cae al
+    // parser de listas sobre el mensaje completo, donde el candidato con
+    // nombre adyacente se incorpora como una partida más.
+    const suma = round2(detailItems.reduce((acc, i) => acc + i.amount, 0));
+    const diffPct = suma !== 0 ? (Math.abs(agregado - suma) / suma) * 100 : Infinity;
+    if (diffPct > MATERIALIDAD_MAX_PCT) continue;
 
     return { agregado, rango: { start: inicioClausula, end: colonIdx + 1 }, restoDesdeColon };
   }
@@ -937,6 +980,34 @@ export function extractScenarioDelta(
     }
   }
 
+  // PLAZO BARE + LISTA (follow-up, Compuerta 2 de la regla estructural de
+  // gastos) — "a 48 meses: cuota 900, seguro 50" no tiene contexto de
+  // crédito (`PRECIO_CTX` no matchea: sin "financiar"/"casa"/"préstamo"…)
+  // pero SÍ declara un plazo justo antes de una lista. Sin reclamar su
+  // rango, "48" queda disponible para que la regla estructural (o el parser
+  // de listas de respaldo) lo confunda con el agregado o con el importe de
+  // la primera partida ("cuota" = 48 €, absurdo). Se reclama SOLO cuando el
+  // plazo está pegado a un ":" seguido de una lista REAL de ≥2 partidas —
+  // nunca para una mención de duración suelta en cualquier otro punto de la
+  // conversación (evita que "vuelvo en 3 meses" abra un crédito fantasma con
+  // `missing: ['monto','tae']`).
+  if (!delta.credito?.plazo_meses) {
+    const plazoListaRe = new RegExp(PLAZO.source + "\\s*:");
+    const plazoMatch = plazoListaRe.exec(n);
+    if (plazoMatch) {
+      const restoTrasPlazo = message.slice(plazoMatch.index + plazoMatch[0].length);
+      if (parseExpenseList(restoTrasPlazo).length >= 2) {
+        const meses = toMonths(parseDigitAmount(plazoMatch[1]), plazoMatch[2]);
+        if (meses > 0) {
+          delta.credito = { ...(delta.credito ?? { tae_es_referencia: true }), plazo_meses: meses };
+          const r: Rango = { start: plazoMatch.index, end: plazoMatch.index + plazoMatch[0].length };
+          rangosReclamados.push(r);
+          rangosParaMeta.push(r);
+        }
+      }
+    }
+  }
+
   // ── Ingreso — anclado a su keyword ─────────────────────────────────────────
   if (INGRESO_CTX.test(n)) {
     const ingresoMatch = INGRESO_CTX.exec(n)!;
@@ -958,6 +1029,57 @@ export function extractScenarioDelta(
     }
   }
 
+  // ── Meta ───────────────────────────────────────────────────────────────────
+  // PIEZA 6 — la señal de cambio explícito viaja en el delta: es lo ÚNICO que
+  // autoriza a `mergeScenario` a tocar una meta activa del usuario.
+  //
+  // REORDEN (follow-up, Compuerta 2 de la regla estructural de gastos) — Meta
+  // se extrae ANTES que Gastos (antes iba después). "quiero una casa de
+  // 150000: arriendo 900, comida 500" necesita que "150000" quede reclamado
+  // por la Meta ANTES de que la regla estructural de gastos (o su respaldo,
+  // el parser de listas) lo vea — si no, "150000" queda libre y el parser de
+  // listas lo empareja con la primera partida ("arriendo" = 150000, absurdo,
+  // y "900" queda huérfano). Los otros campos (TAE/crédito/ingreso/plazo
+  // bare) ya reclaman ANTES de este bloque, así que Meta los sigue
+  // respetando igual (`rangosParaMeta` ya los tiene).
+  if (pideCambioDeMeta(message)) delta.meta_cambio_explicito = true;
+
+  if (META_CTX.test(n)) {
+    // FIX V15 (12ª tanda) — anclado a la keyword de meta, igual que
+    // ingreso/gasto/crédito, y excluye números YA RECLAMADOS por otro campo
+    // declarativo. Antes buscaba el PRIMER número de TODO el mensaje sin
+    // ancla: "gano 2300, mi meta es una casa" capturaba el 2300 del ingreso
+    // como si fuera el monto de la meta (V12/V13 — un número reclamado no
+    // puede pertenecer a dos campos a la vez).
+    const metaMatch = META_CTX.exec(n)!;
+    const desdeMeta = n.slice(metaMatch.index);
+    const plazo = PLAZO.exec(desdeMeta);
+    const a = AMOUNT.exec(desdeMeta.replace(PLAZO, " "));
+    const meta: MetaState = {};
+    if (a) {
+      const absStart = metaMatch.index + a.index;
+      const absEnd = absStart + a[0].length;
+      const yaReclamado = rangosParaMeta.some((r) => absStart < r.end && r.start < absEnd);
+      if (!yaReclamado) {
+        const v = parseDigitAmount(a[1]);
+        if (Number.isFinite(v) && v > 0) {
+          meta.monto = v;
+          // Reclama también para GASTOS (V13/Compuerta 2): el monto de la
+          // meta ("150000") no puede volver a leerse como agregado ni como
+          // partida de una lista adyacente.
+          rangosReclamados.push({ start: absStart, end: absEnd });
+        }
+      }
+    }
+    if (plazo) {
+      // FIX 1 (7ª tanda) — cero no es un valor: un plazo mal formado (0 tras
+      // redondear) no se persiste como si fuera real.
+      const meses = toMonths(parseDigitAmount(plazo[1]), plazo[2]);
+      if (meses > 0) meta.plazo_meses = meses;
+    }
+    if (meta.monto !== undefined || meta.plazo_meses !== undefined) delta.meta = meta;
+  }
+
   // ── Gastos ──────────────────────────────────────────────────────────────────
   // PIEZA 2 (5ª tanda) — el usuario declara un TOTAL EXPLÍCITO (marcado con
   // ":") seguido de un desglose: "gasto 1000: 500 arriendo 250 carro 100
@@ -969,7 +1091,7 @@ export function extractScenarioDelta(
   // BLOQUEANTE M1 — la señal ESTRUCTURAL (cifra + ":" + lista real) es la
   // puerta principal; `GASTO_AGREGADO_DETALLE_RE` (conectores enumerados)
   // queda como respaldo para cuando no hay ":" o la lista no valida.
-  const estructural = detectarAgregadoEstructural(message, n);
+  const estructural = detectarAgregadoEstructural(message, n, rangosReclamados);
   const aggMatch = estructural ? null : GASTO_AGREGADO_DETALLE_RE.exec(n);
   if (estructural) {
     delta.gastos_mensuales = estructural.agregado;
@@ -1084,41 +1206,6 @@ export function extractScenarioDelta(
       // queda sin tocar (no hay desglose que ofrecer).
       delta.gastos_mensuales = gastoDeclaradoSimple;
     }
-  }
-
-  // ── Meta ───────────────────────────────────────────────────────────────────
-  // PIEZA 6 — la señal de cambio explícito viaja en el delta: es lo ÚNICO que
-  // autoriza a `mergeScenario` a tocar una meta activa del usuario.
-  if (pideCambioDeMeta(message)) delta.meta_cambio_explicito = true;
-
-  if (META_CTX.test(n)) {
-    // FIX V15 (12ª tanda) — anclado a la keyword de meta, igual que
-    // ingreso/gasto/crédito, y excluye números YA RECLAMADOS por otro campo
-    // declarativo. Antes buscaba el PRIMER número de TODO el mensaje sin
-    // ancla: "gano 2300, mi meta es una casa" capturaba el 2300 del ingreso
-    // como si fuera el monto de la meta (V12/V13 — un número reclamado no
-    // puede pertenecer a dos campos a la vez).
-    const metaMatch = META_CTX.exec(n)!;
-    const desdeMeta = n.slice(metaMatch.index);
-    const plazo = PLAZO.exec(desdeMeta);
-    const a = AMOUNT.exec(desdeMeta.replace(PLAZO, " "));
-    const meta: MetaState = {};
-    if (a) {
-      const absStart = metaMatch.index + a.index;
-      const absEnd = absStart + a[0].length;
-      const yaReclamado = rangosParaMeta.some((r) => absStart < r.end && r.start < absEnd);
-      if (!yaReclamado) {
-        const v = parseDigitAmount(a[1]);
-        if (Number.isFinite(v) && v > 0) meta.monto = v;
-      }
-    }
-    if (plazo) {
-      // FIX 1 (7ª tanda) — cero no es un valor: un plazo mal formado (0 tras
-      // redondear) no se persiste como si fuera real.
-      const meses = toMonths(parseDigitAmount(plazo[1]), plazo[2]);
-      if (meses > 0) meta.plazo_meses = meses;
-    }
-    if (meta.monto !== undefined || meta.plazo_meses !== undefined) delta.meta = meta;
   }
 
   // ── PIEZA 3 (12ª tanda, §2) — RESOLUCIÓN EXPLÍCITA de un conflicto de gastos ─
