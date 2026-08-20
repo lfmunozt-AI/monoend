@@ -175,6 +175,42 @@ Un campo en `CONFLICT` bloquea **solo** las derivadas que lo consumen.
 | **V9** | Tras el turno, todo el estado sobrevive una **re-lectura desde la BD** (no desde memoria). |
 | **V10** | Si `raw !== final`, existe al menos una entrada en `mutations` (auditoría sin puntos ciegos). |
 
+*(Tabla original del 5 de agosto, intacta. La lista viva y completa es 9.1.)*
+
+---
+
+### 9.1 · Tabla canónica de invariantes V1-V21 — consolidada (AG05, 2026-08-20)
+
+**Esta es la lista única y completa. Un revisor juzga contra esta tabla; un implementador la recibe
+entera en el prompt.** Consolida la tabla original de §9 (V1-V10) con E2 (V11-V13), E9 (V14-V16) y
+E14 (V17-V21), y **resuelve la colisión de numeración** que AG01 arrastró siete rondas: ver E14.
+
+Ningún invariante queda sin número. Ningún número designa dos cosas.
+
+| # | Invariante | Origen | Entró por |
+|---|---|---|---|
+| **V1** | Un dato extraído con confianza **no se descarta** por la presencia de huérfanos en otra parte del mensaje. | El fallo histórico de la pieza: un huérfano en cualquier parte del mensaje tiraba el delta entero. | Contrato original |
+| **V2** | Nunca se sobrescribe un valor en `CONFLICT`. | Un conflicto silenciosamente pisado deja de ser conflicto y nadie se entera. | Contrato original |
+| **V3** | Nunca se declara `CONFLICT` si la extracción de alguna de las dos fuentes no es `COMPLETE`. | Un conflicto falso por error de parseo es peor que no detectarlo: acusa al usuario de contradecirse. | Contrato original |
+| **V4** | Nunca se calcula una derivada que consume un campo en `CONFLICT`. | Calcular sobre una cifra en disputa produce un número seguro y equivocado. | Contrato original |
+| **V5** | El LLM nunca es fuente de una cifra: `LLM_INFERRED` no entra en `conceptos`. | §0: el modelo redacta, el motor calcula. | Contrato original |
+| **V6** | Un valor `ASSUMED` se declara como supuesto cuando pesa en una decisión. | Un supuesto no declarado es indistinguible de un hecho para el usuario. | Contrato original |
+| **V7** | El valor perdedor de un conflicto se conserva como `SUPERSEDED` con motivo y turno. | Sin procedencia no hay forma de reconstruir por qué el sistema cree lo que cree. | Contrato original |
+| **V8** | El cero se rechaza como placeholder. | Vigente desde antes del contrato: un plazo `0` se colaba como dato válido. | Contrato original |
+| **V9** | Tras el turno, todo el estado sobrevive una **re-lectura desde la BD** (no desde memoria). | `scenario_state` quedó vacío durante días sin que ninguna prueba en memoria lo detectara. | Contrato original |
+| **V10** | Si `raw !== final`, existe al menos una entrada en `mutations`. | Auditoría sin puntos ciegos: una mutación no registrada es una mutación que nadie puede revisar. | Contrato original |
+| **V11** | Prohibido reescribir un test existente para que afirme lo contrario de lo que afirmaba. **Eliminar, debilitar o cambiar su aserto exige justificación explícita en la Declaración de Impacto**, igual que eliminar una función. Un test que estorba está describiendo un requisito: el agente se detiene y reporta. | Tanda 1: el aserto de `numbers.test.ts` se cambió para dejar la batería verde sobre `parseDigitAmount("2 500") = 2`. El patrón se repitió **cinco veces** en la serie (tabuladas en E11). | **E2**, extendido por **E11** |
+| **V12** | El ingreso nunca puede aparecer como ítem de gasto. | El ingreso se colaba como partida y duplicaba el gasto. | **E2** |
+| **V13** | Un número reclamado por un patrón declarativo no puede ser usado por el parser de listas. El token reclamado actúa como **frontera con offsets preservados** y nunca se elimina: borrarlo fusiona los fragmentos de nombre vecinos y pierde partidas. | `"gano 700 y pago arriendo 650, comida 200, luz 50"` perdía el arriendo y reportaba superávit a un usuario en déficit. | **E2** |
+| **V14** | **Ley de conservación.** Ningún número desaparece en silencio: termina en campo asignado, en huérfano no relevante, o en huérfano relevante que degrada `extraction_status` a `PARTIAL`. `extraction_status` nunca sale `undefined`. | Convierte "un número simplemente desapareció" en test estructural sobre el propio delta. | **E9** |
+| **V15** | **Atribución correcta.** V14 garantiza que ningún número desaparezca; **no** que se atribuya al campo correcto. Un número puede sobrevivir y aun así atribuirse mal. | `"gasté 1800: renta 900, comida 500, luz 400"` → `gasté` como ítem de 1800, total 3600. | **E9** |
+| **V16** | **No doble conteo.** Un importe declarado como agregado no puede figurar además como ítem del detalle; la suma de ítems no puede exceder el agregado sin declarar `CONFLICT`. | Mismo caso que V15, por la otra cara: el agregado contado dos veces. Cerrado del todo solo con V17. | **E9** |
+| **V17** | **La aritmética decide el agregado.** Una cifra seguida de `:` y una lista de ≥2 partidas con importe propio es el agregado de esa lista si, y solo si, (a) no está reclamada por otro patrón declarativo (V13), y (b) reconcilia con la suma de la lista dentro de la banda de materialidad del 5% (§6). **No se exige ninguna palabra de gasto:** la estructura y la aritmética bastan. La coma y el punto y coma cortan cláusula. | Tres diseños fallaron antes: el **ancla léxica** (5 de 7 fraseos fallaban) y la **posición sola** (capturaba ingreso, meta y plazo como agregado de gastos). Ambos deducían QUÉ ES una cifra por su contexto textual, que es infinito. **La aritmética no tiene sinónimos** — es la validación estándar de la industria en extracción de facturas. | **E14** |
+| **V18** | **Ningún mandamiento edita prosa.** Los mandamientos corrigen cifras o estructura con evidencia del registro de mutaciones, o **DETECTAN y delegan al reintento**. Insertar, borrar o reescribir frases del modelo está prohibido en esta capa. | El Mandamiento 10 como editor publicó en producción `"250 € es una buena pregunta"` y borró prosa cálida que ninguna capa había tocado (`"Ese es tu punto de partida, y es más de lo que crees"`). M10 quedó como **sensor**. | **E14** |
+| **V19** | **Nunca se pierde un dato extraíble.** Si el agregado resulta ambiguo, el resto del delta (meta, ingreso, plazo, TAE, ítems) se persiste igual. **Degradar `extraction_status` no autoriza a descartar nada.** | `"quiero una casa de 150000: arriendo 900, comida 500"` devolvía **NADA**, ni siquiera la meta. | **E14** |
+| **V20** | Ninguna capa de reparación reintroduce una cifra eliminada por falta de respaldo. | M10 revertía al RAW del modelo sin re-aplicar el grounding y republicaba el déficit fantasma de 9.500 €, con `violaciones: [10]` registrado: el sistema sabía que lo hacía. **Antes numerado "V17"** por AG01 — ver E14. | **E14** *(renumerado)* |
+| **V21** | El bloque de datos verificados es internamente consistente. | `gastos_mensuales: 150 €` y `gastos_vitales: 1550 €` en el mismo bloque de "usa EXCLUSIVAMENTE estas cifras", con el sobrante calculado sobre la equivocada. **Antes numerado "V18"** por AG01 — ver E14. | **E14** *(renumerado)* |
+
 ---
 
 ## 10 · Matriz de aceptación — 20 casos
@@ -277,6 +313,18 @@ Documentado explícitamente para que ningún agente lo implemente ahora:
 6. PR con base `develop` → merge por Luis
 7. QA manual en el alias estable
 8. Regla de no-reemplazo: se **añade**; modificar o eliminar lógica que funciona exige justificación explícita
+
+### 15.1 · Reglas de proceso añadidas por enmienda (consolidado — AG05, 2026-08-20)
+
+Los pasos 1-8 son los del 5 de agosto y no se reescriben. Estas reglas los complementan y tienen la
+misma fuerza:
+
+| Regla | Enmienda |
+|---|---|
+| **La revisión por un agente distinto del implementador es obligatoria, no opcional.** Toda entrega pasa por ella antes del PR. | **E6** |
+| **La Declaración de Impacto es un ARTEFACTO del repo en `docs/informes/`, no basta el mensaje de commit.** Un revisor puede rechazar una entrega por su ausencia, sin entrar en el código. | **E11** |
+| **Eliminar, debilitar o cambiar el aserto de un test existente exige justificación explícita en la Declaración de Impacto**, igual que eliminar una función (V11). | **E11** |
+| **Ningún invariante nace en un prompt.** Si una tanda necesita un invariante nuevo, entra al contrato en el **MISMO ciclo**, no después. | **E14** |
 
 **Calendario estimado:** dos tandas de fondo + una de sustracción, con QA entre cada una → 5-7 días efectivos → dogfooding 12-13 de agosto, piloto cerrado la semana del 17.
 
@@ -594,6 +642,12 @@ Verificación exigida: **batería de al menos 10 fraseos**, no los 2 de E9 ni lo
 abrir el piloto con ella. Sustituye en este punto la formulación de E9, que registraba solo dos
 fraseos y ya arreglados.
 
+> **Estado (AG05, 2026-08-20) — CERRADA.** La solución acordada se implementó tal cual: no se
+> enumeraron conectores, se invirtió la regla. Es el invariante **V17** de E14 ("la aritmética
+> decide el agregado"), con las tres compuertas verificadas por separado en la ronda 6
+> (`REVISION_AG01_qa_testdev8_ronda6.md`) y sin regresión en la 7. La condición bloqueante de
+> piloto que esta enmienda declaró **ya no bloquea**.
+
 ### E13 · 2026-08-18 — §10, casos nuevos a la matriz de aceptación (28-32)
 
 Casos que la matriz no cubría y que la serie de revisiones demostró necesarios: los cinco salieron
@@ -610,3 +664,96 @@ de mensajes construidos por el revisor, ninguno de la batería del implementador
 Los casos 29 y 30 son las dos mitades del Mandamiento 10 y deben probarse **por el pipeline
 completo** (`applyEnforcement`), con `raw` y `userMessage` presentes — invocarlo de otro modo es
 exactamente el patrón 3 del registro de E11.
+
+### E14 · 2026-08-20 — §9 y §15: V17-V19, colisión de numeración resuelta, y los invariantes dejan de nacer en prompts
+
+> **Nota de numeración — por qué E14 y no "E11".** El encargo de esta entrega pedía registrar estos
+> invariantes como "E11". **E11 ya existe** desde el 18 de agosto (§15/§9, el aserto de un test no se
+> toca sin declararlo), igual que E12 y E13. Reutilizar el número habría creado exactamente el
+> problema que esta enmienda viene a cerrar: **dos cosas distintas con la misma etiqueta.** Se
+> registra como **E14**. Quien busque "E11" por los invariantes V17-V19, está aquí.
+
+Es la **séptima ronda consecutiva** en que AG01 revisa contra invariantes que el contrato no
+contiene (`docs/informes/REVISION_AG01_qa_testdev10_ronda7.md`, R4; y R4 en las rondas 4 y 5). No es
+burocracia: ya costó una tanda completa cuando una instrucción de prompt quedó obsoleta frente al
+contrato y el agente ejecutó la versión vieja. **La tabla canónica vive en §9.1**; esta enmienda
+registra qué entra, qué se renumera y por qué.
+
+#### Los tres invariantes que faltaban
+
+| # | Invariante |
+|---|---|
+| **V17** | **LA ARITMÉTICA DECIDE EL AGREGADO.** Una cifra seguida de `:` y una lista de ≥2 partidas con importe propio es el agregado de esa lista si, y solo si, (a) no está reclamada por otro patrón declarativo (V13), y (b) reconcilia con la suma de la lista dentro de la banda de materialidad del 5% (§6). No se exige ninguna palabra de gasto: la estructura y la aritmética bastan. La coma y el punto y coma cortan cláusula. |
+| **V18** | **NINGÚN MANDAMIENTO EDITA PROSA.** Los mandamientos corrigen cifras o estructura con evidencia del registro de mutaciones, o DETECTAN y delegan al reintento. Insertar, borrar o reescribir frases del modelo está prohibido en esta capa. |
+| **V19** | **NUNCA SE PIERDE UN DATO EXTRAÍBLE.** Si el agregado resulta ambiguo, el resto del delta (meta, ingreso, plazo, TAE, ítems) se persiste igual. Degradar `extraction_status` no autoriza a descartar nada. |
+
+**Origen de V17.** Tres diseños fallaron antes de llegar aquí. El **ancla léxica** —exigir una
+palabra de gasto junto a la cifra— fallaba en 5 de 7 fraseos, porque las formas de decir "gasté" no
+se acaban nunca (conjugadas, gerundio, participio, perífrasis, sinónimos nominales). La **posición
+sola** —la última cifra antes de los dos puntos— capturaba el **ingreso, la meta y el plazo** como
+agregado de gastos. Ambos intentaban deducir **qué es** una cifra por su contexto textual, y el
+contexto textual es infinito. **La aritmética no tiene sinónimos:** si la cifra reconcilia con la
+suma de la lista, es su total; si no, no lo es. Es la validación estándar de la industria en
+extracción de facturas, y es lo que hace que V16 quede por fin cerrado y no "parcial" (ver E9 y E12).
+
+**Origen de V18.** El Mandamiento 10 nació como sensor de anáforas huérfanas y derivó en editor de
+prosa. Como editor publicó en producción `"250 € es una buena pregunta"` —sustitución mecánica de un
+demostrativo, gramaticalmente rota— y **borró prosa cálida que ninguna capa había tocado**:
+`"Ese es tu punto de partida, y es más de lo que crees"`. Una capa determinista puede saber que una
+cifra no está respaldada; **no** puede saber si una frase está bien escrita. M10 quedó como
+**sensor**: detecta y delega al reintento acotado, que sí regenera con el modelo.
+
+**Origen de V19.** `"quiero una casa de 150000: arriendo 900, comida 500"` devolvía **NADA** — ni
+siquiera la meta, que estaba perfectamente extraída y no tenía nada que ver con la ambigüedad del
+agregado. Degradar `extraction_status` es una señal sobre **una** cifra, no una orden de tirar el
+turno entero. Es la misma familia que V1, un escalón más arriba: V1 protege el dato frente a un
+huérfano, V19 lo protege frente a la ambigüedad de otro campo del mismo mensaje.
+
+#### Resolución de la colisión de numeración
+
+Reportada por AG01 sin resolver desde la ronda 4 (`REVISION_AG01_qa_testdev8_ronda4.md` R4,
+`…_ronda5.md` R4, `…_qa_testdev10_ronda7.md` R4). Estado antes de esta enmienda: **cuatro
+invariantes vivos, implementados y verificados, ninguno en el contrato, y dos números designando dos
+cosas cada uno.**
+
+| Número en disputa | Uso A — AG01, ronda 1 (14 ago) | Uso B — AG08, rondas 4-6 | Resolución |
+|---|---|---|---|
+| **V17** | "Ninguna capa de reparación reintroduce una cifra eliminada" | *(sin número propio: la regla aritmética se citaba como V13/V19)* | **V17 = la aritmética decide el agregado** (decisión de Luis, 20 ago). El de AG01 pasa a **V20** |
+| **V18** | "El bloque de datos verificados es internamente consistente" | "Ningún mandamiento edita prosa" | **V18 = ningún mandamiento edita prosa.** El de AG01 pasa a **V21** |
+| **V19** | — | "Un agregado ambiguo nunca descarta el resto" | **Sin colisión.** V19 se confirma con ese significado |
+
+**Por qué se renumeran los de AG01 y no los de AG08**, pese a que la regla general de §15.1 diga
+"renumera el más reciente": los números **V18** y **V19** de AG08 ya están **en el código y en la
+batería** —`src/app/api/chat/route.ts:807` cita V18 por su significado de "M10 sensor", y los tests
+de las compuertas citan V19— además de en cuatro informes. Los de AG01 viven solo en informes de
+revisión. Renumerar el lado que está cableado invalidaría referencias vivas; renumerar el otro no
+rompe nada. Luis fijó además V17-V19 explícitamente el 20 de agosto. La regla general sigue en pie
+para la próxima colisión: **ante duda, se mueve el número más reciente y el que menos referencias
+vivas tenga.**
+
+| # | Invariante renumerado | Antes | Estado |
+|---|---|---|---|
+| **V20** | Ninguna capa de reparación reintroduce una cifra eliminada por falta de respaldo | "V17" de AG01 (ronda 1) | Implementado y verificado en las rondas 2-5: M10 ya no lee `ctx.raw` |
+| **V21** | El bloque de datos verificados es internamente consistente | "V18" de AG01 (ronda 1) | Implementado y verificado: rederivación + guarda que **suprime** el desglose en vez de loguear |
+
+**Toda referencia a "V17"/"V18" en informes anteriores al 20 de agosto** debe leerse con esta tabla
+delante: los informes **no se reescriben** (§16), se interpretan. En los informes de AG01 de las
+rondas 1-7, "V17" significa V20 y "V18 (el mío)" significa V21; el "V18" de AG08 es el V18 canónico.
+
+#### Regla de proceso — ningún invariante nace en un prompt
+
+Se añade a §15 (ver §15.1):
+
+> **Ningún invariante nace en un prompt. Si una tanda necesita un invariante nuevo, entra al
+> contrato en el MISMO ciclo, no después.**
+
+**Registro:** V14, V15, V16, V17, V18 y V19 **vivieron solo en prompts durante varias rondas**,
+dejando al revisor adversarial sin especificación contra la que juzgar. V14-V16 se cerraron tarde en
+E9; V17-V19 se cierran aquí, siete rondas después de nacer. El coste no es teórico: una instrucción
+de prompt quedó obsoleta frente al contrato y el agente ejecutó la versión vieja — una tanda
+completa perdida. E7/E8 ya tuvieron que existir solo para desambiguar numeración, y esta enmienda
+es la tercera vez que el contrato paga la misma factura.
+
+El corolario operativo, para que la regla no dependa de la memoria de nadie: **el prompt de
+implementación no inventa invariantes — cita §9.1.** Si hace falta uno que no está, la enmienda se
+escribe antes de que la tanda arranque, no después de que el revisor la eche en falta.
