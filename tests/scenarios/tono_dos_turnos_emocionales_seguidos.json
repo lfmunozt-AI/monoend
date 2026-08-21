@@ -1,0 +1,28 @@
+{
+  "name": "tono_dos_turnos_emocionales_seguidos",
+  "playbook": "PB1",
+  "language": "es",
+  "description": "PIEZA 5a/6 (complemento, 5ª tanda): con un crédito activo pendiente de TAE (T1), dos turnos emocionales seguidos (T2, T3) heredan carril FINANCIERO por continuidad con missing=['tae'] no vacío — el caso donde, SIN la señal emocional, el cierre forzado normalmente reaparecería. La frontera de autoridad reducida se mantiene en AMBOS turnos (no solo en el primero). El anti-molde (nunca dos aperturas iguales) es una decisión del MODELO, no mecánica: aquí solo se verifica que las dos respuestas — escritas con aperturas distintas — sobreviven intactas, sin que se les añada la petición canónica de la TAE; la variedad real se valida cualitativamente en producción, no con fixtures.",
+  "turns": [
+    {
+      "user": "Gano 2300 euros al mes y mis gastos son 1750. Quiero financiar un carro de 15000 a 36 meses.",
+      "fixtureResponse": "Con una TAE de referencia del 7%, la cuota rondaría los 463,15 €/mes. ¿Qué TAE te ofrece tu banco?",
+      "expectCarril": "FINANCIERO",
+      "expectBlocked": false
+    },
+    {
+      "user": "estoy agobiado, no llego a fin de mes y no sé qué hacer",
+      "fixtureResponse": "Entiendo que agobia no ver la salida — es una sensación real y no exagerada. Antes de cualquier número, dime: ¿qué es lo que más te preocupa ahora mismo, el mes que viene o algo más grande?",
+      "expectCarril": "FINANCIERO",
+      "expectEmocional": true,
+      "expectNotContains": ["¿Qué TAE te ofrece tu banco?", "me compartes tus ingresos"]
+    },
+    {
+      "user": "tengo miedo de no poder pagar el alquiler este mes",
+      "fixtureResponse": "El alquiler de este mes es lo urgente, y vamos a mirarlo con calma. Si me dices cuánto te falta exactamente, empezamos por ahí — sin dar vueltas a nada más.",
+      "expectCarril": "FINANCIERO",
+      "expectEmocional": true,
+      "expectNotContains": ["¿Qué TAE te ofrece tu banco?", "me compartes tus ingresos"]
+    }
+  ]
+}

@@ -23,11 +23,34 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { BlockedFigure, GroundingResult } from "./validate";
 import { detectLanguage, DEFAULT_LANGUAGE, type Language } from "../language";
-import { segmentSentences, splitSentences, isPercent, isTimeUnit, hasReferenceMarker } from "./context";
+import {
+  segmentSentences,
+  splitSentences,
+  isPercent,
+  isTimeUnit,
+  hasReferenceMarker,
+  conceptsInSentence,
+} from "./context";
 import { findNumberMentions } from "./numbers";
 import type { Carril } from "./turn-classifier";
+import { DEFAULT_ENFORCEMENT_MODE, type EnforcementMode } from "./enforcement";
 
 export type PolicyMode = "mvp" | "passthrough";
+
+/**
+ * REGISTRO DE MUTACIONES — cada capa que reescribe texto (grounding, policy,
+ * validator, resolveClosing) añade una entrada aquí. Habilita el diagnóstico de
+ * capa en `enforceCommandments`: ante una violación puede señalar QUIÉN la
+ * causó ("Mandamiento 8 violado — capa: grounding, regla: posicional_monto,
+ * antes: '1', después: '7000'") y, cuando la mutación es la causa, REVERTIR al
+ * valor original en vez de adivinar una corrección nueva.
+ */
+export interface Mutation {
+  capa: string;
+  regla: string;
+  antes: string;
+  despues: string;
+}
 
 export interface PolicyOptions {
   /** "mvp" (reescribe la frase) | "passthrough" (solo loguea). Por defecto "mvp". */
@@ -39,6 +62,18 @@ export interface PolicyOptions {
   dataHint?: string;
   /** Idioma del cierre. Si no se da, se infiere de la respuesta del modelo. */
   idioma?: Language;
+  /**
+   * REGISTRO DE MUTACIONES (PIEZA 5) — toda operación que modifique el texto se
+   * anota aquí: correcciones en sitio Y eliminaciones de frase. El punto ciego
+   * del Caso A (texto sustituido con `mutations: []`) impedía que The
+   * Commandments detectara ni revirtiera nada.
+   */
+  mutations?: Mutation[];
+  /**
+   * PIEZA 1 — en `minimal` NUNCA se reescribe una cifra: la frase se ELIMINA
+   * (bloquear lo falso sí; sustituirlo por una cifra nuestra, no).
+   */
+  enforcement?: EnforcementMode;
 }
 
 /** Entrada de log: SOLO metadatos. Nunca el texto del usuario ni la respuesta. */
@@ -78,78 +113,13 @@ const GENERIC_REQUEST: Record<Language, string> = {
   en: "To give you exact numbers I need your monthly expenses and your goal. Can you share both?",
 };
 
-/** Plantilla del cierre con pista explícita del llamante (`dataHint`). */
-const HINT_REQUEST: Record<Language, (hint: string) => string> = {
-  es: (h) => `Para darte esa cifra necesito conocer tu ${h}. ¿Me lo compartes?`,
-  pt: (h) => `Para te dar esse número preciso de saber o teu ${h}. Partilhas comigo?`,
-  en: (h) => `To give you that number I need to know your ${h}. Can you share it?`,
-};
-
 /**
- * Petición específica por etiqueta de la cifra bloqueada. Si el modelo inventó
- * "gastarás 2000 al mes", la etiqueta es "gasto" y el dato que falta son sus
- * gastos reales. Solo se usa cuando TODAS las cifras bloqueadas comparten una
- * misma etiqueta conocida; con etiquetas mezcladas, el cierre genérico.
- *
- * Las claves (gasto, ingreso…) las produce `detectLabel`, que trabaja en ES: son
- * identificadores internos, no texto de cara al usuario.
- */
-const REQUEST_BY_LABEL: Record<Language, Record<string, string>> = {
-  es: {
-    gasto: "Para darte esa cifra necesito tus gastos mensuales. ¿Me los compartes?",
-    ingreso: "Para darte esa cifra necesito tus ingresos mensuales. ¿Me los compartes?",
-    meta: "Para darte esa cifra necesito tu meta y el plazo en que la quieres. ¿Me lo cuentas?",
-    ahorro: "Para darte esa cifra necesito saber cuánto ahorras cada mes. ¿Me lo compartes?",
-    deuda: "Para darte esa cifra necesito el importe pendiente de tus deudas. ¿Me lo compartes?",
-    interes: "Para darte esa cifra necesito la tasa de interés que pagas. ¿Me la compartes?",
-    renta: "Para darte esa cifra necesito cuánto pagas de alquiler al mes. ¿Me lo compartes?",
-  },
-  pt: {
-    gasto: "Para te dar esse número preciso das tuas despesas mensais. Partilhas comigo?",
-    ingreso: "Para te dar esse número preciso dos teus rendimentos mensais. Partilhas comigo?",
-    meta: "Para te dar esse número preciso da tua meta e do prazo. Contas-me?",
-    ahorro: "Para te dar esse número preciso de saber quanto poupas por mês. Partilhas comigo?",
-    deuda: "Para te dar esse número preciso do valor em dívida. Partilhas comigo?",
-    interes: "Para te dar esse número preciso da taxa de juro que pagas. Partilhas comigo?",
-    renta: "Para te dar esse número preciso de saber quanto pagas de renda por mês. Partilhas comigo?",
-  },
-  en: {
-    gasto: "To give you that number I need your monthly expenses. Can you share them?",
-    ingreso: "To give you that number I need your monthly income. Can you share it?",
-    meta: "To give you that number I need your goal and its deadline. Can you tell me?",
-    ahorro: "To give you that number I need to know how much you save each month. Can you share it?",
-    deuda: "To give you that number I need your outstanding debt. Can you share it?",
-    interes: "To give you that number I need the interest rate you pay. Can you share it?",
-    renta: "To give you that number I need how much rent you pay monthly. Can you share it?",
-  },
-};
-
-/**
- * Cierre estándar (genérico) del guardarraíl v2, por idioma. Exportado para que
- * el enforcement del validador (C1) reutilice EXACTAMENTE la misma frase en vez
- * de mantener una réplica que se desincronice.
+ * Cierre estándar (genérico) del guardarraíl v2, por idioma. AUDITORÍA AG01
+ * (H3): ya no la usa `applyPolicy` ni `enforceOutputPolicy` para insertar un
+ * cierre (esa autoridad es única de `resolveClosing`) — queda exportada como
+ * utilidad de referencia por si algún consumidor externo la necesita.
  */
 export function standardClosingRequest(lang: Language = DEFAULT_LANGUAGE): string {
-  return GENERIC_REQUEST[lang];
-}
-
-/**
- * Construye la ÚNICA línea de cierre. Precedencia:
- *   1. `dataHint` explícito del llamante.
- *   2. Etiqueta única entre las cifras bloqueadas (gasto, ingreso, meta…).
- *   3. Genérico.
- */
-function buildClosingRequest(
-  entries: GuardrailLogEntry[],
-  hint: string | undefined,
-  lang: Language,
-): string {
-  if (hint) return HINT_REQUEST[lang](hint);
-
-  const byLabel = REQUEST_BY_LABEL[lang];
-  const labels = new Set(entries.map((e) => e.etiqueta).filter((l) => l in byLabel));
-  if (labels.size === 1) return byLabel[[...labels][0]];
-
   return GENERIC_REQUEST[lang];
 }
 
@@ -356,7 +326,9 @@ export function stripDelegativeClosing(text: string): string {
 // Filosofía: el código decide QUÉ se pregunta, el modelo lo redacta.
 
 // Keywords por campo (ES/PT/EN), sobre texto normalizado (sin acentos, minúsculas).
-const MISSING_KEYWORDS: Record<string, RegExp> = {
+// Exportado: `assertOutputInvariants` (invariants.ts) lo reutiliza para decidir
+// qué pregunta de cierre conservar cuando sobreviven dos (invariante a).
+export const MISSING_KEYWORDS: Record<string, RegExp> = {
   tae: /\b(tae|taeg|tasa|taxa|juros|interes|interest|apr)\b|banco\s+te\s+ofrece/,
   gastos: /\b(gastos?|despesas?|expenses?|spending)\b/,
   ingreso: /\b(ingresos?|salario|rendimento|income|earn)\b/,
@@ -476,43 +448,156 @@ export function enforceMissingClosing(
 //
 // `resolveClosing` es la ÚNICA función que el route llama para decidir el
 // cierre: una sola decisión, por carril, con el missing como máxima prioridad.
+
+// FIX 5 (2ª tanda) — "YA PIDE CUALQUIER DATO CONCRETO". QA real: el modelo
+// cerró con "Dime el precio del carro y en cuántos meses planeas comprarlo" —
+// una petición legítima de OTRO dato, no de missing[0] — y se sustituyó por el
+// cierre canónico. `endsWithRequestOrProposal` ya cubre "?" y los verbos de
+// PROPOSAL_RE; esto añade el caso de una petición interrogativa que NOMBRA un
+// campo concreto sin encajar exactamente en esos patrones. Acotado a propósito:
+// exige AMBAS señales (un marcador interrogativo Y el nombre de un campo) para
+// no confundir una frase puramente declarativa ("tu meta es un carro de 30000
+// en 36 meses", que no pide nada) con una petición real.
+const INTERROGATIVE_RE = new RegExp(
+  "\\b(" +
+    "que|qual|cual|cuanto|cuantos|cuanta|cuantas|como|cuando|donde|" + // ES
+    "quanto|quantos|quanta|quantas|quando|onde|" + // PT extra
+    "what|which|how|when|where" + // EN
+  ")\\b",
+);
+
+/** ¿La última frase ya pide CUALQUIER dato concreto (no necesariamente missing[0])? */
+function pideDatoConcreto(text: string): boolean {
+  if (endsWithRequestOrProposal(text)) return true;
+  const last = lastSentence(text);
+  if (!last) return false;
+  const n = norm(last);
+  if (!INTERROGATIVE_RE.test(n)) return false;
+  return Object.values(MISSING_KEYWORDS).some((re) => re.test(n));
+}
+
 export interface ResolveClosingOptions {
   carril: Carril;
   missing: string[];
   lang?: Language;
+  /** PIEZA 1 — en `minimal` el cierre NUNCA se añade ni se sustituye. */
+  enforcement?: EnforcementMode;
 }
 
 /**
  * Decide el cierre de la respuesta según el carril del turno (Pieza 1).
+ *
+ * PIEZA 4 (esta tanda) — EL CIERRE SOLO AÑADE, NUNCA PISA. Antes, con `missing`
+ * no vacío, `enforceMissingClosing` SUSTITUÍA el cierre del modelo aunque fuera
+ * una pregunta legítima ("¿Quieres que te prepare un recordatorio mensual para
+ * la cuota?" → "¿Qué TAE te ofrece tu banco?"). Eso es reemplazar prosa buena
+ * por plantilla: prohibido. La prioridad del `missing` sigue viva donde no hace
+ * daño — cuando el modelo NO cerró con nada, ahí sí se añade la petición.
  *
  * 1. META → texto intacto: no hay grounding de cifras ni cierre forzado en
  *    charla trivial, identidad o agradecimientos.
  * 2. MIXTO → solo elimina un cierre delegativo (o colapsa un duplicado);
  *    NUNCA añade nada — el turno mezcla charla y datos, no se le impone guion.
  * 3. FINANCIERO:
- *    a) `missing` no vacío → el cierre DEBE pedir `missing[0]`. Se limpia la
- *       delegación primero (sin añadir su propio cierre) y se enforza el
- *       campo exacto — así nunca compiten dos cierres canónicos.
- *    b) `missing` vacío y el cierre es delegativo → petición canónica de insumo.
- *    c) resto → intacto.
+ *    a) cierre DELEGATIVO (pide análisis al usuario, viola el ADN) → se elimina
+ *       y se sustituye por la petición canónica. Es la ÚNICA sustitución que
+ *       sobrevive a esta tanda: lo delegativo no es "prosa buena".
+ *    b) la respuesta YA pide CUALQUIER dato concreto (no necesariamente
+ *       missing[0]) → INTACTA.
+ *    c) sin ningún cierre y con `missing` → se AÑADE la petición canónica.
+ *    d) sin cierre y sin `missing` → intacta (no hay nada que pedir).
  *
- * GARANTÍA: exactamente UNA pregunta al cierre. Si hubiera dos candidatas, la
- * de mayor prioridad (missing) es la que sobrevive, porque es la única que
- * llega a ejecutarse en la rama (a).
+ * GARANTÍA: como mucho UNA pregunta añadida por esta capa; The Commandments
+ * (M1) sigue siendo la red de seguridad si el propio modelo escribió dos.
  */
 export function resolveClosing(text: string, opts: ResolveClosingOptions): string {
   const { carril, missing } = opts;
   const lang = opts.lang ?? detectLanguage(text) ?? DEFAULT_LANGUAGE;
+  const enforcement = opts.enforcement ?? DEFAULT_ENFORCEMENT_MODE;
 
   if (carril === "META") return text;
 
   if (carril === "MIXTO") return stripDelegativeClosing(text);
 
   // FINANCIERO
-  if (missing && missing.length > 0) {
-    return enforceMissingClosing(stripDelegativeClosing(text), missing, lang);
+  const eraDelegativo = isDelegativeClosing(text);
+  const limpio = eraDelegativo ? stripDelegativeClosing(text) : text;
+
+  // MINIMAL: eliminar la delegación es BLOQUEO (legítimo); añadir o sustituir
+  // un cierre es reescritura (desactivada).
+  if (enforcement === "minimal") return limpio;
+
+  // FIX 5 (7ª tanda, testdev6) — GARANTÍA INCONDICIONAL DE UN SOLO CIERRE. Sea
+  // cual sea el camino que tome esta función (delegativo sustituido, cierre
+  // añadido, o el texto del modelo dejado intacto), el resultado NUNCA puede
+  // llevar más de una pregunta final — "Si la respuesta YA termina en
+  // pregunta, no se añade nada. Sin excepciones." Antes esta garantía solo
+  // vivía en Commandments (Mandamiento 1, más adelante en la cadena); ahora
+  // `resolveClosing` la aplica a SU PROPIA salida en cada retorno, así que un
+  // segundo cierre nunca sale de esta función, ni siquiera transitoriamente.
+  const unaSolaPregunta = (t: string): string => maxOneClosingQuestion(t, missing ?? []).texto;
+
+  // (a) el cierre delegativo se sustituye por la petición canónica.
+  if (eraDelegativo) {
+    return unaSolaPregunta(
+      missing && missing.length > 0
+        ? enforceMissingClosing(limpio, missing, lang)
+        : rewriteDelegativeClosing(text, lang),
+    );
   }
-  return rewriteDelegativeClosing(text, lang);
+
+  // (b) el modelo YA pide cualquier dato concreto → intacto (salvo colapsar un
+  // posible segundo cierre que el propio modelo hubiera escrito).
+  if (pideDatoConcreto(limpio)) return unaSolaPregunta(limpio);
+
+  // (c) no hay cierre: se AÑADE el canónico del dato que falta.
+  if (missing && missing.length > 0) return unaSolaPregunta(enforceMissingClosing(limpio, missing, lang));
+
+  // (d) nada que pedir y nada que arreglar.
+  return unaSolaPregunta(limpio);
+}
+
+// ── Mandamiento 1 — máx. 1 pregunta final ────────────────────────────────────
+// Bloque de cierre: frases finales que son pregunta/propuesta, recolectadas
+// desde el final mientras lo sean (mismo criterio que `enforceMissingClosing`).
+//
+// FIX 5 (7ª tanda) — vivía solo en commandments.ts (Mandamiento 1), corriendo
+// DESPUÉS de `resolveClosing` en la cadena. Se mueve aquí (policy.ts) y se
+// exporta para que `resolveClosing` la aplique a SU PROPIA salida — Commandments
+// sigue siendo la red de seguridad final (por si otra capa aguas abajo
+// reintroduce un segundo cierre), pero ya no es la ÚNICA barrera.
+export function maxOneClosingQuestion(
+  text: string,
+  missing: string[],
+): { texto: string; corregido: boolean } {
+  const sentences = splitSentences(text);
+  if (sentences.length === 0) return { texto: text, corregido: false };
+
+  let start = sentences.length;
+  while (start > 0 && endsWithRequestOrProposal(sentences.slice(0, start).join(" "))) {
+    // endsWithRequestOrProposal opera sobre la ÚLTIMA frase del texto que se le
+    // pase: reconstruimos el prefijo para evaluar cada candidata desde el final.
+    start--;
+  }
+  const closingIdxs: number[] = [];
+  for (let i = sentences.length - 1; i >= start; i--) closingIdxs.unshift(i);
+
+  const questionIdxs = closingIdxs.filter((i) => sentences[i].trim().endsWith("?"));
+  if (questionIdxs.length <= 1) return { texto: text, corregido: false };
+
+  // Prioridad: la pregunta que menciona missing[0] gana; si ninguna lo hace, la
+  // ÚLTIMA (la más reciente en la respuesta) gana.
+  const field = missing[0] === "meta_monto" ? "meta" : missing[0];
+  const keywordRe = field ? MISSING_KEYWORDS[field] : undefined;
+  let keepIdx = questionIdxs[questionIdxs.length - 1];
+  if (keywordRe) {
+    const withKeyword = questionIdxs.find((i) => keywordRe.test(norm(sentences[i])));
+    if (withKeyword !== undefined) keepIdx = withKeyword;
+  }
+
+  const drop = new Set(questionIdxs.filter((i) => i !== keepIdx));
+  const texto = cleanup(sentences.filter((_, i) => !drop.has(i)).join(" "));
+  return { texto, corregido: true };
 }
 
 // ── PIEZA 4 — simulación: prohibir la afirmación falsa ───────────────────────
@@ -525,8 +610,12 @@ export function resolveClosing(text: string, opts: ResolveClosingOptions): strin
 //      trae un marcador de referencia, se inserta la cláusula canónica.
 
 // Afirmación falsa: la cuota simulada SÍ incluye la TAE de referencia.
+// AUDITORÍA AG01 (H4): amplía a los negadores de TAE/tasa, no solo de
+// "intereses" — QA real: "(sin considerar la TAE)" sobrevivía junto a la
+// cláusula canónica "(simulación con TAE de referencia…)" porque este regex
+// solo cazaba variantes de *intereses*, nunca de *TAE/tasa* directamente.
 const FALSE_NO_INTEREST_RE =
-  /,?\s*\(?\s*(sin incluir intereses|sin intereses|no incluye intereses|sem juros|sem incluir juros|without interest|excluding interest)\s*\)?/gi;
+  /,?\s*\(?\s*(sin incluir intereses|sin intereses|no incluye intereses|sem juros|sem incluir juros|without interest|excluding interest|sin considerar (?:la )?(?:tae|taeg|tasa)|sin tener en cuenta (?:la )?(?:tae|taeg|tasa)|sin (?:la )?(?:tae|taeg|tasa)|excluyendo (?:la )?(?:tae|taeg|tasa)|sem considerar a (?:taeg|taxa)|sem ter em conta a (?:taeg|taxa)|sem a (?:taeg|taxa)|excluindo a (?:taeg|taxa)|without considering (?:the )?(?:apr|interest rate)|without the (?:apr|interest rate)|excluding (?:the )?(?:apr|interest rate))\s*\)?/gi;
 
 // Marcador de que la cuota es una simulación, no la cifra real del banco.
 const SIMULATION_MARKER_RE = /(simulac|de referencia|tae del 7|orientativo)/;
@@ -560,12 +649,23 @@ export function enforceSimulationHonesty(
   const out = cleanup(text.replace(FALSE_NO_INTEREST_RE, ""));
 
   // b) inserta el marcador de simulación en la frase de la cuota, si falta.
+  // AUDITORÍA AG01 (H2, bug descubierto al validar la coordinación de cierre):
+  //   1. El marcador se comprueba en TODO el texto, no frase a frase — si una
+  //      frase anterior ya lo trae, ninguna otra necesita uno propio. Antes,
+  //      una frase de cierre como "Con ese dato la cuota es exacta al 100%"
+  //      (literal de MISSING_REQUEST.tae) volvía a calificar como "mención de
+  //      cuota sin marcador" y se llevaba una SEGUNDA cláusula.
+  //   2. La cifra candidata debe ser un MONTO real, no un porcentaje: "100%" en
+  //      esa misma frase de cierre pasaba el chequeo de `/\d/` sin más.
+  if (SIMULATION_MARKER_RE.test(norm(out))) return out;
+
   let inserted = false;
   const rebuilt = segmentSentences(out)
     .map((seg) => {
       if (inserted) return seg.text;
       const n = norm(seg.text);
-      if (!CUOTA_MENTION_RE.test(n) || !/\d/.test(n) || SIMULATION_MARKER_RE.test(n)) {
+      const tieneMontoReal = findNumberMentions(seg.text).some((m) => !isPercent(seg.text, m));
+      if (!CUOTA_MENTION_RE.test(n) || !tieneMontoReal) {
         return seg.text;
       }
       inserted = true;
@@ -655,27 +755,197 @@ const SAFE_GENERIC: Record<Language, string> = {
   en: "To give you an exact figure I need one concrete data point — can you share your monthly income and expenses?",
 };
 
+/**
+ * Última red cuando la respuesta llega LITERALMENTE vacía y el motor no tiene
+ * nada que pedir (`missing` vacío). No cita cifras, no pide datos y no
+ * contradice el estado: es lo mínimo entregable, no una plantilla de guion.
+ */
+const SAFE_EMPTY: Record<Language, string> = {
+  es: "Tomo nota. Seguimos con tu plan.",
+  pt: "Tomo nota. Seguimos com o teu plano.",
+  en: "Noted. We continue with your plan.",
+};
+
 function safeAsk(missing: string | undefined, lang: Language): string {
   const key = missing === "meta_monto" ? "meta" : missing;
   const table = key ? SAFE_ASK[key] : undefined;
   return (table ?? SAFE_GENERIC)[lang];
 }
 
+// ── FIX 6 (2ª tanda) — TEXTOS CANÓNICOS PROPIOS INMUNES ──────────────────────
+//
+// QA real: "Con ese dato la cuota es exacta al 100%" (MISSING_REQUEST.tae,
+// nuestro propio cierre canónico, inyectado por `resolveClosing`) fue
+// eliminado por el Mandamiento 3 (`stripUnbackedConcepts`, commandments.ts) al
+// mencionar "cuota" sin que `conceptos.cuota` estuviera poblado todavía (missing
+// aún incluía 'tae'). Las capas posteriores NO pueden volver a juzgar lo que
+// NOSOTROS inyectamos: por construcción no citamos cifras sin respaldo. "Las
+// capas no pueden pelearse entre sí" — se marca cada texto canónico propio
+// como inmune a la reescritura de capas posteriores.
+function flattenStrings(x: unknown): string[] {
+  if (typeof x === "string") return [x];
+  if (x && typeof x === "object") return Object.values(x as Record<string, unknown>).flatMap(flattenStrings);
+  return [];
+}
+
+// FIX (4ª tanda) — QA real al conectar The Commandments al harness: la
+// respuesta segura de `output-validator.ts` cuando una garantía de
+// rentabilidad se elimina y no queda sustancia ("No puedo prometerte
+// resultados de inversión… Lo que sí puedo es calcular tu PLAN… ¿Cuál es la
+// META que quieres conquistar?") menciona "plan", termina en pregunta y no
+// cita ninguna cifra — coincide EXACTO con la forma de un "plan fantasma"
+// (Mandamiento 9). Sin registrarla aquí, M9 la confundía con un plan vaciado
+// y la REVERTÍA al raw original — es decir, devolvía la garantía prohibida
+// que la propia capa de seguridad acababa de eliminar. Duplicada literal (no
+// importada) para evitar un ciclo: `output-validator.ts` YA importa de
+// `policy.ts` (`cleanup`), así que `policy.ts` no puede importar de vuelta.
+// Si el texto de SAFE_RESPONSE cambia allí, debe actualizarse aquí también.
+const SAFE_RESPONSE_OUTPUT_VALIDATOR: Record<Language, string> = {
+  es:
+    "No puedo prometerte resultados de inversión — nadie puede con honestidad. " +
+    "Lo que sí puedo es calcular tu plan con tus datos reales. " +
+    "¿Cuál es la meta que quieres conquistar?",
+  pt:
+    "Não posso prometer-te resultados de investimento — ninguém pode com honestidade. " +
+    "O que posso é calcular o teu plano com os teus dados reais. " +
+    "Qual é a meta que queres conquistar?",
+  en:
+    "I can't promise you investment returns — nobody honestly can. " +
+    "What I can do is build your plan from your real numbers. " +
+    "What's the goal you want to conquer?",
+};
+
+// Se registra tanto el texto COMPLETO de cada plantilla como cada una de sus
+// oraciones por separado (`splitSentences`): varias plantillas (MISSING_REQUEST)
+// son DOS oraciones ("¿Qué TAE…? Con ese dato…") y las capas posteriores
+// (Mandamiento 3) filtran frase a frase — sin esto, ninguna mitad calzaría
+// exacta contra el texto completo.
+const TEXTOS_CANONICOS = new Set(
+  [SAFE_ASK, SAFE_GENERIC, SAFE_EMPTY, MISSING_REQUEST, INSUMO_REQUEST, GENERIC_REQUEST, SAFE_RESPONSE_OUTPUT_VALIDATOR]
+    .flatMap(flattenStrings)
+    .flatMap((s) => [s, ...splitSentences(s)])
+    .map((s) => s.trim().toLowerCase()),
+);
+
+/** ¿`sentence` ES (exactamente, tras normalizar) uno de nuestros textos canónicos (o una de sus oraciones)? */
+export function esTextoCanonico(sentence: string): boolean {
+  return TEXTOS_CANONICOS.has(sentence.trim().toLowerCase());
+}
+
+// ── PIEZA 2 — ¿la respuesta está REALMENTE vacía? ────────────────────────────
+//
+// CAUSA RAÍZ del Caso B del diagnóstico: `ensureSubstance` juzgaba "esqueleto"
+// TODA respuesta sin cifras y <220 caracteres. Un turno conversacional natural
+// (confirmar un registro, proponer el siguiente paso, redirigir una digresión)
+// no lleva cifras y es corto → se destruía SIEMPRE. Ahora solo actúa cuando no
+// queda nada que entregar.
+
+// Formas verbales frecuentes (ES/PT/EN), sobre texto normalizado sin acentos.
+const VERB_FORMS_RE = new RegExp(
+  "\\b(" +
+    // ES — copulativos, auxiliares y modales
+    "soy|eres|es|somos|sois|son|era|eran|fue|fui|sera|seran|sere|seria|" +
+    "estoy|estas|esta|estamos|estan|estaba|estuve|" +
+    "hay|he|has|ha|hemos|han|habia|hubo|" +
+    "tengo|tienes|tiene|tenemos|tienen|tenia|" +
+    "voy|vas|va|vamos|van|" +
+    "puedo|puedes|puede|podemos|pueden|" +
+    "quiero|quieres|quiere|debo|debes|debe|" +
+    "hago|haces|hace|hare|" +
+    // ES — imperativos cortos frecuentes en respuestas del Consigliere
+    "di|dime|dame|mira|revisa|manda|envia|pasa|sigue|ve|" +
+    // PT
+    "sou|somos|sao|estou|estao|tem|temos|tenho|vou|vais|pode|podes|quero|queres|faco|faz|" +
+    // EN
+    "is|are|am|was|were|be|been|being|have|has|had|do|does|did|" +
+    "can|could|will|would|should|need|needs|let|share|tell|send" +
+    ")\\b",
+);
+
+// Morfología verbal productiva: infinitivos, gerundios, participios y las
+// terminaciones conjugadas más comunes. DELIBERADAMENTE AMPLIO: un falso
+// positivo significa NO tocar el texto (dirección segura); un falso negativo
+// significaría destruir prosa buena (dirección prohibida).
+const VERB_SUFFIX_RE =
+  /\b[a-zñç]{3,}(?:ar|er|ir|amos|emos|imos|aste|aron|ando|endo|indo|ados?|adas?|idos?|idas?|aba|aban|ia|ian|aria|eria|iria|are|eras|aremos)\b/i;
+
+/** ¿Hay al menos una frase con verbo? (heurística amplia por diseño) */
+export function tieneVerbo(text: string): boolean {
+  const n = norm(text);
+  return VERB_FORMS_RE.test(n) || VERB_SUFFIX_RE.test(n);
+}
+
+// Confirmación de registro / acuse de recibo: sustancia conversacional válida.
+const CONFIRMACION_RE = new RegExp(
+  "\\b(" +
+    "registrado|registrada|anotado|anotada|apuntado|guardado|actualizado|fijado|" +
+    "hecho|listo|perfecto|entendido|confirmado|de acuerdo|tomo nota|queda claro|" +
+    "registado|feito|pronto|anotei|combinado|" +
+    "noted|logged|recorded|done|got it|understood|all set" +
+    ")\\b",
+);
+
 /**
- * Garantiza que la respuesta tenga sustancia. Si NO contiene ninguna cifra real
- * Y es corta (<220) o solo relleno genérico, la sustituye por una petición segura
- * del dato que falta. Si ya trae una cifra real, la deja intacta. Puro.
+ * ¿El texto tiene SUSTANCIA CONVERSACIONAL? Cuenta como sustancia válida —y por
+ * tanto NO se toca— cualquiera de estas: confirmación, propuesta de siguiente
+ * paso, pregunta del propio modelo, mención a un concepto del estado, o una
+ * explicación con verbo de longitud normal (incluida la redirección de una
+ * digresión, que es exactamente eso).
+ */
+export function tieneSustanciaConversacional(text: string): boolean {
+  const t = text.trim();
+  if (!t) return false;
+  const n = norm(t);
+  if (CONFIRMACION_RE.test(n)) return true;              // confirmación
+  if (PROPOSAL_RE.test(n)) return true;                  // propuesta / siguiente paso
+  if (t.includes("?")) return true;                      // pregunta del propio modelo
+  if (conceptsInSentence(t).length > 0) return true;     // menciona un concepto del estado
+  return t.length >= 30 && tieneVerbo(t);                // explicación normal
+}
+
+/**
+ * ¿Es puro relleno genérico ("necesito más información para ayudarte mejor")?
+ * No es prosa buena que proteger: no confirma, no propone y no explica nada.
+ * Solo cuenta como relleno si NO trae ninguna otra sustancia.
+ */
+function esRellenoGenerico(text: string): boolean {
+  if (!GENERIC_SKELETON.test(text)) return false;
+  if (hasValidSubstance(text)) return false;
+  if (conceptsInSentence(text).length > 0) return false;
+  return text.trim().length < 220;
+}
+
+/**
+ * ÚLTIMO RECURSO (PIEZA 2). Actúa SOLO si la respuesta está realmente vacía:
+ * menos de 30 caracteres, o sin ninguna frase con verbo, o puro relleno
+ * genérico. Cualquier otra cosa —confirmación, propuesta, redirección de
+ * digresión, explicación sin cifras, pregunta del modelo, mención a un concepto
+ * del estado— se entrega INTACTA.
+ *
+ * REGLA DEL CASO A: si `missing` está vacío, está PROHIBIDO pedir datos. El
+ * motor ya los tiene; una plantilla pidiéndolos es una contradicción del propio
+ * sistema ("Para darte una cifra exacta necesito tus ingresos y gastos" con
+ * ingreso 2300, gastos 1750 y cuota ya calculada). Mejor un hueco que una
+ * mentira.
+ *
+ * En modo `minimal` no actúa nunca. Puro.
  */
 export function ensureSubstance(
   text: string,
-  opts: { lang?: Language; missing?: string[] } = {},
+  opts: { lang?: Language; missing?: string[]; enforcement?: EnforcementMode } = {},
 ): string {
+  if ((opts.enforcement ?? DEFAULT_ENFORCEMENT_MODE) === "minimal") return text;
+
   const lang = opts.lang ?? detectLanguage(text);
-  if (hasValidSubstance(text)) return text; // cifra real o referencia % etiquetada
-  const esCorto = text.trim().length < 220;
-  const esGenerico = GENERIC_SKELETON.test(text);
-  if (!esCorto && !esGenerico) return text; // largo y con contenido: se respeta
-  return safeAsk(opts.missing?.[0], lang);
+  const missing0 = opts.missing?.[0];
+
+  const vacia = !hasValidSubstance(text) && !tieneSustanciaConversacional(text);
+  if (!vacia && !esRellenoGenerico(text)) return text;
+
+  // Caso A — prohibido pedir lo que el motor ya tiene.
+  if (!missing0) return text.trim() ? text : SAFE_EMPTY[lang];
+
+  return safeAsk(missing0, lang);
 }
 
 // ── Limpieza ───────────────────────────────────────────────────────────────
@@ -684,6 +954,13 @@ export function ensureSubstance(
  * Tras eliminar frases quedan espacios dobles y líneas huérfanas. Se colapsan
  * los espacios internos, se recortan las líneas y se reducen los saltos
  * múltiples a un máximo de párrafo.
+ *
+ * FIX 5 (4ª tanda) — GARANTÍA DE ESPACIO ENTRE FRASES. QA real: al eliminar la
+ * frase de en medio, las dos que sobrevivían quedaban pegadas sin espacio
+ * ("Tu observación es justa.Confirma si quieres..."). Se inserta un espacio
+ * entre un cierre de frase (.!?) y la mayúscula/¿/¡ que la sigue SIN espacio —
+ * cosmético y seguro: nunca toca separadores de miles ("1.234", dígito tras el
+ * punto) ni pasa dentro de una misma frase bien formada (que ya trae su espacio).
  *
  * Exportada: el enforcement del validador (C1) elimina frases igual que aquí y
  * necesita exactamente la misma limpieza.
@@ -694,7 +971,72 @@ export function cleanup(text: string): string {
     .map((line) => line.replace(/[ \t]+/g, " ").trim())
     .join("\n")
     .replace(/\n{3,}/g, "\n\n")
+    .replace(/([.!?])(?=[\p{Lu}¿¡])/gu, "$1 ")
     .trim();
+}
+
+// ── PIEZA 3 (2ª tanda) — RENUMERAR LISTAS TRAS ELIMINACIÓN ───────────────────
+//
+// QA real: "1. Identificar…\n2. Buscar…\n3. Mantener…\n4. Revisar…" con los
+// ítems 1 y 2 eliminados por el guardarraíl publicó "1.2.3. Mantener…\n4.
+// Revisar…". CAUSA: el segmentador de frases (`segmentSentences`, único en el
+// sistema) trata "1." como su PROPIA oración — el punto va seguido de espacio
+// + mayúscula, cumple la regla de límite de frase — separada de "Identificar…"
+// El ENUMERADOR nunca contiene una cifra financiera (`isListEnumerator` lo
+// excluye en origen), así que NUNCA aparece en `blocked`: sobrevive siempre,
+// aunque su CONTENIDO se elimine entero. Al eliminar los contenidos de los
+// ítems 1 y 2, sus enumeradores huérfanos ("1." "2.") quedan pegados entre sí
+// justo delante del primer ítem que sí sobrevivió ("3."). Nunca debe
+// publicarse un salto de numeración ni un enumerador pegado — se repara en dos
+// pasos, ambos por línea (cada ítem numerado vive en su propia línea):
+//   a) colapsar runs de 2+ enumeradores huérfanos pegados al principio de
+//      línea ("1.2.3. ") a solo el ÚLTIMO (el que de verdad precede contenido);
+//   b) renumerar 1..N cada racha CONTIGUA de líneas "N.<sep> contenido".
+
+/** Runs de 2+ enumeradores huérfanos pegados al principio de línea ("1.2.3. "). */
+function collapseGluedEnumerators(text: string): string {
+  return text.replace(
+    /^(\s*)((?:\d+[.):-]\s*){2,})/gm,
+    (_all: string, indent: string, glued: string) => {
+      const tokens = glued.match(/\d+[.):-]\s*/g) ?? [];
+      return indent + (tokens[tokens.length - 1] ?? glued);
+    },
+  );
+}
+
+/** Renumera 1..N cada racha CONTIGUA de líneas "N.<sep> contenido". */
+function renumberSequential(text: string): { texto: string; corregido: boolean } {
+  let corregido = false;
+  let contador = 0;
+  let enRacha = false;
+  const lineas = text.split("\n").map((linea) => {
+    const m = /^(\s*)(\d+)([.):-])(\s.*)$/.exec(linea);
+    if (!m) {
+      enRacha = false;
+      return linea;
+    }
+    const [, indent, numStr, sep, resto] = m;
+    contador = enRacha ? contador + 1 : 1;
+    enRacha = true;
+    if (Number(numStr) === contador) return linea;
+    corregido = true;
+    return `${indent}${contador}${sep}${resto}`;
+  });
+  return { texto: lineas.join("\n"), corregido };
+}
+
+/**
+ * Repara la numeración de una lista tras cualquier eliminación de frase
+ * (grounding o Mandamientos): colapsa enumeradores huérfanos pegados y
+ * renumera 1..N las rachas contiguas de ítems que sobrevivieron. Pura; si no
+ * hay nada que arreglar, devuelve el texto intacto.
+ */
+export function renumberLists(text: string): { texto: string; corregido: boolean } {
+  if (!text) return { texto: text, corregido: false };
+  const colapsado = collapseGluedEnumerators(text);
+  const { texto, corregido: renumerado } = renumberSequential(colapsado);
+  const corregido = colapsado !== text || renumerado;
+  return { texto: corregido ? cleanup(texto) : text, corregido };
 }
 
 /** Formatea a convención es/LatAm ("953.99" → "953,99"). */
@@ -706,13 +1048,20 @@ function esNum(n: number): string {
  * Procesa las cifras bloqueadas frase a frase:
  *   · con `correccion` (mismatch de un concepto que el motor SÍ conoce) → la
  *     cifra se corrige EN SU SITIO y la frase se conserva. El motor sabe el valor
- *     bueno, así que lo pone en vez de borrar información útil.
+ *     bueno, así que lo pone en vez de borrar información útil. En modo `minimal`
+ *     esta corrección NO se aplica: la frase se elimina (PIEZA 1).
  *   · sin `correccion` (monto inventado sin respaldo) → se elimina la frase entera.
  * Cuenta `eliminadas` (frases borradas) y `corregidas` (cifras sustituidas).
+ *
+ * PIEZA 5 — TODA operación queda registrada en `mutations`: la corrección en
+ * sitio (antes/después de la cifra) y también la ELIMINACIÓN (después = ""),
+ * que hasta ahora no dejaba rastro alguno.
  */
 function removeBlockedSentences(
   text: string,
   blocked: BlockedFigure[],
+  mutations?: Mutation[],
+  enforcement: EnforcementMode = DEFAULT_ENFORCEMENT_MODE,
 ): { texto: string; eliminadas: number; corregidas: number } {
   const segments = segmentSentences(text);
   const kept: string[] = [];
@@ -721,10 +1070,22 @@ function removeBlockedSentences(
 
   for (const seg of segments) {
     const enFrase = blocked.filter((b) => b.start >= seg.start && b.start < seg.end);
-    const aEliminar = enFrase.some((b) => b.correccion === undefined);
+    // MINIMAL: se ignora `correccion` — nunca se reescribe una cifra, se elimina
+    // la frase que la contiene.
+    const aEliminar = enFrase.some(
+      (b) => b.correccion === undefined || enforcement === "minimal",
+    );
 
     if (aEliminar) {
       eliminadas++;
+      for (const b of enFrase) {
+        mutations?.push({
+          capa: "grounding",
+          regla: b.motivo,
+          antes: seg.text.trim(),
+          despues: "",
+        });
+      }
       continue;
     }
     if (enFrase.length === 0) {
@@ -736,8 +1097,11 @@ function removeBlockedSentences(
     let s = seg.text;
     for (const b of enFrase.sort((a, c) => c.start - a.start)) {
       const rel = b.start - seg.start;
-      s = s.slice(0, rel) + esNum(b.correccion as number) + s.slice(rel + (b.end - b.start));
+      const antes = s.slice(rel, rel + (b.end - b.start));
+      const despues = esNum(b.correccion as number);
+      s = s.slice(0, rel) + despues + s.slice(rel + (b.end - b.start));
       corregidas++;
+      mutations?.push({ capa: "grounding", regla: b.motivo, antes, despues });
     }
     kept.push(s);
   }
@@ -756,10 +1120,8 @@ export function applyPolicy(
   preguntaHash: string,
   options: PolicyOptions = {},
 ): PolicyResult {
-  const { mode = "mvp", dataHint } = options;
-  const lang = options.idioma ?? detectLanguage(modelResponse) ?? DEFAULT_LANGUAGE;
+  const { mode = "mvp" } = options;
   const blocked = validation.cifras_bloqueadas;
-  const referencias = validation.cifras_aprobadas.filter((c) => c.categoria === "referencia");
 
   const logEntries: GuardrailLogEntry[] = blocked.map((b) => ({
     cifra_bloqueada: b.valor,
@@ -774,44 +1136,32 @@ export function applyPolicy(
     return { texto_final: modelResponse, bloqueado: blocked.length > 0, logEntries };
   }
 
+  // AUDITORÍA AG01 (H3) — esta capa SOLO sanea cifras (elimina/corrige); ya NO
+  // inserta cierre. Antes, la "tercera vía" y el camino de eliminación llamaban
+  // `appendClosing(..., buildClosingRequest(...))` — un segundo (y tercer) punto
+  // de inserción de pregunta que `resolveClosing` (la única autoridad de cierre,
+  // PIPELINE_CONTRACT.md §2) no siempre revertía → doble cierre real de QA.
   if (blocked.length === 0) {
-    // TERCERA VÍA: la respuesta cita un estándar etiquetado como referencia. Se
-    // permite, pero un estándar sin petición del dato personal se lee como
-    // diagnóstico. Si la respuesta no reclama el dato, el cierre lo reclama.
-    if (referencias.length > 0 && !containsDataRequest(modelResponse)) {
-      const texto_final = appendClosing(cleanup(modelResponse), buildClosingRequest([], dataHint, lang));
-      return { texto_final, bloqueado: false, logEntries };
-    }
+    // TERCERA VÍA: la respuesta cita un estándar etiquetado como referencia sin
+    // reclamar el dato personal. Se deja pasar igual — que el cierre lo decida
+    // `resolveClosing`/`assertOutputInvariants`, no esta capa.
     return { texto_final: modelResponse, bloqueado: false, logEntries };
   }
 
-  // MODO MVP (v2): corrige las cifras de concepto conocido en su sitio, elimina
-  // las frases con montos inventados y, si hubo eliminaciones, cierra UNA vez.
-  const { texto, eliminadas, corregidas } = removeBlockedSentences(modelResponse, blocked);
+  // MODO MVP (v2): corrige las cifras de concepto conocido en su sitio y elimina
+  // las frases con montos inventados. El cierre (si falta tras eliminar) lo
+  // decide la capa 8, nunca esta.
+  const { texto, eliminadas, corregidas } = removeBlockedSentences(
+    modelResponse,
+    blocked,
+    options.mutations,
+    options.enforcement ?? DEFAULT_ENFORCEMENT_MODE,
+  );
 
-  // Solo hubo correcciones (ninguna frase borrada): el texto corregido es la
-  // respuesta final, sin añadir cierre — la información útil se conserva.
-  if (eliminadas === 0) {
-    return {
-      texto_final: corregidas > 0 ? texto : modelResponse,
-      bloqueado: true,
-      logEntries,
-    };
-  }
-
-  const texto_final = appendClosing(texto, buildClosingRequest(logEntries, dataHint, lang));
+  const texto_final = eliminadas === 0
+    ? (corregidas > 0 ? texto : modelResponse)
+    : texto;
   return { texto_final, bloqueado: true, logEntries };
-}
-
-/**
- * Añade la línea de cierre una sola vez. Si lo que sobrevivió ya termina en una
- * petición de dato o en una propuesta, no se duplica (regla 3). Si no sobrevivió
- * nada, la petición ES la respuesta.
- */
-function appendClosing(texto: string, cierre: string): string {
-  if (!texto) return cierre;
-  if (endsWithRequestOrProposal(texto)) return texto;
-  return `${texto}\n\n${cierre}`;
 }
 
 // ── Helpers de integración (async) ────────────────────────────────────────────

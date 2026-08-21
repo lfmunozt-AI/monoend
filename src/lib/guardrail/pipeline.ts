@@ -1,0 +1,267 @@
+// LA CADENA DE ENFORCEMENT — un solo lugar, un solo orden.
+//
+// Antes, el orden real de las capas vivía duplicado dentro de `route.ts`
+// (función `runSafetyPipeline`) y parcialmente replicado en el harness de
+// regresión. Esta tanda lo extrae aquí por dos motivos:
+//
+//   1. PIEZA 5 — REGISTRO COMPLETO DE MUTACIONES. El Caso A del diagnóstico
+//      (respuesta buena sustituida por plantilla) se registró con
+//      `mutations: []`: un punto ciego que impedía a The Commandments detectar
+//      la sustitución y revertirla. Aquí CADA paso que cambia el texto anota su
+//      mutación; si un paso cambia el texto y no anota nada por su cuenta, el
+//      envoltorio lo anota por él. Invariante de auditoría, verificable:
+//      `raw !== final` ⇒ `mutations.length > 0`.
+//   2. PIEZA 1 — el modo de enforcement se decide UNA vez y baja por toda la
+//      cadena, en vez de repetirse capa a capa.
+//
+// Contrato: la única parte async es `runGuardrail` (hash + log opcional).
+
+import { runGuardrail } from "./run";
+import {
+  ensureSubstance,
+  resolveClosing,
+  enforceSimulationHonesty,
+  renumberLists,
+  type Mutation,
+} from "./policy";
+import { enforceCommandments, type CommandmentViolation } from "./commandments";
+import { detectInjection } from "./injection";
+import { DEFAULT_ENFORCEMENT_MODE, type EnforcementMode } from "./enforcement";
+import type { Carril } from "./turn-classifier";
+import type { Language } from "../language";
+import {
+  validateConsigliereOutput,
+  enforceOutputPolicy,
+  mentionsSpecificProduct,
+} from "../llm/output-validator";
+import type { SupabaseClient } from "@supabase/supabase-js";
+
+export interface EnforcementInput {
+  /** Mensaje del usuario (para el grounding de hechos y la señal de inyección). */
+  userMessage: string;
+  /** Carril del turno (Pieza 1). */
+  carril: Carril;
+  /** Idioma del usuario — manda sobre el idioma detectado en la respuesta. */
+  lang: Language;
+  /** Qué falta para el playbook activo (scenario.missing). */
+  missing: string[];
+  /** Cifras exactas del motor (buildScenarioContext). */
+  valores: number[];
+  /** Mapa semántico concepto→valor del motor. */
+  conceptos: Record<string, number>;
+  /** ¿La cuota citada es una simulación con TAE de referencia? */
+  esSimulacion: boolean;
+  /**
+   * PIEZA 5a (complemento, 5ª tanda) — ¿el mensaje del usuario tiene tono
+   * emocional (frustración, vergüenza, miedo, pérdida de empleo…)? El
+   * enforcement solo tiene autoridad sobre cifras y hechos verificables — el
+   * tono es del modelo. Con esta señal en true, la frontera de autoridad se
+   * reduce a la misma de un turno META: SOLO corren el guardarraíl de entrada
+   * y el validador de seguridad; grounding, ensureSubstance, resolveClosing y
+   * enforceMissingClosing se DESACTIVAN, sea cual sea el carril.
+   */
+  esEmocional?: boolean;
+  /** Modo de enforcement (PIEZA 1). Por defecto, el de la env var. */
+  enforcement?: EnforcementMode;
+  /** Cliente admin para persistir el log del guardarraíl (opcional). */
+  supabase?: SupabaseClient;
+  /** Dueño del log (RLS). */
+  userId?: string;
+}
+
+export interface EnforcementResult {
+  /** Texto final a entregar al usuario. */
+  texto: string;
+  /** Registro COMPLETO de las mutaciones del turno (PIEZA 5). */
+  mutations: Mutation[];
+  /** Violaciones detectadas por The Commandments. */
+  violaciones: CommandmentViolation[];
+  /** ¿El grounding eliminó alguna frase por una cifra sin respaldo? */
+  guardrailBloqueado: boolean;
+  /** Señal anti-inyección del mensaje del usuario (informativa, no bloquea). */
+  injection: { detected: boolean; patterns: string[] };
+  /** Modo aplicado — se registra en telemetría para comparar A/B. */
+  enforcement: EnforcementMode;
+}
+
+/**
+ * INVARIANTE DE AUDITORÍA (PIEZA 5): si el texto publicado difiere del que
+ * generó el modelo, TIENE que existir al menos una mutación registrada. Sin
+ * esto, una sustitución es invisible para The Commandments, para la telemetría
+ * y para cualquier revisión posterior.
+ */
+export function auditarMutaciones(
+  raw: string,
+  final: string,
+  mutations: Mutation[],
+): boolean {
+  if (raw === final) return true;
+  return mutations.length > 0;
+}
+
+/**
+ * Ejecuta un paso de la cadena registrando SIEMPRE su mutación. Si el paso ya
+ * anotó por su cuenta (grounding, validador de branding, Mandamientos), no se
+ * duplica: se detecta comparando el tamaño del registro antes y después.
+ */
+function paso(
+  capa: string,
+  regla: string,
+  texto: string,
+  mutations: Mutation[],
+  fn: () => string,
+): string {
+  const antes = texto;
+  const marca = mutations.length;
+  const despues = fn();
+  if (despues !== antes && mutations.length === marca) {
+    mutations.push({ capa, regla, antes, despues });
+  }
+  return despues;
+}
+
+/**
+ * Cadena completa de enforcement sobre la respuesta cruda del modelo.
+ *
+ * Orden (PIPELINE_CONTRACT.md): grounding → honestidad de simulación →
+ * validador de política → disclaimer → sustancia → cierre → The Commandments →
+ * renumerar listas. En META se salta el grounding y la simulación (no hay nada
+ * que fundamentar), pero la seguridad (validador, M4/M5/M7) se aplica igual.
+ *
+ * PIEZA 5a (complemento, 5ª tanda) — FRONTERA DE AUTORIDAD. Un turno con
+ * `esEmocional: true` corre con la MISMA frontera reducida que META, sea cual
+ * sea su carril real: el enforcement solo tiene autoridad sobre cifras y
+ * hechos verificables, nunca sobre el tono. Si una capa no puede señalar la
+ * cifra que está protegiendo, no toca el texto.
+ */
+export async function applyEnforcement(
+  raw: string,
+  input: EnforcementInput,
+): Promise<EnforcementResult> {
+  const enforcement = input.enforcement ?? DEFAULT_ENFORCEMENT_MODE;
+  const { carril, lang, missing, conceptos, esSimulacion, esEmocional } = input;
+  const mutations: Mutation[] = [];
+
+  let texto = raw;
+  let guardrailBloqueado = false;
+  let injection: { detected: boolean; patterns: string[] };
+
+  if (carril === "META" || esEmocional) {
+    const inj = detectInjection(input.userMessage);
+    injection = { detected: inj.sospechoso, patterns: inj.patrones };
+  } else {
+    // 1 · GROUNDING de cifras. Bloqueo puro (elimina la frase) en ambos modos;
+    // la corrección en sitio solo existe en `full` (PIEZA 1 + PIEZA 3).
+    const antesGrounding = texto;
+    const marca = mutations.length;
+    const guardrail = await runGuardrail(input.userMessage, texto, {
+      mode: "mvp",
+      supabase: input.supabase,
+      userId: input.userId,
+      cifrasCalculadas: { valores: input.valores, conceptos },
+      idioma: lang,
+      mutations,
+      enforcement,
+    });
+    texto = guardrail.texto_final;
+    guardrailBloqueado = guardrail.bloqueado;
+    injection = guardrail.injection;
+    if (texto !== antesGrounding && mutations.length === marca) {
+      mutations.push({ capa: "grounding", regla: "saneado", antes: antesGrounding, despues: texto });
+    }
+
+    // 2 · HONESTIDAD DE SIMULACIÓN. Elimina la afirmación falsa ("sin incluir
+    // intereses") y declara la simulación: es bloqueo de lo falso, activo en
+    // ambos modos.
+    texto = paso("simulacion", "honestidad de simulación", texto, mutations, () =>
+      enforceSimulationHonesty(texto, { esSimulacion, lang }),
+    );
+  }
+
+  // 3 · VALIDADOR DE SEGURIDAD (garantías, absolutos, branding, identidad de
+  // proveedor). Activo en TODOS los carriles y en ambos modos.
+  const validation = validateConsigliereOutput(texto);
+  if (validation.text !== texto) {
+    for (const r of validation.brandingRewrites) {
+      mutations.push({ capa: "validator", regla: "branding", antes: r.from, despues: r.to });
+    }
+    if (validation.brandingRewrites.length === 0) {
+      mutations.push({ capa: "validator", regla: "normalización", antes: texto, despues: validation.text });
+    }
+    texto = validation.text;
+  }
+
+  texto = paso("validator", "política de salida", texto, mutations, () =>
+    enforceOutputPolicy(texto, validation),
+  );
+
+  // 4 · DISCLAIMER, solo si el producto SOBREVIVIÓ al enforcement.
+  if (
+    validation.suggestedDisclaimer &&
+    mentionsSpecificProduct(texto) &&
+    !texto.includes(validation.suggestedDisclaimer)
+  ) {
+    texto = paso("validator", "disclaimer de producto", texto, mutations, () =>
+      `${texto}\n\n${validation.suggestedDisclaimer}`,
+    );
+  }
+
+  // 5 · SUSTANCIA (PIEZA 2) — último recurso, solo si la respuesta quedó
+  // realmente vacía. Desactivado en `minimal` y en turnos emocionales (PIEZA
+  // 5a: prohibido forzar petición de dato cuando el usuario necesita que lo
+  // escuchen, no un formulario).
+  if (carril === "FINANCIERO" && !esEmocional) {
+    texto = paso("ensureSubstance", "respuesta sin sustancia", texto, mutations, () =>
+      ensureSubstance(texto, { lang, missing, enforcement }),
+    );
+  }
+
+  // 6 · CIERRE (PIEZA 4) — solo añade; nunca pisa la pregunta del modelo.
+  // PIEZA 5a: un turno emocional NUNCA recibe cierre forzado, sea cual sea su
+  // carril — `resolveClosing` ya trata META como texto intacto; se simula lo
+  // mismo pasándole 'META' cuando `esEmocional` es true.
+  texto = paso("resolveClosing", "cierre", texto, mutations, () =>
+    resolveClosing(texto, { carril: esEmocional ? "META" : carril, missing, lang, enforcement }),
+  );
+
+  // 7 · RENUMERAR LISTAS (FIX 3), ANTES de Commandments — repara enumeradores
+  // huérfanos o pegados que el grounding pudo dejar (p. ej. "1.2.3."). Tiene
+  // que correr ANTES del Mandamiento 9: con la numeración rota, "2" y "3" ya
+  // no se detectan como enumeradores puros (`isListEnumerator` exige que el
+  // número abra línea) y se contarían como cifras monetarias, impidiendo que
+  // M9 reconozca un plan realmente vacío. Activo en ambos modos: es una
+  // reparación de la propia eliminación, no una reescritura de contenido.
+  texto = paso("renumberLists", "numeración de lista", texto, mutations, () =>
+    renumberLists(texto).texto,
+  );
+
+  // 8 · THE COMMANDMENTS — red de seguridad final, activa en ambos modos.
+  // `raw` (el parámetro de esta función, no `texto`) es la respuesta CRUDA del
+  // modelo — Mandamiento 9 la usa para revertir un plan vaciado por completo.
+  const commandments = enforceCommandments(texto, {
+    carril,
+    lang,
+    missing,
+    conceptos,
+    esSimulacion,
+    mutations,
+    raw,
+    userMessage: input.userMessage,
+  });
+  texto = commandments.texto;
+
+  // 9 · RENUMERAR LISTAS otra vez — por si algún Mandamiento (M1/M3/M4) quitó
+  // otro ítem de la lista después del paso 7.
+  texto = paso("renumberLists", "numeración de lista (post-Commandments)", texto, mutations, () =>
+    renumberLists(texto).texto,
+  );
+
+  return {
+    texto,
+    mutations,
+    violaciones: commandments.violaciones,
+    guardrailBloqueado,
+    injection,
+    enforcement,
+  };
+}

@@ -7,6 +7,22 @@ const EVENTO_DELTA = {
   extracto_subido: 15,
   onboarding_completado: 20,
   hito_alcanzado: 25,
+  // PIEZA 4 (6ª tanda) — el ICA mide CONOCIMIENTO, no charla. Antes, cada
+  // consulta al chat sumaba +2 por el simple hecho de escribir (26% de un
+  // usuario eran 13 mensajes, no datos aportados). Estos eventos son ADITIVOS
+  // a la tabla existente — ninguno de los 5 pesos de arriba cambia — y se
+  // disparan SOLO cuando el turno aporta un dato NUEVO y verificable
+  // (scenario.ts detecta la transición undefined→definido; ver route.ts).
+  dato_ingreso: 5,
+  dato_gastos: 5,
+  detalle_gastos: 5,
+  meta_declarada: 10,
+  credito_declarado: 10,
+  plazo_declarado: 5,
+  tae_declarada: 10,
+  // El chat en sí (sin dato nuevo) ya NO puntúa — se conserva como traza de
+  // actividad, con delta 0, para no perder el historial de interacción.
+  chat_consulta: 0,
 } as const
 
 export type ICAEvento = keyof typeof EVENTO_DELTA

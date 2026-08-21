@@ -1,0 +1,17 @@
+{
+  "name": "extraccion_rango_huerfano",
+  "playbook": "PB1",
+  "language": "es",
+  "description": "PIEZA 1 (5ª tanda): 'gano entre 2000 y 2500' es un rango, no una cifra única — el extractor se queda con el primer número (2000) y el segundo (2500) queda huérfano. Ante la ambigüedad, se pregunta cuál de los dos usar en vez de asumir el primero en silencio.",
+  "turns": [
+    {
+      "user": "gano entre 2000 y 2500",
+      "fixtureResponse": "Para no meter la pata con el número, ¿tu ingreso ronda los 2.000 € o los 2.500 €? Prefiero preguntarlo a asumir uno de los dos.",
+      "expectCarril": "FINANCIERO",
+      "expectExtraccionAmbigua": true,
+      "expectEmocional": false,
+      "expectContains": ["2.000", "2.500"],
+      "expectNotContains": ["sobrante", "capacidad de ahorro"]
+    }
+  ]
+}

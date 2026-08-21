@@ -209,3 +209,216 @@ antes de persistir. Es el último paso del pipeline para TODOS los carriles.
 Ninguna capa nueva puede añadir un segundo punto de inserción de cierre. Si un caso de
 QA parece necesitarlo, es señal de que la invariante correspondiente está mal definida —
 se corrige la invariante, no se añade un parche lateral.
+
+---
+
+## 6. Enmienda 2026-07-30 (AG08) — "bloquear lo falso sin sustituir lo bueno"
+
+**Principio aprobado por Luis, superior a cualquier regla de las secciones 1-5:**
+
+> Los guardarraíles **BLOQUEAN lo falso. NUNCA sustituyen lo bueno.**
+> Eliminar una frase mentirosa es legítimo. Reemplazar prosa del modelo por una
+> plantilla nuestra, no. Se acepta que una respuesta quede más corta o con un
+> hueco antes que con una plantilla que contradice lo que ya sabemos.
+
+**Evidencia (telemetría real, no hipótesis).** De 27 turnos auditados en
+`response_telemetry`, **13 (48%)** tuvieron el texto modificado por nuestras
+capas. Tres casos verificados contra el código de `develop`:
+
+| Caso | Qué hizo el modelo | Qué publicamos nosotros |
+|---|---|---|
+| A (21:03:40) | confirmó el registro y propuso el siguiente paso (`missing` VACÍO, conceptos completos) | la plantilla "…¿me compartes tus ingresos y gastos mensuales?" — pidiendo lo que el motor ya tenía, con `mutations: []` |
+| B (20:55:55) | resolvió una digresión y volvió a la meta | la misma plantilla |
+| C (21:02:58) | "Reserva de Imprevistos … al menos **3 meses** de gastos" | "… al menos **48 meses** de gastos" (el plazo del crédito) — absurdo financiero fabricado por nuestra capa |
+
+### 6.1 Cambios normativos
+
+1. **`ENFORCEMENT_MODE`** (`full` | `minimal`, por defecto `full`). En `minimal`
+   siguen activos el guardarraíl de entrada, el grounding de **bloqueo puro**, el
+   validador de seguridad y The Commandments; se desactivan `ensureSubstance`, la
+   sustitución de cierres y la sustitución de cifras. Se registra por turno en
+   `response_telemetry.enforcement_mode`.
+2. **`ensureSubstance` es último recurso**, no destructor: solo actúa si la
+   respuesta está realmente vacía (<30 chars, sin verbo, o puro relleno
+   genérico). Confirmación, propuesta, redirección de digresión, explicación sin
+   cifras, pregunta del modelo o mención a un concepto del estado cuentan como
+   sustancia válida. **Con `missing` vacío tiene PROHIBIDO pedir datos.**
+3. **La sustitución de cifras se restringe al contexto inequívoco**: el rol
+   posicional `plazo` solo aplica si la MISMA frase contiene una keyword de
+   crédito. Fuera de ahí, la cifra no se toca; y si no se puede verificar, la
+   frase se elimina — jamás se reescribe.
+4. **El cierre solo AÑADE, nunca pisa** (deroga la regla de prioridad del
+   `missing` de la sección 3.a cuando el modelo ya cerró): si la respuesta
+   termina con una pregunta o propuesta del modelo, queda INTACTA aunque no
+   coincida con `missing[0]`. La única sustitución que sobrevive es la del cierre
+   **delegativo**.
+5. **Registro completo de mutaciones**: toda operación que modifique el texto
+   (incluidas `ensureSubstance`, `resolveClosing`, `enforceOutputPolicy`, las
+   eliminaciones del grounding y The Commandments) anota `{capa, regla, antes,
+   despues}`. Invariante de auditoría, verificada en test:
+   **`raw !== final` ⇒ `mutations.length > 0`**.
+
+### 6.2 Dónde vive ahora la cadena
+
+`src/lib/guardrail/pipeline.ts` → `applyEnforcement(raw, input)`. El orden de la
+sección 1 no cambia; lo que cambia es que deja de estar duplicado dentro de
+`route.ts` y que cada paso pasa por un envoltorio que **garantiza el registro de
+la mutación**. `route.ts` solo decide el modo, el carril y el contexto.
+
+### 6.3 Regla de oro, revisada
+
+> Antes de añadir una capa que **reescriba** texto, demuestra que lo que
+> reescribe es FALSO. Si solo es "mejorable", no se toca. Y si algo se toca, se
+> registra.
+
+---
+
+## 7. Enmienda 2026-07-30 (AG08, 2ª tanda) — "validación cifra a cifra + plan fantasma"
+
+**Caso real de producción** (telemetría, ENFORCEMENT_MODE=full): un plan de
+4 pasos con conceptos verificados `{cuota:746.55, sobrante:550, brecha:196.55,
+gastos:1750, ingreso:2300, monto:30000, plazo:48, capacidad_anual:6600,
+aumento_necesario:196.55, recorte_necesario:196.55, ahorro_necesario_mensual:625}`
+llegó con **todas las cifras correctas** y el guardarraíl las bloqueó una a una:
+
+- "…reducir gastos en al menos 196,55 €" — el concepto textualmente más
+  cercano a 196,55 era "gastos" (1750, no coincide); la frase también nombraba
+  `aumento_necesario`/`recorte_necesario` (196,55 exacto), pero el validador
+  solo comparaba contra el concepto MÁS CERCANO, nunca contra los demás
+  nombrados en la misma frase.
+- "1. Identificar y recortar… por 100 €" — una PROPUESTA de acción (100 € a
+  recortar) se validaba como si fuera una AFIRMACIÓN sobre el gasto total
+  (1750), y 100 ≠ 1750 la bloqueaba.
+- Al eliminar los ítems 1 y 2, sus enumeradores ("1." "2.") sobrevivieron
+  huérfanos —`isListEnumerator` los excluye de la validación, así que nunca
+  aparecen en `blocked`— y quedaron pegados delante del ítem 3: **"1.2.3.
+  Mantener la Reserva de Imprevistos intacta."** El usuario confirmó un plan
+  vacío.
+
+### 7.1 Cambios normativos
+
+1. **Validación cifra a cifra** (`validate.ts`): cuando el concepto MÁS
+   CERCANO de una cifra no coincide, se comprueba si coincide con OTRO
+   concepto nombrado en la MISMA frase, salvo que ese concepto YA esté
+   correctamente reclamado por OTRA cifra de la frase (guarda que preserva la
+   regresión "ingreso/gastos/sobrante = 500 los tres" — HUECO QA).
+2. **Cifras de propuesta** (`validate.ts`): una frase que empieza por un verbo
+   en infinitivo/imperativo o es un ítem de lista numerada se valida como
+   RECOMENDACIÓN, no como afirmación — única sanidad: no puede superar el
+   concepto relacionado nombrado en la misma frase.
+3. **Renumerar listas** (`policy.ts::renumberLists`): colapsa enumeradores
+   huérfanos pegados y renumera 1..N las rachas contiguas que sobrevivieron.
+   Corre dos veces en `pipeline.ts` — antes y después de The Commandments.
+4. **Mandamiento 9 — PLAN FANTASMA** (`commandments.ts`): si el texto anuncia
+   un plan y pide confirmación pero, tras el enforcement, no le queda ninguna
+   cifra monetaria real, se revierte al `raw` original (con M4/M5/M1
+   reaplicados sobre él, defensa mínima).
+5. **`resolveClosing` reconoce CUALQUIER petición de dato concreto**, no solo
+   `missing[0]` ni los patrones exactos de `PROPOSAL_RE`: un marcador
+   interrogativo + el nombre de un campo conocido también cuenta como cierre
+   ya resuelto.
+6. **Textos canónicos propios inmunes** (`esTextoCanonico`): lo que NOSOTROS
+   inyectamos (cierres canónicos, respuestas seguras) no vuelve a pasar por el
+   filtro de "concepto sin cálculo" (Mandamiento 3) — las capas no pueden
+   pelearse entre sí.
+7. **Factor multiplicador** (`isMultiplierFactor`, `context.ts`): un número
+   precedido de "×" es un factor aritmético, no un monto propio — mismo trato
+   que un porcentaje o una unidad de tiempo.
+
+### 7.2 Fixture de regresión
+
+`tests/scenarios/plan_no_vaciado.json` reproduce el caso real exacto:
+ingreso 2300, gastos 1750, crédito 30000 a 48 meses con TAE 9% → conceptos
+verificados idénticos a los de producción. `expectContains: ["746,55",
+"196,55", "100 €"]`, `expectNotContains: ["1.2.3."]`.
+
+---
+
+## 8. Enmienda 2026-07-30 (AG08, 4ª tanda) — "persona cálida + auto-chequeo + factibilidad + M9 estricto"
+
+**Evidencia de producción** (telemetría, ENFORCEMENT_MODE=full): cuatro
+fallos reales. Los tres primeros (tono hostil) NO los causa ninguna capa de
+enforcement — salen directo del system prompt, corregido en
+`consigliere.ts`. Los otros dos sí son capas deterministas.
+
+### 8.1 Cambios normativos
+
+1. **Persona cálida** (`consigliere.ts`): IDENTIDAD deja de decir "frío";
+   bloque TONO nuevo prohibe explícitamente "Saludo registrado", "No es
+   relevante", "No." como apertura, con 4 ejemplos ANTES/DESPUÉS anclados en
+   frases reales de producción.
+2. **Auto-chequeo antes de responder**: bloque VERIFICACIÓN OBLIGATORIA en el
+   prompt (3 preguntas: ¿cifra en DATOS VERIFICADOS?, ¿plan sin desglose?,
+   ¿cabe en la realidad del usuario?) + refuerzo determinista
+   (`notaSinCifrasDePlan`, scenario.ts): si el playbook activo implica
+   cifras de plan (hay crédito o meta) y falta un dato, se inyecta "NO
+   propongas cifras de plan en este turno: falta {dato}."
+3. **Regla de factibilidad** (`validate.ts`): una propuesta de ahorrar/
+   destinar/reservar que supere `conceptos.sobrante`, o de recortar que
+   supere `conceptos.gastos`, se bloquea — el verbo puede estar en
+   CUALQUIER posición de la frase, no solo al inicio.
+4. **Mandamiento 9 endurecido** (`commandments.ts`): además del "sin ninguna
+   cifra monetaria" (plan fantasma), ahora también dispara si el `raw` era
+   una lista numerada de N ítems y el final tiene MENOS de N — "no basta con
+   que quede alguna cifra o algún ítem". Ambos chequeos exigen `nRaw > 0`
+   (el raw tiene que HABER SIDO una lista numerada): sin esa guarda, M9
+   confundía una pregunta de cierre corta y correctamente saneada por el
+   grounding ("¿Confirmamos el plan?", tras eliminar una hallucinación) con
+   un plan vaciado, y revertía al raw — resucitando la mentira que el
+   grounding acababa de bloquear con razón.
+5. **Espacio garantizado entre frases** (`policy.ts::cleanup`): al eliminar
+   una frase, las que sobreviven a los lados a veces quedaban pegadas
+   ("justa.Confirma"). Se inserta un espacio tras `.!?` cuando sigue
+   mayúscula/¿/¡ sin espacio — nunca toca separadores de miles (dígito tras
+   el punto).
+6. **`esTextoCanonico` se extiende** a la respuesta segura de
+   `output-validator.ts` (garantías prohibidas): sin esto, esa respuesta
+   ("…tu PLAN…¿Cuál es tu META?" — menciona "plan", cierra en pregunta, sin
+   cifra) calzaba con la forma de un plan fantasma y el Mandamiento 9 la
+   revertía, resucitando la garantía prohibida que la propia capa de
+   seguridad acababa de eliminar. Duplicado literal en `policy.ts` (no
+   importado) para evitar un ciclo con `output-validator.ts`, que ya importa
+   de `policy.ts`.
+7. **Mandamiento 3 exige una cifra en la frase** para considerar un concepto
+   derivado "afirmado sin cálculo": "¿me recuerdas para la cuota?" (sin
+   ningún número) ya no se elimina — nombrar el concepto de pasada no es
+   citar una cifra sin respaldo.
+
+### 8.2 El harness de regresión ahora ejecuta The Commandments
+
+Hasta esta tanda, `scripts/regression-harness.ts` se detenía en
+`resolveClosing` (paso 12) y nunca ejecutaba Mandamientos — el Mandamiento 9
+no se podía probar ahí. Se añadieron los pasos 13-15
+(`renumberLists → enforceCommandments → renumberLists`), en el mismo orden
+que `pipeline.ts::applyEnforcement`. Conectar esto reveló tres defectos
+latentes preexistentes (no introducidos por esta tanda, pero invisibles
+hasta ahora porque el harness nunca los ejercitaba):
+
+- La respuesta segura de `output-validator.ts` (garantías) activaba
+  falsamente el Mandamiento 9 → corregido en §8.1.6.
+- El mismo falso positivo se repetía cuando el grounding saneaba
+  correctamente una hallucinación y dejaba una pregunta de cierre corta →
+  corregido con la guarda `nRaw > 0` en §8.1.4.
+- Mandamiento 3 eliminaba una mención de "cuota" sin ninguna cifra → corregido
+  en §8.1.7.
+- `detectLanguage("hi")` detecta español (gap preexistente de `language.ts`,
+  fuera de alcance de esta tanda) — con el Mandamiento 7 ahora ejercitado en
+  el harness, un saludo de 2 caracteres en inglés se borraba entero. El
+  fixture `saludo_simple_en.json` se ajustó a "hello" (detecta correctamente).
+
+### 8.3 Fixtures de regresión nuevos
+
+- `saludo_calido.json` — turno social ("Hola, ¿cómo estás?" / "me pareces
+  grosero") → respuesta cálida intacta, sin fórmulas robóticas.
+- `factibilidad_ahorro.json` — propuesta de ahorro que excede el sobrante →
+  bloqueada; dentro del sobrante → aprobada.
+- `plan_mutilado.json` — raw de 3 pasos (uno infeasible, uno sin respaldo,
+  uno con cifra real) → 2 se bloquean legítimamente → Mandamiento 9 detecta
+  el plan mutilado (1 de 3 pasos) y revierte al raw completo.
+
+**Tradeoff explícito de M9** (ya existente desde su creación, reafirmado
+aquí): revertir al `raw` puede reintroducir una propuesta imperfecta (en
+`plan_mutilado.json`, el paso 1 sigue proponiendo algo infeasible). Es una
+decisión de producto deliberada: un plan completo con un paso discutible es
+preferible a un plan mutilado que el usuario confirma sin saber que faltan
+partes.

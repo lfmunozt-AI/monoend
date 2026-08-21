@@ -1,0 +1,477 @@
+// Tests de enforceCommandments (ex assertOutputInvariants) — AUDITORÍA AG01
+// (H2 + H5) + Mandamientos 6-8. Runner nativo de Node (node:test) vía tsx.
+// Ejecutar: `npm run test:guardrail`.
+
+import { test } from "node:test";
+import assert from "node:assert/strict";
+
+import { enforceCommandments, type CommandmentContext } from "./commandments";
+import type { Mutation } from "./policy";
+import { applyEnforcement } from "./pipeline";
+import { cifraPedidaAusente, conceptsInSentence, conceptosPedidosEnPregunta } from "./context";
+
+function ctx(overrides: Partial<CommandmentContext> = {}): CommandmentContext {
+  return {
+    carril: "FINANCIERO",
+    lang: "es",
+    missing: [],
+    conceptos: {},
+    esSimulacion: false,
+    ...overrides,
+  };
+}
+
+function countQuestions(t: string): number {
+  return (t.match(/\?/g) ?? []).length;
+}
+
+// ── Caso real 1 — déficit fantasma (defensa en profundidad de H1) ────────────
+test("caso real: déficit fantasma que se coló hasta el final → eliminado (Mandamiento 3)", () => {
+  const r = enforceCommandments(
+    "Tienes un déficit mensual de 9500 €. ¿Confirmamos el plan?",
+    ctx({ conceptos: { ingreso: 10000, gastos: 9500, sobrante: 500 } }),
+  );
+  assert.ok(!r.texto.includes("9500"), "el déficit fantasma desaparece");
+  assert.ok(r.texto.includes("¿Confirmamos el plan?"), "el cierre válido sobrevive");
+  assert.ok(r.violaciones.some((v) => v.mandamiento === 3));
+});
+
+// ── Caso real 2 — doble TAE (H2) ──────────────────────────────────────────────
+test("caso real: doble TAE (cláusula + cierre) → cláusula recortada, UNA sola mención de 'tu banco'", () => {
+  const r = enforceCommandments(
+    "La cuota sería de 926,31 € (simulación con TAE de referencia — tu banco te dará la tasa real). " +
+      "¿Qué TAE te ofrece tu banco? Con ese dato la cuota es exacta al 100%.",
+    ctx({ missing: ["tae"], conceptos: { monto: 30000, plazo: 36, cuota: 926.31 }, esSimulacion: true }),
+  );
+  const bancoMentions = (r.texto.match(/tu banco/gi) ?? []).length;
+  assert.equal(bancoMentions, 1, "una sola mención de 'tu banco'");
+  assert.equal(countQuestions(r.texto), 1, "una sola pregunta");
+  assert.ok(r.texto.includes("¿Qué TAE te ofrece tu banco?"), "el cierre de TAE sobrevive");
+  assert.ok(r.texto.includes("simulación con TAE de referencia del 7%"), "la cláusula queda en su forma corta");
+  assert.ok(r.violaciones.some((v) => v.mandamiento === 2));
+});
+
+// ── Caso real 3 — contradicción tasa/simulación (H4 que se coló) ─────────────
+test("caso real: negador de TAE + cláusula canónica juntos → negador eliminado, sin contradicción", () => {
+  const r = enforceCommandments(
+    "La cuota sería de 718,39 € (sin considerar la TAE) (simulación con TAE de referencia — tu banco te dará la tasa real).",
+    ctx({ conceptos: { monto: 30000, plazo: 48, cuota: 718.39 }, esSimulacion: true }),
+  );
+  assert.ok(!/sin considerar/i.test(r.texto), "el negador desaparece");
+  assert.ok(/simulaci[oó]n/i.test(r.texto), "la cláusula de simulación sobrevive");
+  assert.ok(r.violaciones.some((v) => v.mandamiento === 2));
+});
+
+// ── Mandamiento 1 — máx. 1 pregunta final ─────────────────────────────────────
+test("Mandamiento 1: dos preguntas en el cierre, missing=['tae'] → gana la de missing", () => {
+  const r = enforceCommandments(
+    "Tu sobrante es de 500 €. ¿Cuál es tu meta? ¿Qué TAE te ofrece tu banco?",
+    ctx({ missing: ["tae"], conceptos: { sobrante: 500 } }),
+  );
+  assert.equal(countQuestions(r.texto), 1);
+  assert.ok(r.texto.includes("¿Qué TAE te ofrece tu banco?"));
+  assert.ok(!r.texto.includes("¿Cuál es tu meta?"));
+  assert.ok(r.violaciones.some((v) => v.mandamiento === 1));
+});
+
+test("Mandamiento 1: dos preguntas, missing vacío → gana la ÚLTIMA", () => {
+  const r = enforceCommandments(
+    "Tu sobrante es de 500 €. ¿Cuál es tu meta? ¿Confirmamos el plan?",
+    ctx({ missing: [], conceptos: { sobrante: 500 } }),
+  );
+  assert.equal(countQuestions(r.texto), 1);
+  assert.ok(r.texto.includes("¿Confirmamos el plan?"));
+});
+
+test("Mandamiento 1: una sola pregunta → intacto", () => {
+  const texto = "Tu sobrante es de 500 €. ¿Cuál es tu meta?";
+  const r = enforceCommandments(texto, ctx({ conceptos: { sobrante: 500 } }));
+  assert.equal(r.texto, texto);
+  assert.equal(r.violaciones.length, 0);
+});
+
+// ── Mandamiento 4 — 0 términos de proveedor, en TODOS los carriles ───────────
+test("Mandamiento 4: fuga de proveedor en carril META → eliminada", () => {
+  const r = enforceCommandments(
+    "Soy un modelo de OpenAI. ¿Qué meta quieres conquistar?",
+    ctx({ carril: "META" }),
+  );
+  assert.ok(!/openai/i.test(r.texto));
+  assert.ok(r.texto.includes("¿Qué meta quieres conquistar?"));
+  assert.ok(r.violaciones.some((v) => v.mandamiento === 4));
+});
+
+test("Mandamiento 4: fuga de proveedor en carril FINANCIERO → eliminada igual", () => {
+  const r = enforceCommandments(
+    "Uso Claude de Anthropic. Tu sobrante es de 500 €.",
+    ctx({ conceptos: { sobrante: 500 } }),
+  );
+  assert.ok(!/claude|anthropic/i.test(r.texto));
+  assert.ok(r.texto.includes("500"));
+});
+
+// ── Mandamiento 5 — 0 cierres delegativos, en TODOS los carriles ─────────────
+test("Mandamiento 5: cierre delegativo sobrevivió hasta el final → eliminado", () => {
+  const r = enforceCommandments(
+    "Tu sobrante es de 500 €. ¿Qué gastos podrías reducir?",
+    ctx({ conceptos: { sobrante: 500 } }),
+  );
+  assert.ok(!/podrías reducir/i.test(r.texto));
+  assert.ok(r.violaciones.some((v) => v.mandamiento === 5));
+});
+
+test("Mandamiento 5 en META: cierre delegativo también se elimina", () => {
+  const r = enforceCommandments(
+    "Claro. ¿Qué gastos podrías reducir?",
+    ctx({ carril: "META" }),
+  );
+  assert.ok(!/podrías reducir/i.test(r.texto));
+});
+
+// ── Mandamiento 6 — VALOR DE EJEMPLO DECLARADO ────────────────────────────────
+test("Mandamiento 6: ejemplo de ingreso sin declarar → se inserta la declaración", () => {
+  const r = enforceCommandments(
+    "Muchos usuarios con 2000 € de ingreso ahorran cómodamente. ¿Cuál es tu ingreso neto mensual?",
+    ctx({ missing: ["ingreso"], conceptos: { ejemplo_ingreso: 2000 } }),
+  );
+  assert.ok(/como ejemplo|ilustrativ/i.test(r.texto), `debía declarar el ejemplo: ${r.texto}`);
+  assert.ok(r.violaciones.some((v) => v.mandamiento === 6));
+});
+
+test("Mandamiento 6: ejemplo YA declarado → intacto", () => {
+  const texto = "Como ejemplo ilustrativo, con 2000 € de ingreso el plan cuadra. ¿Cuál es tu ingreso?";
+  const r = enforceCommandments(texto, ctx({ missing: ["ingreso"], conceptos: { ejemplo_ingreso: 2000 } }));
+  assert.equal(r.texto, texto);
+});
+
+test("Mandamiento 6: sin ejemplo_<campo> en conceptos → no aplica nada", () => {
+  const texto = "Muchos usuarios con 2000 € de ingreso ahorran cómodamente. ¿Cuál es tu ingreso?";
+  const r = enforceCommandments(texto, ctx({ missing: ["ingreso"], conceptos: {} }));
+  assert.equal(r.texto, texto);
+});
+
+// ── Mandamiento 7 — IDIOMA DE ENTRADA ─────────────────────────────────────────
+test("Mandamiento 7: frase en inglés dentro de una respuesta en español → eliminada", () => {
+  const r = enforceCommandments(
+    "Tu sobrante es de 500 €. By the way, this is really good news for your savings plan. ¿Cuál es tu meta?",
+    ctx({ conceptos: { sobrante: 500 }, lang: "es" }),
+  );
+  assert.ok(!/really good news/i.test(r.texto));
+  assert.ok(r.violaciones.some((v) => v.mandamiento === 7));
+});
+
+test("Mandamiento 7: términos técnicos exentos (TAE, APR, ETF) NO se tocan", () => {
+  const texto = "Tu TAE es del 9%. Compara siempre el APR y evita comisiones altas en un ETF. ¿Cuál es tu meta?";
+  const r = enforceCommandments(texto, ctx({ conceptos: { sobrante: 500 }, lang: "es" }));
+  assert.ok(r.texto.includes("TAE") && r.texto.includes("APR") && r.texto.includes("ETF"));
+});
+
+test("Mandamiento 7: carril META también lo aplica", () => {
+  const r = enforceCommandments(
+    "Hola. By the way, I think this is great. ¿En qué te ayudo?",
+    ctx({ carril: "META", lang: "es" }),
+  );
+  assert.ok(!/i think this is great/i.test(r.texto));
+});
+
+// ── Mandamiento 8 — ORDINALES NO SON CIFRAS (vía registro de mutaciones) ──────
+test("Mandamiento 8: una mutación reescribió un enumerador → se revierte", () => {
+  const mutations: Mutation[] = [{ capa: "grounding", regla: "posicional_monto", antes: "1", despues: "7000" }];
+  const r = enforceCommandments(
+    "7000. Ajustar el ocio\n2. Aumentar ingresos",
+    ctx({ mutations }),
+  );
+  assert.ok(r.texto.startsWith("1. Ajustar el ocio"), `debía revertir a '1.': ${r.texto}`);
+  const v = r.violaciones.find((x) => x.mandamiento === 8);
+  assert.ok(v);
+  assert.equal(v?.capa, "grounding", "identifica la capa culpable");
+});
+
+test("Mandamiento 8: sin mutaciones sospechosas → no toca nada", () => {
+  const mutations: Mutation[] = [{ capa: "grounding", regla: "posicional_monto", antes: "425.81", despues: "30000" }];
+  const texto = "Para el carro de 30000 € a 36 meses, la cuota es de 953,99 €.";
+  const r = enforceCommandments(texto, ctx({ mutations, conceptos: { monto: 30000, plazo: 36, cuota: 953.99 } }));
+  assert.equal(r.texto, texto);
+});
+
+// ── Carril META: Mandamientos 1/2/3/6 NO aplican ──────────────────────────────
+test("META: NO toca conceptos sin cálculo ni simulación ni cierre (solo aplican 4/5/7)", () => {
+  const texto = "Tienes un déficit mensual de 9500 €. ¿Cuál es tu meta? ¿Qué TAE te ofrece tu banco?";
+  const r = enforceCommandments(texto, ctx({ carril: "META", conceptos: {}, missing: ["tae"] }));
+  assert.equal(r.texto, texto, "META no aplica 1/2/3/6 — el texto se deja intacto salvo 4/5/7");
+});
+
+// ── Texto vacío / sin violaciones ──────────────────────────────────────────────
+test("texto vacío → devuelto tal cual, sin violaciones", () => {
+  const r = enforceCommandments("", ctx());
+  assert.equal(r.texto, "");
+  assert.deepEqual(r.violaciones, []);
+});
+
+test("texto limpio sin ninguna violación → intacto", () => {
+  const texto = "Tu sobrante mensual es de 500 €. ¿Cuál es tu meta?";
+  const r = enforceCommandments(texto, ctx({ conceptos: { sobrante: 500 } }));
+  assert.equal(r.texto, texto);
+  assert.deepEqual(r.violaciones, []);
+});
+
+// ── Idempotencia (contrato: aplicarla dos veces da el mismo resultado) ────────
+test("idempotencia: aplicar enforceCommandments dos veces da el mismo texto", () => {
+  const contexto = ctx({ missing: ["tae"], conceptos: { monto: 30000, plazo: 36, cuota: 926.31 }, esSimulacion: true });
+  const once = enforceCommandments(
+    "La cuota sería de 926,31 € (simulación con TAE de referencia — tu banco te dará la tasa real). " +
+      "¿Qué TAE te ofrece tu banco? Con ese dato la cuota es exacta al 100%.",
+    contexto,
+  );
+  const twice = enforceCommandments(once.texto, contexto);
+  assert.equal(once.texto, twice.texto);
+});
+
+test("idempotencia: caso del déficit fantasma también es idempotente", () => {
+  const contexto = ctx({ conceptos: { ingreso: 10000, gastos: 9500, sobrante: 500 } });
+  const once = enforceCommandments("Tienes un déficit mensual de 9500 €. ¿Confirmamos el plan?", contexto);
+  const twice = enforceCommandments(once.texto, contexto);
+  assert.equal(once.texto, twice.texto);
+});
+
+// ── Mandamiento 10 (QA testdev8) — SENSOR, NO EDITOR (V18) ──────────────────
+//
+// Historial: v1 revertía al RAW (violaba G1b, resucitaba cifras inventadas).
+// v2 (bloqueante 1 de AG01) dejó de volver al raw pero seguía EDITANDO —
+// insertaba la cifra o borraba la frase directamente. DIAGNÓSTICO real con el
+// pipeline completo: con el grounding ya arreglado, esa edición producía
+// falsos positivos peores que el problema — borraba prosa cálida legítima
+// (caso A) y llegó a publicar "250 € es una buena pregunta." (caso B), un
+// disparate. V18 (esta corrección): M10 NUNCA edita `out`. Detecta la
+// condición (a: concepto pedido en conceptos · b: cifra ausente del texto
+// final · c: evidencia en `mutations` de que OTRA capa —no un mandamiento—
+// eliminó algo este turno) y la registra como violación "logueada"; el
+// reintento de `route.ts` (que calcula `cifraPedidaAusente` de forma
+// independiente sobre el texto final real) es la ÚNICA vía de corrección —
+// el modelo redacta, esta capa nunca reescribe.
+//
+// Todos los tests con el pipeline completo (`applyEnforcement`), pasando
+// `userMessage`/`raw` como en producción (`pipeline.ts:249`) — salvo los que
+// necesitan fabricar `mutations` para aislar la condición (c), que usan
+// `enforceCommandments` directamente y lo declaran.
+
+test("Mandamiento 10 · OBLIGATORIO — regresión del déficit fantasma CON el pipeline completo: NO republica el déficit inventado", async () => {
+  const userMessage = "¿cuánto me queda al mes?";
+  const conceptos = { sobrante: 250 }; // SIN 'deficit' — el motor nunca lo calculó
+  const raw = "Te quedan 250 € al mes aunque arrastras un déficit de 9500 € que hay que cerrar.";
+  const r = await applyEnforcement(raw, {
+    userMessage,
+    carril: "FINANCIERO",
+    lang: "es",
+    missing: [],
+    valores: [250],
+    conceptos,
+    esSimulacion: false,
+  });
+  assert.ok(!r.texto.includes("9500") && !r.texto.includes("9.500"), `el déficit fantasma NUNCA se publica: ${r.texto}`);
+  // La cifra pedida (250) no la reconstruye M10 (nunca edita) — la frase
+  // entera cayó por la contradicción de signo (grounding). Esa es la señal
+  // que dispara el reintento acotado de route.ts (`cifraPedidaAusente`, la
+  // MISMA función pura que usa M10 para detectar): se prueba aquí, en frío,
+  // que la señal es correcta — sin necesitar mock de LLM.
+  const seguimiento = cifraPedidaAusente(userMessage, r.texto, conceptos);
+  assert.equal(seguimiento.ausente, true, "el sistema SABE que aún falta publicar el sobrante");
+  assert.deepEqual(seguimiento.conceptosPedidos, ["sobrante"]);
+});
+
+// ── Diagnóstico real (los 4 vectores A-D) ────────────────────────────────────
+
+test("Mandamiento 10 · A — prosa cálida sin evidencia de eliminación → NUNCA se edita, sale intacta", async () => {
+  const raw = "Te quedan 250 €. Ese es tu punto de partida, y es más de lo que crees.";
+  const r = await applyEnforcement(raw, {
+    userMessage: "¿cuánto me queda al mes?",
+    carril: "FINANCIERO",
+    lang: "es",
+    missing: [],
+    valores: [250, 2250],
+    conceptos: { sobrante: 250, gastos: 2250 },
+    esSimulacion: false,
+  });
+  assert.equal(r.texto, raw, "la prosa cálida sobrevive — el 250 YA está en la primera frase, nada que reparar");
+  assert.ok(!r.violaciones.some((v) => v.mandamiento === 10), "sin eliminación de otra capa, M10 ni siquiera loguea");
+});
+
+test("Mandamiento 10 · B — pregunta transicional sin evidencia de eliminación → NUNCA se edita (nunca un disparate publicado)", async () => {
+  const raw = "Esta es una buena pregunta. Tus gastos son 2250 €.";
+  const r = await applyEnforcement(raw, {
+    userMessage: "¿cuánto me queda al mes?",
+    carril: "FINANCIERO",
+    lang: "es",
+    missing: [],
+    valores: [250, 2250],
+    conceptos: { sobrante: 250, gastos: 2250 },
+    esSimulacion: false,
+  });
+  assert.equal(r.texto, raw, `jamás "250 € es una buena pregunta" — la frase transicional no se toca: ${r.texto}`);
+  assert.ok(!r.violaciones.some((v) => v.mandamiento === 10));
+});
+
+test("Mandamiento 10 · C — respuesta ya completa, sin mutaciones de ninguna capa → 0 violaciones de M10", async () => {
+  const raw = "Te quedan 250 € al mes para tu meta.";
+  const r = await applyEnforcement(raw, {
+    userMessage: "¿cuánto me queda al mes?",
+    carril: "FINANCIERO",
+    lang: "es",
+    missing: [],
+    valores: [250],
+    conceptos: { sobrante: 250 },
+    esSimulacion: false,
+  });
+  assert.equal(r.texto, raw);
+  assert.deepEqual(r.mutations, []);
+  assert.deepEqual(r.violaciones, []);
+});
+
+// ── FIXTURE CANÓNICA (repuesta, V11) — ahora como test del SENSOR ──────────
+// La frase real del incidente QA que originó el Mandamiento 10. En la ronda
+// anterior este test verificaba que M10 la EDITABA (la reparaba insertando
+// 250). Esa edición se elimina por diseño en esta tanda (V18) — repetir el
+// mismo test tal cual sería afirmar lo contrario de lo que el código ahora
+// hace, justo lo que V11 prohíbe. Se REPONE con el mismo fixture, verificando
+// el comportamiento correcto de la NUEVA arquitectura: detecta + señala,
+// nunca edita.
+test("Mandamiento 10 · CANÓNICO (repuesto, V11) — 'Esa es tu capacidad real...' CON evidencia de eliminación → detecta, logueado, TEXTO NO CAMBIA", () => {
+  const textoD = "Esa es tu capacidad real para destinar a ahorro o pago de deudas.";
+  const r = enforceCommandments(textoD, ctx({
+    conceptos: { sobrante: 250 },
+    userMessage: "¿cuánto me queda al mes?",
+    mutations: [
+      {
+        capa: "grounding",
+        regla: "cifra sin respaldo eliminada",
+        antes: "Esa es tu capacidad real para destinar a ahorro o pago de deudas, un 40% más de lo habitual.",
+        despues: textoD,
+      },
+    ],
+  }));
+  assert.equal(r.texto, textoD, "M10 NUNCA edita — el texto que entra es el que sale, byte a byte");
+  const v10 = r.violaciones.find((v) => v.mandamiento === 10);
+  assert.ok(v10, "la detección SÍ se registra");
+  assert.equal(v10?.accion, "logueado", "nunca 'corregido' — M10 no corrige nada");
+  const seguimiento = cifraPedidaAusente("¿cuánto me queda al mes?", r.texto, { sobrante: 250 });
+  assert.equal(seguimiento.ausente, true, "la señal que consume route.ts:816 para el reintento es correcta");
+});
+
+test("Mandamiento 10 · D SIN evidencia de eliminación de otra capa → M10 NO dispara (condición c)", async () => {
+  const raw = "Esa es tu capacidad real para destinar a ahorro o pago de deudas.";
+  const r = await applyEnforcement(raw, {
+    userMessage: "¿cuánto me queda al mes?",
+    carril: "FINANCIERO",
+    lang: "es",
+    missing: [],
+    valores: [250],
+    conceptos: { sobrante: 250 },
+    esSimulacion: false,
+  });
+  assert.equal(r.texto, raw, "sin nada que ninguna capa haya eliminado, no hay caso — la frase sale tal cual");
+  assert.deepEqual(r.mutations, []);
+  assert.ok(!r.violaciones.some((v) => v.mandamiento === 10));
+});
+
+// ── Cobertura de detección (antes probaba edición; ahora prueba el sensor) ──
+
+test("Mandamiento 10 · variantes de demostrativo+verbo (ES/PT/EN) CON evidencia de eliminación → todas detectadas, ninguna editada", () => {
+  const formas = [
+    "Ese sería el margen disponible este mes.",
+    "Eso te deja margen para maniobrar.",
+    "Esa te permite cubrir imprevistos sin apuros.",
+    "Esta es la base para tu plan de ahorro.",
+    "Esto queda disponible para tu meta.",
+  ];
+  const mutationFabricada = { capa: "grounding", regla: "cifra sin respaldo eliminada", antes: "algo con una cifra inventada", despues: "" };
+  for (const texto of formas) {
+    const r = enforceCommandments(texto, ctx({
+      conceptos: { sobrante: 250 },
+      userMessage: "¿cuánto me queda al mes?",
+      mutations: [mutationFabricada],
+    }));
+    assert.equal(r.texto, texto, `"${texto}" no se edita`);
+    assert.ok(r.violaciones.some((v) => v.mandamiento === 10 && v.accion === "logueado"), `"${texto}" debe detectarse`);
+  }
+});
+
+test("Mandamiento 10 · forma PT con verbo acentuado ('é') se detecta (\\b de ASCII no reconoce 'é' como palabra) sin editar", () => {
+  const texto = "Essa é a tua margem mensal.";
+  const r = enforceCommandments(texto, ctx({
+    conceptos: { sobrante: 250 },
+    userMessage: "quanto me sobra por mês?",
+    lang: "pt",
+    mutations: [{ capa: "grounding", regla: "cifra sin respaldo eliminada", antes: "algo con una cifra inventada", despues: "" }],
+  }));
+  assert.equal(r.texto, texto, "PT con verbo acentuado se detecta sin editar");
+  assert.ok(r.violaciones.some((v) => v.mandamiento === 10 && v.accion === "logueado"));
+});
+
+test("Mandamiento 10 · concepto pedido NO existe en conceptos → M10 nunca dispara (ni edita ni loguea)", async () => {
+  const raw = "Con ese monto podrás cerrar tu meta antes de lo previsto.";
+  const r = await applyEnforcement(raw, {
+    userMessage: "¿cuál es mi situación?",
+    carril: "FINANCIERO",
+    lang: "es",
+    missing: [],
+    valores: [],
+    conceptos: {},
+    esSimulacion: false,
+  });
+  assert.equal(r.texto, raw, "sin concepto verificado que pedir, M10 no tiene nada que hacer — no toca el texto");
+  assert.ok(!r.violaciones.some((v) => v.mandamiento === 10));
+});
+
+test("Mandamiento 10 · OBLIGATORIO — regresión del Mandamiento 3 CON el pipeline completo: sigue bloqueando el concepto sin cálculo", async () => {
+  const r = await applyEnforcement("Tienes un déficit mensual de 9500 €. ¿Confirmamos el plan?", {
+    userMessage: "¿tengo déficit?",
+    carril: "FINANCIERO",
+    lang: "es",
+    missing: [],
+    valores: [10000, 9500, 500],
+    conceptos: { ingreso: 10000, gastos: 9500, sobrante: 500 },
+    esSimulacion: false,
+  });
+  assert.ok(!r.texto.includes("9500") && !r.texto.includes("9.500"), `M3 sigue bloqueando el déficit fantasma: ${r.texto}`);
+});
+
+test("Mandamiento 10: sin userMessage no hay nada que comprobar — nunca se activa", () => {
+  const texto = "Eso te deja margen.";
+  const r = enforceCommandments(texto, ctx({
+    conceptos: { sobrante: 250 },
+    mutations: [{ capa: "grounding", regla: "x", antes: "algo con cifra", despues: "" }],
+  }));
+  assert.equal(r.texto, texto);
+  assert.ok(!r.violaciones.some((v) => v.mandamiento === 10));
+});
+
+// ── MAYOR 4 (revisión AG01, QA testdev8) — "queda/quedan" NUNCA en el ──────
+// grounding de SALIDA (CONCEPT_KEYWORDS); solo en la tabla exclusiva de
+// PREGUNTA (conceptosPedidosEnPregunta, guardrail/context.ts).
+test("MAYOR 4: 'Te queda un saldo pendiente de 30000 € y te quedan 250 € al mes.' sobrevive intacta (antes se borraba entera)", () => {
+  const texto = "Te queda un saldo pendiente de 30000 € y te quedan 250 € al mes.";
+  const r = enforceCommandments(
+    texto,
+    ctx({ conceptos: { ingreso: 2500, gastos: 2250, sobrante: 250, cuota: 881.25, plazo: 48, monto: 30000 } }),
+  );
+  assert.equal(r.texto, texto, "los 30.000 € son 'monto', un concepto verificado — la frase es correcta");
+  assert.deepEqual(r.violaciones, []);
+});
+
+test("MAYOR 4: 'queda/quedan' NO está en conceptsInSentence (grounding de salida) pero SÍ en conceptosPedidosEnPregunta (lectura de pregunta)", () => {
+  assert.deepEqual(
+    conceptsInSentence("Te quedan 250 € al mes."),
+    [],
+    "el grounding de SALIDA no debe reconocer 'quedan' — rompía frases legítimas de la respuesta",
+  );
+  assert.deepEqual(conceptosPedidosEnPregunta("¿cuánto me queda al mes?"), ["sobrante"]);
+  assert.deepEqual(conceptosPedidosEnPregunta("¿cuánto tengo de gastos?").sort(), ["gastos"]);
+  assert.deepEqual(
+    cifraPedidaAusente("¿cuánto me queda al mes?", "Tomo nota. Seguimos con tu plan.", { sobrante: 250 }),
+    { ausente: true, conceptosPedidos: ["sobrante"] },
+  );
+  assert.deepEqual(
+    cifraPedidaAusente("¿cuánto me queda al mes?", "Te quedan 250 € libres este mes.", { sobrante: 250 }),
+    { ausente: false, conceptosPedidos: ["sobrante"] },
+  );
+});

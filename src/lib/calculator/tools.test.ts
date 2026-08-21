@@ -136,6 +136,25 @@ test("buildToolResult: sin crédito → es_simulacion null, tae_usada null", () 
   assert.equal(tr.credito.tae_usada, null);
 });
 
+// ── MENOR (follow-up QA testdev8, V14) — desglose de UN SOLO ítem ───────────
+test("mapeo: gastos_detalle con UN SOLO ítem NO desaparece en silencio (V14) — se registra en gastos_items", () => {
+  const d = toolArgsToScenarioDelta({ gastos_detalle: [{ nombre: "netflix", monto: 15 }] });
+  assert.equal(d.gastos_items?.length, 1, "el ítem único se conserva, no se pierde");
+  assert.equal(d.gastos_items?.[0].name, "netflix");
+  assert.equal(d.gastos_items?.[0].amount, 15);
+  assert.equal(d.gastos_items?.[0].source, "tool");
+  // Un solo ítem no es "el desglose completo" — no se fija gastos_es_detalle
+  // ni gastos_detalle (esa clasificación exige ≥2 partidas).
+  assert.equal(d.gastos_es_detalle, undefined);
+  assert.equal(d.gastos_detalle, undefined);
+});
+
+test("mapeo: el ítem único de un tool_call SÍ llega al estado fusionado y es visible", () => {
+  const s = mergeScenario({}, toolArgsToScenarioDelta({ gastos_detalle: [{ nombre: "netflix", monto: 15 }] }));
+  assert.equal(s.gastos_items?.length, 1);
+  assert.equal(s.tiene_detalle_gastos, true, "poseer una partida, aunque sea una sola, cuenta como posesión");
+});
+
 test("la tool declara el nombre y los campos esperados", () => {
   assert.equal(registrarDatosFinancieros.function.name, "registrar_datos_financieros");
   const props = (registrarDatosFinancieros.function.parameters as { properties: Record<string, unknown> }).properties;

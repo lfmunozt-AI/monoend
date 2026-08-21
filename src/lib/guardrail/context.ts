@@ -2,7 +2,7 @@
 // tiempo, marcador de referencia y etiqueta por proximidad. Código PURO,
 // compartido por las piezas 1 y 2.
 
-import type { NumberMention } from "./numbers";
+import { findNumberMentions, type NumberMention } from "./numbers";
 
 /** Moneda/contexto normalizado de una cifra. `null` = no determinado. */
 export type Moneda = "EUR" | "USD" | "pesos" | "%" | "$" | null;
@@ -138,6 +138,12 @@ const REFERENCE_MARKERS = [
   "orientativa",
   "habitualmente",
   "tipicamente",
+  // MANDAMIENTO 6 — generaliza la tercera vía a cualquier campo (no solo TAE):
+  // un valor de EJEMPLO declarado como tal es el mismo puente de conocimiento.
+  "como ejemplo",
+  "a modo de ejemplo",
+  "ilustrativo",
+  "ilustrativa",
   // PT
   "o padrao",
   "costuma",
@@ -145,6 +151,9 @@ const REFERENCE_MARKERS = [
   "a titulo indicativo",
   "indicativo",
   "geralmente",
+  "como exemplo",
+  "a titulo de exemplo",
+  "ilustrativo",
   // EN
   "as a reference",
   "for reference",
@@ -156,6 +165,9 @@ const REFERENCE_MARKERS = [
   "generally",
   "on average",
   "ballpark",
+  "as an example",
+  "for example",
+  "illustrative",
 ];
 
 /** ¿La frase presenta la cifra como estándar/orientación, no como diagnóstico? */
@@ -172,17 +184,44 @@ export function hasReferenceMarker(sentence: string): boolean {
 // porque ni "ingreso" ni "gastos" tenían concepto — caían a la heurística
 // genérica y 500 (el sobrante) coincidía por c0. Mismo patrón del defecto C.
 const CONCEPT_KEYWORDS: [RegExp, string][] = [
+  // FIX B — derivadas de decisión (QA real): el modelo intentaba calcular
+  // estas cifras él mismo y caía en la trampa (la brecha real ~247€ se
+  // reescribía al ingreso; la suma de cuota+déficit se reescribía a la cuota).
+  // Ahora el motor las calcula y expone como conceptos de primera clase.
+  // VAN PRIMERO en la lista a propósito: `nearestConceptInSentence` desempata
+  // por orden de aparición cuando dos matches terminan en la MISMA posición
+  // ("la suma de cuota y déficit es X" — la frase completa de esfuerzo_total
+  // y la palabra suelta "déficit" terminan las dos en "déficit"). La frase
+  // compuesta, más específica, debe ganar el empate sobre la palabra suelta.
+  [/\b(brecha|gap|falta|diferencia)\b/, "brecha"],
+  // "esfuerzo total" es el término canónico (ver prompt); "la suma de cuota y
+  // déficit" es la frase NATURAL que causó el bug real de QA ("la suma de
+  // cuota y déficit es 1609,25" reescrita a la cuota) — se reconoce igual,
+  // sin depender de que el modelo adopte la terminología nueva.
+  [/esfuerzo total|total effort|suma de (?:la )?cuota y (?:el )?deficit|sum of (?:the )?(?:payment|installment) and deficit/, "esfuerzo_total"],
+  [/aumentar ingresos|aumento necesario|\bincrease\b/, "aumento_necesario"],
+  [/recorte necesario|\breducir\b|cut needed/, "recorte_necesario"],
+  [/ahorro necesario|necesitas ahorrar|savings needed|need to save/, "ahorro_necesario_mensual"],
   [/\b(cuota|cuotas|mensualidad|mensualidade|prestacao|prestacoes|payment|installment)\b/, "cuota"],
-  [/\b(sobrante|excedente|surplus|left ?over)\b/, "sobrante"],
+  // FIX 4 (7ª tanda) — "te sobra 200€" (verbo SOBRAR) faltaba: solo el
+  // sustantivo "sobrante" estaba cubierto, así que "sobra" caía sin concepto
+  // y el 200 (correcto) se mis-atribuía al concepto vecino más cercano.
+  [/\b(sobrante|sobra|sobran|excedente|surplus|left ?over)\b/, "sobrante"],
   [/\b(recorte|corte|cut)\b/, "recorte"],
   [/\b(capacidad (?:de ahorro )?anual|capacidad anual|annual capacity|yearly (?:savings|capacity))\b/, "capacidad_anual"],
-  [/\b(ingreso|ingresos|sueldo|salario|rendimento|income|earnings|gano|ganas)\b/, "ingreso"],
+  // FIX 3 (7ª tanda) — "ingresas"/"ingresa" (verbo INGRESAR, distinto de
+  // "gano/ganas" ya cubierto) faltaba, mismo hueco que "gastas" abajo.
+  [/\b(ingreso|ingresos|sueldo|salario|rendimento|income|earnings|gano|ganas|ingresas|ingresa|ingresan)\b/, "ingreso"],
   // "gastos" NO debe casar con "gastos vitales"/"gastos no vitales": son
   // subtotales con su propio valor (gastos_vitales/gastos_no_vitales), sin
   // concepto propio todavía — si "gastos" los capturase, el guardarraíl
   // "corregiría" 510/135 al total mensual (2372), que es la propia alucinación
   // que este fix busca evitar, solo que sobre un concepto distinto.
-  [/\b(?:gastos|gasto)\b(?!\s+(?:vitales|no\s+vitales))|\b(?:despesas|expenses|spending)\b/, "gastos"],
+  // FIX 3 (7ª tanda) — "gastas"/"gastan" (verbo conjugado) faltaban: "ingreso"
+  // ya reconocía "gano/ganas" pero "gastos" solo el sustantivo, así que
+  // "gastas 2.100 €" (con gastos=2.200 reales) nunca encontraba el concepto y
+  // caía al catch-all genérico (se borraba en vez de corregirse en sitio).
+  [/\b(?:gastos|gasto|gastas|gasta|gastan)\b(?!\s+(?:vitales|no\s+vitales))|\b(?:despesas|expenses|spending)\b/, "gastos"],
   // BUG 2: el déficit (gastas más de lo que ingresas) es un concepto propio, no
   // un "sobrante negativo" — sin esto, un déficit citado con la cifra errónea
   // caería a la heurística genérica igual que ingreso/gastos antes del fix.
@@ -197,6 +236,55 @@ export function conceptsInSentence(sentence: string): string[] {
     if (re.test(n) && !out.includes(concepto)) out.push(concepto);
   }
   return out;
+}
+
+// ── MAYOR 3/4 (revisión AG01, QA testdev8) — concepto de la PREGUNTA ────────
+//
+// CAUSA — la primera versión añadió "queda|quedan" directamente a
+// CONCEPT_KEYWORDS para que "¿cuánto me queda al mes?" reconociera el
+// sobrante. Pero CONCEPT_KEYWORDS también alimenta el GROUNDING DE SALIDA
+// (validate.ts, commandments.ts, policy.ts): "queda"/"quedan" es un verbo
+// demasiado genérico y también aparece en frases correctas de la RESPUESTA
+// que no hablan de sobrante ("Te queda un saldo pendiente de 30000 €") — esas
+// frases se borraban enteras por "no coincidir con sobrante". FIX: una tabla
+// EXTRA, separada, anclada a 1ª/2ª persona + periodicidad mensual, que SOLO
+// se usa para leer la PREGUNTA del usuario — nunca se mezcla con
+// CONCEPT_KEYWORDS ni se usa para el grounding de la respuesta.
+const PREGUNTA_KEYWORDS_EXTRA: [RegExp, string][] = [
+  [/\b(?:me|te|nos)\s+quedan?\b[^.!?]{0,40}\b(?:al\s+mes|mensual(?:es)?|por\s+mes|libres?)\b/, "sobrante"],
+  [/\bcu[aá]nto\s+(?:me|te|nos)\s+queda\b/, "sobrante"],
+];
+
+/**
+ * Conceptos financieros que la PREGUNTA del usuario pide — superset de
+ * `conceptsInSentence` con anclas EXCLUSIVAS de pregunta (jamás usadas para
+ * el grounding de una respuesta). Úsese solo sobre `userMessage`.
+ */
+export function conceptosPedidosEnPregunta(message: string): string[] {
+  const base = conceptsInSentence(message);
+  const n = norm(message);
+  const extra = PREGUNTA_KEYWORDS_EXTRA.filter(([re]) => re.test(n)).map(([, c]) => c);
+  return [...new Set([...base, ...extra])];
+}
+
+/**
+ * BLOQUEANTE 1/2 (QA testdev8) — ¿el concepto que pidió `userMessage` (y que
+ * el motor SÍ calculó, está en `conceptos`) sigue ausente de `text` con
+ * cualquier valor? Función PURA compartida: la usa el reintento de route.ts
+ * (regenera vía LLM) y el Mandamiento 10 (repara la anáfora sin volver al
+ * RAW) — un solo lugar, un solo criterio, y directamente testeable sin mock
+ * de LLM (revisión AG01, hallazgo m3: "tests que son grep, no comportamiento").
+ */
+export function cifraPedidaAusente(
+  userMessage: string,
+  text: string,
+  conceptos: Record<string, number>,
+): { ausente: boolean; conceptosPedidos: string[] } {
+  const conceptosPedidos = conceptosPedidosEnPregunta(userMessage).filter((c) => c in conceptos);
+  if (conceptosPedidos.length === 0) return { ausente: false, conceptosPedidos: [] };
+  const cifras = findNumberMentions(text);
+  const ausente = !conceptosPedidos.some((c) => cifras.some((m) => Math.abs(m.value - conceptos[c]) <= 0.01));
+  return { ausente, conceptosPedidos };
 }
 
 /**
@@ -273,6 +361,17 @@ const TIME_UNIT_AFTER =
 
 export function isTimeUnit(text: string, m: NumberMention): boolean {
   return TIME_UNIT_AFTER.test(norm(text.slice(m.end, m.end + 16)));
+}
+
+// ── Multiplicador ("× 12") ────────────────────────────────────────────────────
+// Un número precedido por el signo de multiplicar es un FACTOR aritmético
+// ("550 € de sobrante × 12" = explicar de dónde sale la capacidad anual), no
+// un monto que necesite fundamentarse por sí solo — igual que un porcentaje o
+// una unidad de tiempo.
+const MULTIPLIER_BEFORE_RE = /×\s*$/;
+
+export function isMultiplierFactor(text: string, m: NumberMention): boolean {
+  return MULTIPLIER_BEFORE_RE.test(text.slice(Math.max(0, m.start - 4), m.start));
 }
 
 // ── Moneda ───────────────────────────────────────────────────────────────────

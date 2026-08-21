@@ -1,0 +1,19 @@
+{
+  "name": "extraccion_limpia_sin_ambiguedad",
+  "playbook": "PB1",
+  "language": "es",
+  "description": "Caso de control (6º escenario del protocolo): 'gano 2300 y gasto 1850' es una extracción limpia — ni huérfanos ni discrepancia. El motor calcula normalmente y el eco de confirmación (PIEZA 3) abre la respuesta.",
+  "turns": [
+    {
+      "user": "gano 2300 y gasto 1850",
+      "fixtureResponse": "Entendido: ingresas 2.300 € y gastas 1.850 € al mes. Con eso te sobran 450 € — ¿tienes ya una meta para ese sobrante?",
+      "expectCarril": "FINANCIERO",
+      "expectBlocked": false,
+      "expectExtraccionAmbigua": false,
+      "expectEmocional": false,
+      "expectContains": ["450"],
+      "expectConcept": { "sobrante": { "value": 450, "tol": 0 } },
+      "expectScenarioState": { "ingreso_mensual": 2300, "gastos_mensuales": 1850 }
+    }
+  ]
+}

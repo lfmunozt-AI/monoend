@@ -1,0 +1,27 @@
+{
+  "name": "plan_no_vaciado",
+  "playbook": "PB7",
+  "language": "es",
+  "description": "CASO REAL de producción (telemetría, usuario testdev2, 30/07 19:24:43, ENFORCEMENT_MODE=full, gpt-4.1-mini). conceptos verificados: cuota:746.55, sobrante:550, brecha:196.55, gastos:1750, ingreso:2300, monto:30000, plazo:48, capacidad_anual:6600, aumento_necesario:196.55, recorte_necesario:196.55, ahorro_necesario_mensual:625. El modelo entregó un plan de 4 pasos con cifras TODAS correctas; el guardarraíl (antes de esta tanda) las bloqueaba una a una porque el concepto textualmente más cercano de cada cifra no coincidía con ella (FIX 1) y las propuestas de acción se juzgaban igual que afirmaciones de datos (FIX 2), dejando '1.2.3. Mantener la Reserva de Imprevistos intacta. 4. Revisar progreso en 30 días para ajustar. ¿Arrancamos con este plan?' — un plan vacío que el usuario confirmaba a ciegas. Con FIX 1+2 nada se bloquea; FIX 3 (renumerar) y el Mandamiento 9 (plan fantasma) quedan como red de seguridad si algo se colara de todos modos.",
+  "turns": [
+    {
+      "user": "Gano 2300 euros al mes y mis gastos son 1750. Quiero financiar un carro de 30000 a 48 meses.",
+      "fixtureResponse": "Para financiarlo necesito saber la TAE que te ofrece tu banco.",
+      "expectBlocked": false,
+      "expectScenarioState": {
+        "credito": { "monto": 30000, "plazo_meses": 48, "tae_es_referencia": true }
+      }
+    },
+    {
+      "user": "El banco me ofrece un 9%",
+      "fixtureResponse": "Para que la cuota de 746,55 € sea viable con tu sobrante de 550 €, debes aumentar ingresos o reducir gastos en al menos 196,55 € mensuales.\n1. Identificar y recortar una Fuga de Poder o gasto no vital por 100 €.\n2. Buscar un ingreso extra de 100 € al mes.\n3. Mantener la Reserva de Imprevistos intacta.\n4. Revisar progreso en 30 días para ajustar.\n¿Arrancamos con este plan?",
+      "expectBlocked": false,
+      "expectContains": ["746,55", "196,55", "100 €"],
+      "expectNotContains": ["1.2.3."],
+      "expectScenarioState": {
+        "credito": { "monto": 30000, "plazo_meses": 48, "tae_es_referencia": false, "tae_pct": 9 },
+        "missing": []
+      }
+    }
+  ]
+}

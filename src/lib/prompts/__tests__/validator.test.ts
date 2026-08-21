@@ -293,13 +293,18 @@ test('7. texto con cierre ya presente → no se añade otro cierre', () => {
   if (out.includes('Para darte cifras exactas')) throw new Error('duplicó el cierre');
 });
 
-test('8. sin cierre tras eliminar → se añade el cierre estándar del guardrail v2', () => {
+test('8. sin cierre tras eliminar → AUDITORÍA AG01 (H3): ya NO añade cierre, solo elimina', () => {
+  // enforceOutputPolicy dejó de insertar `standardClosingRequest` (era un
+  // segundo punto de inserción de cierre que resolveClosing no siempre
+  // revertía → doble cierre real de QA). Ahora solo elimina la infracción y
+  // deja el resto intacto; el cierre lo decide resolveClosing/assertOutputInvariants.
   const out = enforce(
     'Tu ritmo de ahorro cubre la meta en 18 meses sin tocar la Reserva. ' +
       'Esto te dará rentabilidad del 15% anual.',
   );
-  if (!out.includes('Para darte cifras exactas')) throw new Error(`falta el cierre: ${out}`);
+  if (out.includes('Para darte cifras exactas')) throw new Error('ya no debe insertar cierre propio');
   if (out.includes('15%')) throw new Error('no eliminó la garantía');
+  if (!out.includes('18 meses')) throw new Error(`la frase válida debía sobrevivir: ${out}`);
 });
 
 test('8b. BUG 1: violatingSentences devuelve la oración COMPLETA con millares', () => {

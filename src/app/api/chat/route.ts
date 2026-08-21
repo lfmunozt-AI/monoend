@@ -3,27 +3,60 @@ import { adminClient } from '@/lib/supabase/admin'
 import { buildSystemPrompt } from '@/lib/prompts/consigliere'
 import { callLLMWithTools } from '@/lib/llm'
 import {
-  runGuardrail,
+  applyEnforcement,
+  auditarMutaciones,
   ensureSubstance,
-  resolveClosing,
-  enforceSimulationHonesty,
   classifyTurn,
-  detectInjection,
+  esTonoEmocional,
+  getEnforcementMode,
+  cifraPedidaAusente,
 } from '@/lib/guardrail'
 import { buildScenarioContext } from '@/lib/calculator/orchestrator'
-import { mergeScenario, summarizeScenario, type ScenarioState } from '@/lib/calculator/scenario'
+import {
+  mergeScenario,
+  summarizeScenario,
+  esConfirmacionCorta,
+  registrarPropuestaPendiente,
+  esRespuestaRepetida,
+  contarRepeticionesMensajeUsuario,
+  actualizarDigresiones,
+  notaRetornoMeta,
+  notaSinCifrasDePlan,
+  detectarNumerosHuerfanos,
+  detectarDiscrepanciaGastos,
+  notaExtraccionAmbigua,
+  deltaSinGastosPorDiscrepancia,
+  renderDatosRecienEntendidos,
+  numerosCandidatos,
+  notaFaltaDesglose,
+  notaDetalleSinConfirmar,
+  detectarEventosICA,
+  analizarExtraccion,
+  detectarResolucionConflicto,
+  parConflictoParaResolucion,
+  mergeEstadoPersistido,
+  notaConflictoGastos,
+  type ScenarioState,
+} from '@/lib/calculator/scenario'
 import { registrarDatosFinancieros, resolveDelta, buildToolResult } from '@/lib/calculator/tools'
 import { detectLanguage } from '@/lib/language'
-import {
-  validateConsigliereOutput,
-  enforceOutputPolicy,
-  mentionsSpecificProduct,
-} from '@/lib/llm/output-validator'
 import { getICAScore } from '@/lib/ica-service'
-import { getICALevel } from '@/lib/ica'
+import { persistTurn, type GoalUpsert } from '@/lib/persistence'
 import { NextResponse } from 'next/server'
 
 const RATE_LIMIT_FREE = 20
+
+// REINTENTO ÚNICO ACOTADO: derivadas de decisión (FIX B) que el motor SÍ puede
+// calcular — si los Mandamientos vacían la respuesta por una cita incorrecta
+// de una de estas, vale la pena regenerar UNA vez con el valor correcto en vez
+// de pedir el dato de nuevo (el dato ya lo tenemos).
+const DECISION_DERIVATIVES = [
+  'brecha',
+  'esfuerzo_total',
+  'aumento_necesario',
+  'recorte_necesario',
+  'ahorro_necesario_mensual',
+]
 
 // user_ids exentos del rate limit incluso en Production (admins/QA). Se leen de
 // la env var ADMIN_USER_IDS (coma-separada) para eximir a alguien en PRD sin
@@ -34,6 +67,9 @@ const ADMIN_USER_IDS = (process.env.ADMIN_USER_IDS ?? '')
   .filter(Boolean)
 
 export async function POST(request: Request) {
+  // TELEMETRÍA G1b — marca de inicio del route, para latency_total_ms.
+  const routeStart = Date.now()
+
   // ── Auth ────────────────────────────────────────────────────────────────────
   const supabase = await createClient()
   const { data: { user }, error: authError } = await supabase.auth.getUser()
@@ -175,6 +211,36 @@ export async function POST(request: Request) {
     prevScenario = ((conv as { scenario_state?: Partial<ScenarioState> }).scenario_state) ?? {}
   }
 
+  // ── MEMORIA A NIVEL DE USUARIO (13ª tanda, migración 021) ──────────────────
+  // Los HECHOS financieros (ingreso, gastos, desglose, meta, crédito, ciclo de
+  // conflicto…) son del USUARIO y viven en `user_financial_state`; el estado
+  // de DIÁLOGO (propuesta pendiente, digresiones, eco…) sigue en
+  // `conversations.scenario_state`. Antes TODO vivía en la conversación, así
+  // que un chat nuevo arrancaba VACÍO — amnesia entre sesiones por diseño.
+  //
+  // La FORMA del objeto que sale de aquí es IDÉNTICA a la de antes: se fusionan
+  // las dos mitades y el pipeline aguas abajo no nota ninguna diferencia.
+  //
+  // Sin fila de hechos (usuario nuevo, o backfill parcial de la 021) el estado
+  // de la conversación actúa de RESPALDO: `mergeEstadoPersistido` lo conserva
+  // entero y la primera escritura de este turno lo promueve a hechos. Nunca se
+  // arranca vacío habiendo datos.
+  const { data: userState, error: userStateErr } = await admin
+    .from('user_financial_state')
+    .select('state')
+    .eq('user_id', user.id)
+    .maybeSingle()
+  if (userStateErr) {
+    // No es bloqueante: se degrada al estado de la conversación (el
+    // comportamiento anterior a esta tanda), pero NUNCA en silencio.
+    console.error('[chat] leer user_financial_state falló — se usa el estado de la conversación como respaldo:', JSON.stringify({
+      user_id: user.id,
+      error: userStateErr.message,
+    }))
+  }
+  const hechosUsuario = ((userState as { state?: Partial<ScenarioState> } | null)?.state) ?? undefined
+  prevScenario = mergeEstadoPersistido(hechosUsuario, prevScenario)
+
   // ── Historial de la conversación ─────────────────────────────────────────────
   // Única consulta de contexto que NO puede paralelizarse con las anteriores:
   // necesita `convId`, que sale de crear/resolver la conversación.
@@ -221,6 +287,15 @@ export async function POST(request: Request) {
   if (ingresosMes > 0) seed.ingreso_mensual = Math.round(ingresosMes)
   if (gastosMes > 0) seed.gastos_mensuales = Math.round(gastosMes)
 
+  // FIX C — el modelo necesita saber YA en la LLAMADA 1 si el usuario acaba de
+  // confirmar una propuesta pendiente ("sí"): una confirmación corta no trae
+  // datos nuevos, así que nunca dispara tool_call — no hay una LLAMADA 2 donde
+  // colar el dato. `mergeScenario` (más abajo) hace la transición OFICIAL del
+  // estado; esto solo adelanta el hecho al prompt de la primera llamada.
+  if (seed.propuesta_pendiente && esConfirmacionCorta(cleanMessage)) {
+    seed.plan_confirmado = true
+  }
+
   // ── CARRIL (Pieza 1-2) ───────────────────────────────────────────────────────
   // Causa raíz QA: el pipeline solo conocía UN modo (turno de cálculo). A "¿qué
   // modelo eres?" el guardarraíl de cifras juzgó la respuesta como esqueleto y la
@@ -230,7 +305,70 @@ export async function POST(request: Request) {
   // financiera/META en el texto; el escenario solo desempata cuando no hay
   // ninguna ("ninguno", "ok").
   const carril = classifyTurn(cleanMessage, seed, userLang)
-  console.warn('[chat] carril', JSON.stringify({ user_id: user.id, conversation_id: convId, carril }))
+
+  // PIEZA 5c (complemento, 5ª tanda) — TONO EMOCIONAL. Señal ORTOGONAL al
+  // carril: reduce la autoridad del enforcement (pipeline.ts) y se expone al
+  // prompt para que el modelo consuele primero — nunca cambia el cálculo.
+  const esEmocional = esTonoEmocional(cleanMessage)
+  const notaTonoEmocional = esEmocional
+    ? 'TONO EMOCIONAL detectado en este turno (frustración, vergüenza, miedo, pérdida de empleo…). ' +
+      'PROHIBIDO pedir datos financieros o forzar un cierre en esta respuesta: consuela primero y ofrece ' +
+      'una alternativa concreta, según el MANDATO DE TONO. El eco de datos recién entendidos, si lo hay, espera al turno siguiente.'
+    : null
+
+  // PIEZA 1 — modo de enforcement del turno ('full' por defecto). Se resuelve
+  // UNA vez y baja por toda la cadena; se registra en telemetría para el A/B.
+  const enforcementMode = getEnforcementMode()
+
+  // PIEZA 7 — DIGRESIÓN CON RETORNO. Un turno META habiendo meta activa no es un
+  // fallo: es conversación. Se cuenta, no se corta. Al tercero seguido se le
+  // pide al modelo que reconduzca con naturalidad; cualquier turno FINANCIERO
+  // reinicia el contador.
+  seed.digresiones_seguidas = actualizarDigresiones(prevScenario, carril, cleanMessage)
+  const notaDigresion = notaRetornoMeta(seed)
+
+  // FIX 2b (4ª tanda) — refuerzo determinista del auto-chequeo: si el
+  // playbook activo implica cifras de plan y falta un dato, se lo decimos
+  // directamente en vez de confiar solo en que el modelo se autochequee.
+  const notaSinCifras = notaSinCifrasDePlan(seed)
+
+  // BLOQUEANTE 3/4 (QA testdev8) — DERIVADAS RECALCULADAS DEL ESTADO
+  // PERSISTIDO, ANTES de saber si este turno trae datos nuevos. Causa raíz:
+  // `verified` (buildScenarioContext con TODAS las derivadas — cuota, brecha,
+  // desglose de gastos…) solo se inyectaba al modelo vía el tool_result de la
+  // LLAMADA 2, es decir SOLO cuando el turno disparaba un tool_call. Una
+  // pregunta pura ("¿me dices la cuota?", "¿qué gastos tengo?") no aporta
+  // datos nuevos → nunca hay tool_call → la LLAMADA 1 respondía viendo solo
+  // `summarizeScenario` (sin cuota calculada, sin desglose) y el modelo pedía
+  // datos que el motor ya podía calcular, o negaba tener un desglose que sí
+  // tenía. `verifiedSeed` recalcula TODO desde `seed` (crédito, desglose,
+  // brecha…) para que la PRIMERA llamada ya lo vea, la traiga o no el mensaje.
+  const verifiedSeed = buildScenarioContext(seed as ScenarioState, cleanMessage)
+  const notaDatosCalculados = verifiedSeed.bloque
+    ? `DATOS CALCULADOS DISPONIBLES (motor — recalculado del estado persistido; incluye TODO lo que ya se puede derivar, aunque este mensaje no aporte nada nuevo):\n${verifiedSeed.bloque}\n` +
+      'PROHIBIDO pedir un dato que ya puedas calcular con lo de arriba (una cuota, un desglose, una brecha…) — úsalo directamente.'
+    : null
+
+  // MAYOR 7 (QA testdev8) — el usuario repitió LITERALMENTE la misma pregunta
+  // ("¿cuánto me queda al mes?" ×3) y el sistema comparaba RESPUESTAS
+  // consecutivas (R3 vs R2, distintas) en vez del MENSAJE del usuario (R1 y R3
+  // sí eran la misma pregunta) — la repetición real nunca se detectaba.
+  const mensajesUsuarioPrevios = contextMessages.filter((m) => m.role === 'user').map((m) => m.content)
+  const repeticionesMensajeUsuario = contarRepeticionesMensajeUsuario(cleanMessage, mensajesUsuarioPrevios)
+  const notaRepeticionMensaje =
+    repeticionesMensajeUsuario >= 2
+      ? 'El usuario ha hecho esta MISMA pregunta 3 veces o más en esta conversación. Reconócelo explícitamente y pregúntale qué parte de tu respuesta anterior no quedó clara — PROHIBIDO repetir el mismo texto otra vez.'
+      : repeticionesMensajeUsuario === 1
+        ? 'El usuario ya hizo esta MISMA pregunta antes en esta conversación. PROHIBIDO repetir la misma respuesta o construcción de cierre: responde distinto y más directo esta vez.'
+        : null
+
+  console.warn('[chat] carril', JSON.stringify({
+    user_id: user.id,
+    conversation_id: convId,
+    carril,
+    enforcement_mode: enforcementMode,
+    digresiones: seed.digresiones_seguidas,
+  }))
 
   // ── System prompt (persona + idioma espejo) ──────────────────────────────────
   const basePrompt = buildSystemPrompt({
@@ -268,18 +406,27 @@ export async function POST(request: Request) {
   const systemPrompt1 = [
     basePrompt,
     `ESTADO ACTUAL CONOCIDO (lo que ya sabemos del usuario):\n${summarizeScenario(seed)}`,
+    notaDatosCalculados,
+    notaDigresion,
+    notaSinCifras,
+    notaRepeticionMensaje,
+    notaTonoEmocional,
     idiomaObligatorio,
   ].filter(Boolean).join('\n\n')
 
   // BONUS de latencia/coste (Pieza 2): en META no hay nada financiero que
   // extraer — una sola llamada, sin tool, con presupuesto de tokens de
   // respuesta completa (no de mero tool_call).
+  // TELEMETRÍA G1b — marca de inicio del bloque de generación (LLAMADA 1 en
+  // adelante, incluida la LLAMADA 2 y el reintento anti-repetición FIX C).
+  const generationStart = Date.now()
+
   const call1 = await callLLMWithTools(
     allMessages,
     systemPrompt1,
     [registrarDatosFinancieros],
     carril === 'META'
-      ? { maxTokens: 400, toolChoice: 'none' }
+      ? { maxTokens: 500, toolChoice: 'none' }
       : { maxTokens: 150 },
   )
 
@@ -295,27 +442,173 @@ export async function POST(request: Request) {
   console.log(`[chat] ${usedTool ? 'toolCall usado' : 'fallback-regex'}`,
     JSON.stringify({ conversation_id: convId, keys: Object.keys(delta), carril }))
 
+  // PIEZA 1/3 (12ª tanda, §2) — resolución de un CONFLICT/ASSUMED activo.
+  // `extractScenarioDelta` ya detecta esto en el carril fallback-regex (mira
+  // `seed.gastos_conflict`/`seed.gastos_assumed` directamente), pero el
+  // carril con tool_call NUNCA pasa por esa función (`toolArgsToScenarioDelta`
+  // no conoce el mensaje) — así que una resolución en lenguaje natural ("usa
+  // 2250", "eran 2250") se perdía si el modelo decidía llamar a la tool en
+  // vez de dejar el fallback. Se recalcula aquí, SIEMPRE, sobre el delta ya
+  // resuelto — sin pisar lo que el fallback ya haya puesto.
+  //
+  // BLOQUEANTE 3 (revisión AG01, tanda 2) — este `if` solo miraba
+  // `seed.gastos_conflict`; una vez que el escape lo cerraba a
+  // `gastos_assumed`, ninguna corrección en lenguaje natural volvía a
+  // engancharse (V6: "revocable SIEMPRE"). `parConflictoParaResolucion`
+  // reconstruye el par agregado/detalle desde los orígenes también cuando
+  // solo queda un ASSUMED activo.
+  const parParaResolucion = parConflictoParaResolucion(seed)
+  if (parParaResolucion && delta.gastos_resolucion === undefined) {
+    const resolucion = detectarResolucionConflicto(cleanMessage, parParaResolucion)
+    if (resolucion) delta.gastos_resolucion = resolucion
+  }
+  if (seed.gastos_assumed && esConfirmacionCorta(cleanMessage)) {
+    delta.gastos_assumed_confirmado = true
+  }
+
+  // PIEZA 1 (6ª tanda) — HUÉRFANOS MARCAN, NUNCA DESCARTAN. "Ningún dato entra
+  // al estado sin que el usuario lo vea" sigue siendo el principio, pero un
+  // huérfano (un número suelto que no encaja en ningún campo) es SOLO una
+  // señal para preguntar — NUNCA un motivo para tirar campos que SÍ se
+  // extrajeron con confianza. BUG BLOQUEANTE (testdev5): la versión anterior
+  // descartaba el delta ENTERO ante cualquier huérfano, así que un mensaje con
+  // ingreso y gastos limpios más un par de cifras de una meta sin decidir aún
+  // perdía ingreso y gastos para siempre — nada se persistía.
+  //
+  // La discrepancia de gastos (agregado ≠ suma del desglose) sigue siendo
+  // distinta: ES el mismo campo contradiciéndose a sí mismo, así que solo ESE
+  // campo se retiene hasta reconciliar (`deltaSinGastosPorDiscrepancia`); el
+  // resto del delta (ingreso, crédito, meta…) se persiste igualmente.
+  const huerfanos = detectarNumerosHuerfanos(cleanMessage, delta)
+  const discrepancia = detectarDiscrepanciaGastos(delta)
+  // PIEZA 1/3 (8ª tanda) — honestidad de la extracción: además de huérfanos y
+  // discrepancia, ¿hay un ítem de la lista de gastos sospechoso de pegado
+  // ("60 100" leído como 60.100)? `extraction_status` resume las cuatro
+  // señales en un solo valor para telemetría/depuración — no sustituye a
+  // ninguna, solo las agrupa (ver `analizarExtraccion`).
+  const analisis = analizarExtraccion(cleanMessage, delta)
+  const itemSospechoso = analisis.itemSospechoso
+  const extraccionAmbigua = huerfanos.extraccionIncompleta || discrepancia.discrepancia || !!itemSospechoso
+  const notaAmbigua = extraccionAmbigua ? notaExtraccionAmbigua(huerfanos, discrepancia, itemSospechoso) : null
+
+  if (extraccionAmbigua) {
+    console.warn('[chat] extraccion_ambigua', JSON.stringify({
+      user_id: user.id,
+      conversation_id: convId,
+      carril,
+      numeros_huerfanos: huerfanos.numerosHuerfanos,
+      discrepancia_gastos: discrepancia.discrepancia,
+      item_sospechoso: itemSospechoso,
+      extraction_status: analisis.extraction_status,
+    }))
+  }
+
   // Paso 4: estado completo → paquete verificado (código calcula y marca).
-  const scenario = mergeScenario(seed, delta)
-  const verified = buildScenarioContext(scenario, cleanMessage)
+  // El delta SIEMPRE se persiste, salvo el campo de gastos cuando hay
+  // discrepancia aritmética (deltaSinGastosPorDiscrepancia es un no-op si no
+  // la hay). buildScenarioContext computa SIEMPRE con lo que el estado
+  // realmente tiene — ya no existe un interruptor de "ambigüedad" que apague
+  // el cálculo entero.
+  const deltaAPersistir = deltaSinGastosPorDiscrepancia(delta, discrepancia)
+  const scenario = mergeScenario(seed, deltaAPersistir)
+  // PIEZA 1 (8ª tanda) — se expone en el estado, no solo en el resultado de
+  // esta llamada: el turno SIGUIENTE puede ver si el anterior fue dudoso.
+  scenario.extraction_status = analisis.extraction_status
+  // Todo número candidato del mensaje (no solo los huérfanos) queda autorizado
+  // para el guardarraíl de cifras: el modelo necesita poder citar cualquiera
+  // de ellos al preguntar ("¿tu ingreso ronda los 2.000 € o los 2.500 €?",
+  // "dijiste 1.000 € pero el detalle suma 850 €") sin que se bloqueen por no
+  // ser una cifra derivada verificada — es el eco de lo que el usuario
+  // escribió, no una cifra inventada. `discrepancia.suma` se añade aparte
+  // porque es COMPUTADA (no un token literal del mensaje).
+  const valoresExtra = [
+    ...numerosCandidatos(cleanMessage),
+    ...(discrepancia.suma !== undefined ? [discrepancia.suma] : []),
+  ]
+  const verified = buildScenarioContext(scenario, cleanMessage, { valoresExtra })
+
+  // BLOQUEANTE 3/4 — misma nota que `notaDatosCalculados` (calculada sobre
+  // `seed`, antes de este turno) pero con el estado YA fusionado: estrictamente
+  // más completa cuando este turno SÍ trajo datos nuevos. Va en las llamadas
+  // que ocurren después de conocer el delta (LLAMADA 2 y el regen sin tool).
+  const notaDatosCalculadosPostMerge = verified.bloque
+    ? `DATOS CALCULADOS DISPONIBLES (motor — recalculado del estado tras este turno; incluye TODO lo que ya se puede derivar):\n${verified.bloque}\n` +
+      'PROHIBIDO pedir un dato que ya puedas calcular con lo de arriba (una cuota, un desglose, una brecha…) — úsalo directamente.'
+    : null
+
+  // PIEZA 3 — ECO DE CONFIRMACIÓN: la primera línea de la respuesta devuelve lo
+  // que SÍ quedó claro este turno (el delta que se va a persistir, no el
+  // delta crudo — así nunca se ecoa un gasto en discrepancia), salvo en turno
+  // emocional (PIEZA 7 de la 5ª tanda: el eco espera al turno siguiente).
+  // MAYOR 6 — si el delta trae una corrección de ítem, se le pasa el total YA
+  // recalculado (y si quedó en conflicto) para que el eco lo enuncie.
+  const notaEco = !esEmocional
+    ? renderDatosRecienEntendidos(deltaAPersistir, cleanMessage, {
+        gastosMensualesNuevo: scenario.gastos_mensuales,
+        enConflicto: !!scenario.gastos_conflict,
+      })
+    : null
+
+  // PIEZA 7 (6ª tanda) — si el usuario pide un plan de recorte y solo hay
+  // agregado de gastos (no desglose), se pide el desglose citando lo ya
+  // sabido — nunca se re-pregunta ingreso ni el total de gastos.
+  const notaDesglose = notaFaltaDesglose(scenario, cleanMessage)
+  // FIX 5 (9ª tanda) — el desglose existe pero aún no está confirmado: se
+  // entregan los datos entendidos para que el modelo pida confirmación antes
+  // de proponer recortes por partida (sobrante/capacidad/cuota siguen igual).
+  const notaDetalleSinConfirmarVal = notaDetalleSinConfirmar(scenario, cleanMessage)
+  // PIEZA 7 (12ª tanda, §2/§6) — CONFLICT/ASSUMED de gastos: datos crudos al
+  // modelo, la frase la redacta él (PROHIBIDO texto enlatado — ver la nota).
+  const notaConflicto = notaConflictoGastos(scenario)
 
   // Paso 5-6: si hubo tool_call, LLAMADA 2 con el paquete verificado como
   // tool_result; si no, se usa el content de la LLAMADA 1 (ahorra latencia).
+  // Se guardan systemPrompt/mensajes de la llamada que ganó: el reintento por
+  // repetición (FIX C, más abajo) los reutiliza para regenerar UNA vez.
   let llmResult: { content: string; tokensUsed: number; model: string }
+  let respondingSystemPrompt: string
+  let respondingMessages: Parameters<typeof callLLMWithTools>[0]
   if (usedTool && toolCall) {
     const toolResult = JSON.stringify(buildToolResult(scenario, verified))
-    const systemPrompt2 = [basePrompt, idiomaObligatorio].filter(Boolean).join('\n\n')
+    // PIEZA 1/3 — la nota de ambigüedad y el eco de confirmación van en ESTA
+    // llamada (aún no se ha generado nada con el delta de este turno).
+    const systemPrompt2 = [basePrompt, notaDatosCalculadosPostMerge, notaDigresion, notaSinCifras, notaAmbigua, notaEco, notaDesglose, notaDetalleSinConfirmarVal, notaConflicto, notaRepeticionMensaje, notaTonoEmocional, idiomaObligatorio]
+      .filter(Boolean).join('\n\n')
+    const messages2 = [
+      ...allMessages,
+      { role: 'assistant' as const, content: call1.content, toolCalls: [toolCall] },
+      { role: 'tool' as const, toolCallId: toolCall.id, content: toolResult },
+    ]
     const call2 = await callLLMWithTools(
-      [
-        ...allMessages,
-        { role: 'assistant' as const, content: call1.content, toolCalls: [toolCall] },
-        { role: 'tool' as const, toolCallId: toolCall.id, content: toolResult },
-      ],
+      messages2,
       systemPrompt2,
       [registrarDatosFinancieros],
-      { maxTokens: 400, toolChoice: 'none' },
+      { maxTokens: 500, toolChoice: 'none' },
     )
     llmResult = { content: call2.content, tokensUsed: call1.tokensUsed + call2.tokensUsed, model: call2.model }
+    respondingSystemPrompt = systemPrompt2
+    respondingMessages = messages2
+  } else if (notaAmbigua || notaEco || notaDesglose || notaDetalleSinConfirmarVal || notaConflicto) {
+    // PIEZA 1/3/7 (sin tool_call) — el contenido de la LLAMADA 1 se generó ANTES
+    // de conocer la ambigüedad, el eco o la falta de desglose (todos dependen
+    // del delta, resuelto después). Se regenera UNA vez con la nota inyectada —
+    // mismo patrón que el REINTENTO ÚNICO ACOTADO de las derivadas de decisión,
+    // más abajo.
+    const systemPromptRegen = [basePrompt, `ESTADO ACTUAL CONOCIDO (lo que ya sabemos del usuario):\n${summarizeScenario(seed)}`, notaDatosCalculadosPostMerge, notaDigresion, notaSinCifras, notaAmbigua, notaEco, notaDesglose, notaDetalleSinConfirmarVal, notaConflicto, notaRepeticionMensaje, notaTonoEmocional, idiomaObligatorio]
+      .filter(Boolean).join('\n\n')
+    const regen = await callLLMWithTools(
+      allMessages,
+      systemPromptRegen,
+      [registrarDatosFinancieros],
+      { maxTokens: 500, toolChoice: 'none' },
+    )
+    llmResult = {
+      content: regen.content || call1.content || 'El Consigliere no está disponible en este momento. Intenta en unos minutos.',
+      tokensUsed: call1.tokensUsed + regen.tokensUsed,
+      model: regen.model,
+    }
+    respondingSystemPrompt = systemPromptRegen
+    respondingMessages = allMessages
   } else {
     // Sin datos nuevos: la respuesta de la LLAMADA 1 (con el ESTADO CONOCIDO) vale.
     // Si el modelo no está disponible, el guardrail/ensureSubstance da el cierre seguro.
@@ -324,167 +617,339 @@ export async function POST(request: Request) {
       tokensUsed: call1.tokensUsed,
       model: call1.model,
     }
+    respondingSystemPrompt = systemPrompt1
+    respondingMessages = allMessages
   }
+
+  // FIX C — ANTI-REPETICIÓN: bug real de 5 turnos con la respuesta prácticamente
+  // calcada ("¿quieres que te proyecte el plan?" una y otra vez). Si el texto
+  // generado es ≥90% idéntico al último mensaje del asistente en esta MISMA
+  // conversación, se regenera UNA sola vez con instrucción explícita de avanzar.
+  const lastAssistantMessage = [...contextMessages].reverse().find((m) => m.role === 'assistant')?.content
+  if (esRespuestaRepetida(llmResult.content, lastAssistantMessage)) {
+    console.warn('[chat] repetition_detected', JSON.stringify({ user_id: user.id, conversation_id: convId, carril }))
+    const instruccionAvance =
+      'Tu respuesta iba a repetir casi literalmente la anterior de esta conversación. ' +
+      'PROHIBIDO reformular el mismo diagnóstico o repetir la misma pregunta: avanza al siguiente paso concreto.'
+    const retry = await callLLMWithTools(
+      respondingMessages,
+      `${respondingSystemPrompt}\n\n${instruccionAvance}`,
+      [registrarDatosFinancieros],
+      { maxTokens: 500, toolChoice: 'none' },
+    )
+    llmResult = {
+      content: retry.content || llmResult.content,
+      tokensUsed: llmResult.tokensUsed + retry.tokensUsed,
+      model: retry.model,
+    }
+  }
+
+  // TELEMETRÍA G1b — fin del bloque de generación / respuesta cruda del LLM
+  // (pre-runGuardrail). Se guarda aparte porque `llmResult.content` se
+  // reescribe más abajo en el REINTENTO ÚNICO ACOTADO.
+  const generationEnd = Date.now()
+  let latencyGenerationMs = generationEnd - generationStart
+  let responseRawForTelemetry = llmResult.content
 
   // ── Guardarraíl de cifras (código externo al modelo) ─────────────────────────
   // Pieza 2: la jaula de cifras SOLO aplica a la parte financiera del turno.
   // META no tiene nada que fundamentar (charla trivial, identidad, gracias):
   // se salta el grounding entero, pero la señal anti-inyección (M3 / Pieza 5b
   // identity_probe) se sigue detectando y logueando igual.
-  let finalContent: string
-  let injectionDetected: boolean
-  let injectionPatterns: string[]
-
-  if (carril === 'META') {
-    finalContent = llmResult.content
-    const inj = detectInjection(cleanMessage)
-    injectionDetected = inj.sospechoso
-    injectionPatterns = inj.patrones
-  } else {
-    // FINANCIERO y MIXTO: grounding de cifras. `texto_final` es la respuesta
-    // saneada (montos inventados corregidos/eliminados). best-effort: nunca lanza.
-    const guardrail = await runGuardrail(cleanMessage, llmResult.content, {
-      mode: 'mvp',
+  //
+  // Extraída a función para el REINTENTO ÚNICO ACOTADO (más abajo): una
+  // regeneración necesita pasar por exactamente la misma cadena de seguridad
+  // (grounding → validador → cierre → Mandamientos), con un registro de
+  // mutaciones NUEVO — no el de la primera pasada.
+  // `userId`: TS no propaga el null-check de `user` dentro de una función
+  // anidada; se captura ya-no-nulo aquí para no repetir `user!.id`.
+  const userId = user.id
+  async function runSafetyPipeline(rawContent: string) {
+    // La cadena vive en `lib/guardrail/pipeline.ts` (un solo orden, un solo
+    // lugar) y registra TODA mutación — incluido el punto ciego del Caso A,
+    // donde una sustitución completa se logueaba con `mutations: []`.
+    const result = await applyEnforcement(rawContent, {
+      userMessage: cleanMessage,
+      carril,
+      lang: userLang,
+      missing: scenario.missing,
+      valores: verified.valores,
+      conceptos: verified.conceptos,
+      // false en META — ahí ni se calcula ni aplica (Mandamiento 2).
+      esSimulacion: carril === 'META' ? false : scenario.credito?.tae_es_referencia === true,
+      // PIEZA 5a (complemento, 5ª tanda) — frontera de autoridad reducida en
+      // turnos emocionales: el enforcement no toca tono, solo cifras.
+      esEmocional,
+      enforcement: enforcementMode,
       supabase: admin,
-      userId: user.id,
-      // Grounding: valores exactos (c0) + conceptos semánticos (PIEZA 2).
-      cifrasCalculadas: { valores: verified.valores, conceptos: verified.conceptos },
-      // Fallo A: el cierre del guardarraíl en el idioma del usuario, no el del modelo.
-      idioma: userLang,
+      userId,
     })
-    finalContent = guardrail.texto_final
-    injectionDetected = guardrail.injection.detected
-    injectionPatterns = guardrail.injection.patterns
 
-    // PIEZA 4 — simulación: la cuota simulada (TAE de referencia) nunca puede
-    // afirmar que "no incluye intereses" (sí los incluye) y siempre debe dejar
-    // claro que es una simulación, no la cifra real del banco.
-    const esSimulacion = scenario.credito?.tae_es_referencia === true
-    const beforeSimulation = finalContent
-    finalContent = enforceSimulationHonesty(finalContent, { esSimulacion, lang: userLang })
-    if (finalContent !== beforeSimulation) {
-      console.warn('[chat] simulation_honesty_enforced', JSON.stringify({
-        user_id: user.id,
+    // M3 / Pieza 5b: la señal anti-inyección (incluido identity_probe) no
+    // bloquea; se registra para vigilancia.
+    if (result.injection.detected) {
+      console.warn('[chat] injection_detected', JSON.stringify({
+        user_id: userId,
         conversation_id: convId,
+        patterns: result.injection.patterns,
         carril,
       }))
     }
-  }
 
-  // M3 / Pieza 5b: la señal anti-inyección (incluido identity_probe) no
-  // bloquea; se registra para vigilancia.
-  if (injectionDetected) {
-    console.warn('[chat] injection_detected', JSON.stringify({
-      user_id: user.id,
-      conversation_id: convId,
-      patterns: injectionPatterns,
-      carril,
-    }))
-  }
-
-  // ── Validador de política, sobre el texto ya saneado ─────────────────────────
-  // Capas de seguridad (garantías, absolutos, branding, fuga de identidad de
-  // proveedor/modelo — Pieza 5c): se aplican en TODOS los carriles, META
-  // incluido. `validation.text` trae el branding corregido; `enforceOutputPolicy`
-  // hace cumplir los bloqueos (C1) eliminando la oración infractora.
-  const validation = validateConsigliereOutput(finalContent)
-  finalContent = validation.text
-
-  const enforced = enforceOutputPolicy(finalContent, validation)
-  if (enforced !== finalContent) {
-    console.warn('[chat] output_enforced', JSON.stringify({
-      user_id: user.id,
-      conversation_id: convId,
-      carril,
-      severity: validation.severity,
-      reasons: validation.reasons,
-      removed_sentences: validation.violatingSentences.length,
-    }))
-  } else if (validation.severity !== 'ok') {
-    console.warn('[chat] output-validator:', validation.severity, validation.reasons)
-  }
-  finalContent = enforced
-
-  // Producto específico sin disclaimer → adjuntar el disclaimer canónico.
-  // Solo si el producto SOBREVIVIÓ al enforcement: si su oración se eliminó, un
-  // disclaimer colgando al final no protege de nada y confunde.
-  if (
-    validation.suggestedDisclaimer &&
-    mentionsSpecificProduct(finalContent) &&
-    !finalContent.includes(validation.suggestedDisclaimer)
-  ) {
-    finalContent = `${finalContent}\n\n${validation.suggestedDisclaimer}`
-  }
-
-  // PIEZA 3 — fallback de sustancia: SOLO en FINANCIERO. Si el guardrail vació
-  // la respuesta a un esqueleto sin cifras, se sustituye por una petición segura
-  // del dato que falta (scenario.missing[0]) con promesa de cálculo. En META/MIXTO
-  // una respuesta sin cifras (charla trivial, o la parte no financiera de un
-  // turno mixto) es perfectamente válida — no hay esqueleto que rellenar.
-  if (carril === 'FINANCIERO') {
-    const beforeSubstance = finalContent
-    finalContent = ensureSubstance(finalContent, { lang: userLang, missing: scenario.missing })
-    if (finalContent !== beforeSubstance) {
-      console.warn('[chat] substance_fallback', JSON.stringify({
-        user_id: user.id,
+    if (result.mutations.length > 0) {
+      console.warn('[chat] mutations', JSON.stringify({
+        user_id: userId,
         conversation_id: convId,
-        missing: scenario.missing,
+        carril,
+        enforcement_mode: result.enforcement,
+        capas: result.mutations.map((m) => `${m.capa}:${m.regla}`),
       }))
+    }
+
+    if (result.violaciones.length > 0) {
+      console.warn('[chat] commandments', JSON.stringify({
+        user_id: userId,
+        conversation_id: convId,
+        carril,
+        violaciones: result.violaciones,
+      }))
+    }
+
+    // PIEZA 5 — INVARIANTE DE AUDITORÍA: si el texto cambió, tiene que haber
+    // quedado registrado. Un fallo aquí es un punto ciego nuevo: se avisa, no se
+    // bloquea la respuesta (la telemetría lo recogerá igualmente).
+    if (!auditarMutaciones(rawContent, result.texto, result.mutations)) {
+      console.error('[chat] mutation_audit_gap', JSON.stringify({
+        user_id: userId,
+        conversation_id: convId,
+        carril,
+        enforcement_mode: result.enforcement,
+      }))
+    }
+
+    return {
+      finalContent: result.texto,
+      commandments: { texto: result.texto, violaciones: result.violaciones },
+      mutations: result.mutations,
+      guardrailBloqueado: result.guardrailBloqueado,
     }
   }
 
-  // PIEZA 3 — resolutor ÚNICO de cierre (arregla el doble cierre real: dos
-  // cierres canónicos propios seguidos porque rewriteDelegativeClosing y
-  // enforceMissingClosing no se coordinaban entre sí). Por carril:
-  // META → intacto; MIXTO → solo elimina delegación, nunca añade; FINANCIERO →
-  // el missing manda, garantizando UNA sola pregunta final.
-  const beforeClosing = finalContent
-  finalContent = resolveClosing(finalContent, { carril, missing: scenario.missing, lang: userLang })
-  if (finalContent !== beforeClosing) {
-    console.warn('[chat] closing_resolved', JSON.stringify({
-      user_id: user.id,
+  // TELEMETRÍA G1b — capas de validación: guardrail + validator + Commandments.
+  const validationStart = Date.now()
+  let safety = await runSafetyPipeline(llmResult.content)
+  let latencyValidationMs = Date.now() - validationStart
+  let finalContent = safety.finalContent
+
+  // REINTENTO ÚNICO ACOTADO — cuando los Mandamientos vacían la respuesta
+  // entera por una cita incorrecta de una derivada de decisión (FIX B: brecha,
+  // esfuerzo_total, aumento/recorte necesario, ahorro_necesario_mensual), el
+  // motor SÍ tiene el valor correcto en `conceptos` — no hace falta pedir el
+  // dato de nuevo, basta regenerar UNA vez con la cifra correcta explícita.
+  // Si la segunda pasada TAMBIÉN queda vacía, se abandona (nunca un segundo
+  // reintento) y se cae al cierre seguro de siempre (ensureSubstance).
+  const derivadaDisponible = DECISION_DERIVATIVES.some((k) => k in verified.conceptos)
+  if (carril !== 'META' && finalContent.trim() === '' && derivadaDisponible) {
+    const cifrasCorrectas = DECISION_DERIVATIVES
+      .filter((k) => k in verified.conceptos)
+      .map((k) => `${k} = ${verified.conceptos[k]}`)
+      .join(', ')
+    console.warn('[chat] bounded_retry', JSON.stringify({
+      user_id: userId,
       conversation_id: convId,
       carril,
-      missing: scenario.missing,
+      motivo: 'respuesta vaciada por Mandamientos — derivada de decisión disponible en el motor',
+      cifras: cifrasCorrectas,
     }))
+    const instruccionCorrectiva =
+      'Tu respuesta anterior citó una cifra de decisión incorrecta y fue eliminada por completo. ' +
+      `Usa EXACTAMENTE estos valores ya calculados (no los recalcules, no inventes otros): ${cifrasCorrectas}.`
+    const boundedRetryGenStart = Date.now()
+    const retry = await callLLMWithTools(
+      respondingMessages,
+      `${respondingSystemPrompt}\n\n${instruccionCorrectiva}`,
+      [registrarDatosFinancieros],
+      { maxTokens: 500, toolChoice: 'none' },
+    )
+    latencyGenerationMs += Date.now() - boundedRetryGenStart
+    if (retry.content) {
+      const boundedRetryValStart = Date.now()
+      safety = await runSafetyPipeline(retry.content)
+      latencyValidationMs += Date.now() - boundedRetryValStart
+      finalContent = safety.finalContent
+      llmResult = { content: retry.content, tokensUsed: llmResult.tokensUsed + retry.tokensUsed, model: retry.model }
+      responseRawForTelemetry = retry.content
+    }
+    if (finalContent.trim() === '') {
+      const antes = finalContent
+      finalContent = ensureSubstance('', {
+        lang: userLang,
+        missing: scenario.missing,
+        // El último recurso tiene que producir ALGO aunque el modo sea minimal:
+        // una respuesta vacía no es "no sustituir lo bueno", es no responder.
+        enforcement: 'full',
+      })
+      // PIEZA 5 — también este último recurso queda registrado.
+      if (finalContent !== antes) {
+        safety.mutations.push({
+          capa: 'ensureSubstance',
+          regla: 'respuesta vacía tras el reintento acotado',
+          antes,
+          despues: finalContent,
+        })
+      }
+    }
   }
 
-  // ── Guardar respuesta + actualizar conversación (parallel) ───────────────────
-  const [assistantMsgResult, updateConvResult] = await Promise.all([
-    admin.from('messages').insert({
-      conversation_id: convId,
-      user_id: user.id,
-      role: 'assistant',
-      content: finalContent,
-      tokens_used: llmResult.tokensUsed,
-    }),
-    admin.from('conversations')
-      .update({ updated_at: new Date().toISOString(), scenario_state: scenario })
-      .eq('id', convId),
-  ])
+  // BLOQUEANTE 1/2 (QA testdev8) — CIFRA PEDIDA AUSENTE. El usuario preguntó
+  // por un concepto financiero identificable (gastos, ingreso, sobrante,
+  // cuota, capacidad, brecha…) que el motor SÍ calculó, y la respuesta final
+  // no la contiene con ningún valor. V18 — el Mandamiento 10 (commandments.ts)
+  // es un SENSOR, nunca edita: solo detecta y loguea la misma condición. Esta
+  // es la ÚNICA vía real de corrección — el modelo redacta, nunca una capa
+  // determinista. Cubre cualquier forma del síntoma: una anáfora huérfana, o
+  // el modelo respondiendo con la cifra EQUIVOCADA desde el origen (dio el
+  // sobrante cuando preguntaron por el total de gastos). `cifraPedidaAusente`
+  // es la MISMA función pura que usa el Mandamiento 10 para detectar
+  // (guardrail/context.ts) — un solo criterio, testeado sin mock de LLM.
+  if (carril !== 'META' && finalContent.trim() !== '') {
+    const { ausente: cifraAusente, conceptosPedidos } = cifraPedidaAusente(cleanMessage, finalContent, verified.conceptos)
+    if (cifraAusente) {
+      const cifrasPedidas = conceptosPedidos.map((c) => `${c} = ${verified.conceptos[c]}`).join(', ')
+      console.warn('[chat] cifra_pedida_ausente', JSON.stringify({
+        user_id: userId,
+        conversation_id: convId,
+        carril,
+        conceptos_pedidos: conceptosPedidos,
+        cifras: cifrasPedidas,
+      }))
+      const instruccionCifraPedida =
+        `El usuario preguntó específicamente por: ${conceptosPedidos.join(', ')}. Tu respuesta anterior no incluyó esa cifra exacta — respondiste otra cosa. ` +
+        `Responde con EXACTAMENTE estos valores ya calculados, en la primera frase (no los recalcules, no inventes otros): ${cifrasPedidas}.`
+      const cifraRetryGenStart = Date.now()
+      const retry = await callLLMWithTools(
+        respondingMessages,
+        `${respondingSystemPrompt}\n\n${instruccionCifraPedida}`,
+        [registrarDatosFinancieros],
+        { maxTokens: 500, toolChoice: 'none' },
+      )
+      latencyGenerationMs += Date.now() - cifraRetryGenStart
+      if (retry.content) {
+        const cifraRetryValStart = Date.now()
+        safety = await runSafetyPipeline(retry.content)
+        latencyValidationMs += Date.now() - cifraRetryValStart
+        finalContent = safety.finalContent
+        llmResult = { content: retry.content, tokensUsed: llmResult.tokensUsed + retry.tokensUsed, model: retry.model }
+        responseRawForTelemetry = retry.content
+      }
+    }
+  }
+
+  // FIX C — si `finalContent` cierra proponiendo un plan, se recuerda para que
+  // una confirmación corta del PRÓXIMO turno dispare PB7 en vez de que el
+  // modelo vuelva a diagnosticar. Sin propuesta, el escenario vuelve intacto.
+  const scenarioAPersistir = registrarPropuestaPendiente(scenario, finalContent)
+
+  // ── Guardar el mensaje del asistente ──────────────────────────────────────
+  const assistantMsgResult = await admin.from('messages').insert({
+    conversation_id: convId,
+    user_id: user.id,
+    role: 'assistant',
+    content: finalContent,
+    tokens_used: llmResult.tokensUsed,
+  }).select('id').single()
 
   if (assistantMsgResult.error) {
     console.error('[chat] guardar respuesta asistente:', assistantMsgResult.error)
   }
-  if (updateConvResult.error) {
-    console.error('[chat] actualizar conversación:', updateConvResult.error)
-  }
 
-  // ── ICA +2 por consulta al Consigliere (no crítico) ──────────────────────────
-  try {
-    const newScore = Math.min(100, currentICA + 2)
-    const level = getICALevel(newScore)
-    await Promise.all([
-      admin.from('ica_history').insert({
-        user_id: user.id,
-        score: newScore,
-        level,
-        event_trigger: 'chat_consulta',
-      }),
-      admin.from('profiles').update({ ica_score: newScore }).eq('user_id', user.id),
-    ])
-  } catch (err) {
-    console.error('[chat] actualizar ICA (no crítico):', err)
+  // PIEZA 3 (6ª tanda) — meta declarada crea/actualiza fila en `goals`. La
+  // tabla exige target_amount NOT NULL > 0: sin monto no hay fila posible,
+  // titulo solo no basta (aunque el estado ya lo distinga vía `missing`).
+  const goalUpsert: GoalUpsert | null =
+    scenarioAPersistir.meta?.titulo && scenarioAPersistir.meta.monto !== undefined
+      ? {
+          titulo: scenarioAPersistir.meta.titulo,
+          monto: scenarioAPersistir.meta.monto,
+          plazoMeses: scenarioAPersistir.meta.plazo_meses,
+        }
+      : null
+
+  // PIEZA 4 (6ª tanda) — eventos de conocimiento NUEVO de este turno, contra
+  // el estado con el que arrancó (`seed`, incluye lo ya sabido por
+  // transacciones + lo persistido en turnos previos).
+  const icaEventos = detectarEventosICA(seed, scenarioAPersistir)
+
+  // PIEZA 2 (6ª tanda) — PERSISTENCIA TRANSACCIONAL DEL TURNO. Único punto de
+  // escritura para scenario_state, goals, ica_history y response_telemetry;
+  // cada una con su propio resultado — nunca un catch silencioso que oculte
+  // un fallo como el de este incidente (testdev5: la telemetría llevaba
+  // semanas sin escribir una fila y nadie lo vio).
+  const messageId = (assistantMsgResult.data as { id: string } | null)?.id ?? null
+  const persistResult = await persistTurn(admin, {
+    userId: user.id,
+    conversationId: convId,
+    scenarioState: scenarioAPersistir,
+    goal: goalUpsert,
+    icaEventos,
+    telemetry: {
+      userId: user.id,
+      conversationId: convId,
+      messageId,
+      carril,
+      model: llmResult.model,
+      tokensUsed: llmResult.tokensUsed,
+      toolCallUsed: usedTool,
+      latencyGenerationMs,
+      latencyValidationMs,
+      latencyTotalMs: Date.now() - routeStart,
+      calculatorConceptos: verified.conceptos,
+      scenarioMissing: scenario.missing,
+      responseRaw: responseRawForTelemetry,
+      responseFinal: finalContent,
+      mutations: safety.mutations,
+      commandmentViolations: safety.commandments.violaciones,
+      guardrailIntervened:
+        safety.mutations.length > 0 || safety.commandments.violaciones.length > 0 || safety.guardrailBloqueado,
+      // PIEZA 1 — qué capas estaban activas en este turno (comparación A/B).
+      enforcementMode,
+      // PIEZA 4 (5ª tanda) — tasa de ambigüedad de extracción para la revisión nocturna.
+      extraccionIncompleta: huerfanos.extraccionIncompleta,
+      numerosHuerfanos: huerfanos.numerosHuerfanos,
+      discrepanciaGastos: discrepancia.discrepancia,
+      // PIEZA 7 (8ª tanda) — telemetría de depuración de extracción: cierra el
+      // bucle de "arreglar a ciegas" dejando ver, por turno real, qué devolvió
+      // la extracción y cómo cambió el escenario. `deltaAPersistir` (no el
+      // `delta` crudo) porque es lo que de verdad se usó este turno.
+      extractionStatus: analisis.extraction_status,
+      deltaRaw: deltaAPersistir as unknown as Record<string, unknown>,
+      previousScenario: seed as unknown as Record<string, unknown>,
+      mergedScenario: scenarioAPersistir as unknown as Record<string, unknown>,
+      expenseItems: (deltaAPersistir.gastos_items ?? null) as unknown as Array<Record<string, unknown>> | null,
+      // PIEZA 7 (12ª tanda, §2/§6/§8) — telemetría de la reconciliación
+      // cross-turno (migración 020_telemetry_conflict.sql). Columnas de
+      // primera clase para no tener que parsear `merged_scenario` al medir
+      // la tasa real de conflictos/supuestos.
+      conflictStatus: scenarioAPersistir.gastos_conflict
+        ? 'CONFLICT'
+        : scenarioAPersistir.gastos_assumed
+          ? 'ASSUMED'
+          : null,
+      conflictField: scenarioAPersistir.gastos_conflict || scenarioAPersistir.gastos_assumed
+        ? 'gastos_mensuales'
+        : null,
+      conflictDiff: scenarioAPersistir.gastos_conflict?.diff ?? null,
+      conflictAttempts: scenarioAPersistir.gastos_conflict?.attempts ?? null,
+      assumedFields: scenarioAPersistir.gastos_assumed ? ['gastos_mensuales'] : [],
+    },
+  })
+
+  if (persistResult.writesOk < persistResult.writesTotal) {
+    console.error('[chat] persistencia incompleta este turno', JSON.stringify({
+      user_id: user.id,
+      conversation_id: convId,
+      ...persistResult,
+    }))
   }
 
   return NextResponse.json({

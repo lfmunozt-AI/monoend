@@ -2,7 +2,7 @@
   "name": "entrega_gastos",
   "playbook": "PB4",
   "language": "es",
-  "description": "Entrega de gastos. Verifica (a) la clasificación vital/no vital, (b) el recorte del 50% con supuesto explícito, (c) que NO se moraliza sobre la cerveza, y (d) que la lista NUNCA se toma como si el primer ítem (15) fuera el agregado — pero SÍ recalcula gastos_mensuales como la suma del detalle (BUG 1: el detalle manda sobre el agregado, aunque este quedara obsoleto).",
+  "description": "Entrega de gastos. Verifica (a) la clasificación vital/no vital, (b) el recorte del 50% con supuesto explícito, (c) que NO se moraliza sobre la cerveza, y (d) que la lista NUNCA se toma como si el primer ítem (15) fuera el agregado. ACTUALIZADO (12ª tanda, §6): el desglose (645) se aleja un 72,8% del agregado declarado en T1 (2372) — muy por encima del 5% elegible para conflicto, así que ya NO es 'el detalle pisa al agregado' (BUG 1, 6ª tanda): es un fallo de comprensión (§6) que reinicia la captura de gastos (gastos_mensuales queda sin asignar, 'gastos' vuelve a missing). La clasificación vital/no-vital y el recorte del 50% SÍ se calculan igual — no dependen de gastos_mensuales, solo de los ítems del propio mensaje.",
   "profile": { "archetype": "gastador", "country": "ES" },
   "turns": [
     {
@@ -19,7 +19,7 @@
       "expectNotContains": ["alcohol", "vicio", "deberías dejar", "malgastas", "dejar de beber"],
       "expectBlocked": false,
       "expectFallback": false,
-      "expectScenarioState": { "ingreso_mensual": {{monthlyNet}}, "gastos_mensuales": 645 }
+      "expectScenarioState": { "ingreso_mensual": {{monthlyNet}}, "missing": ["gastos"] }
     }
   ]
 }

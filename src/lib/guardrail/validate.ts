@@ -20,11 +20,50 @@ import {
   hasReferenceMarker,
   isPercent,
   isTimeUnit,
+  isMultiplierFactor,
   nearestConceptInSentence,
   sentenceRangeAt,
   type Moneda,
 } from "./context";
 import type { VerifiedFact } from "./extract";
+
+// AUDITORÍA AG01 (H1) — conceptos DERIVADOS por el motor: el usuario nunca los
+// aporta como dato crudo, el motor los CALCULA. Citarlos sin que el motor los
+// haya calculado (o con signo contrario) es alucinación, nunca un hecho crudo.
+// "ingreso"/"gastos" quedan FUERA a propósito: son datos de entrada del
+// usuario — su respaldo ya lo cubre la rama (a) de "hecho" más abajo.
+// Exportado: `assertOutputInvariants` (invariants.ts) lo reutiliza como defensa
+// en profundidad (invariante c) — el mismo criterio, un solo lugar de verdad.
+export const DERIVED_CONCEPTS = new Set(["deficit", "sobrante", "cuota", "recorte", "capacidad_anual"]);
+
+// FIX 3 (7ª tanda, testdev6) — DESFASE DE UN TURNO: CORREGIR, NO BORRAR. Un
+// DATO DECLARADO por el usuario (ingreso, gastos, monto, plazo, tae) es
+// inequívoco cuando la propia frase lo nombra: si el modelo cita el número
+// equivocado ("gastas 2.100 €" con gastos=2.200 reales — típicamente un
+// desfase de un turno, el modelo citó el valor del turno anterior), el motor
+// SABE la cifra correcta y puede sustituirla en su sitio sin fabricar nada —
+// a diferencia de una DERIVADA (cuota/sobrante/déficit/recorte/capacidad
+// anual), donde sustituir por OTRO concepto puede fabricar un absurdo
+// financiero (ver FIX A, más abajo: la brecha citada mal reescrita al
+// ingreso). Distinto también del rol POSICIONAL (monto/plazo por adyacencia
+// estructural, ya con su propia `correccion`): aquí el concepto se identifica
+// por NOMBRE semántico en la frase (`nearestConceptInSentence`), no por
+// posición fija.
+const DATO_DECLARADO_CONCEPTS = new Set(["ingreso", "gastos", "monto", "plazo", "tae"]);
+
+// FIX 3 — GUARDA DE ENCUADRE DE DELTA. "Necesitas aumentar tus ingresos en
+// 300 €" NO es una afirmación de cuánto ES el ingreso — es un DELTA/gap sobre
+// él. Corregir el 300 a "10000" (el ingreso completo) fabricaría un absurdo
+// peor que el que se borraba antes ("aumenta tus ingresos en 10000€" cuando
+// el ingreso YA es 10000). Un verbo de encuadre de delta (aumentar/recortar/
+// necesitar + verbo) sobre la MISMA frase desactiva la corrección para
+// ingreso/gastos — cae al borrado conservador de siempre.
+const DELTA_FRAMING_RE =
+  /\b(aumentar|aumento|incrementar|incremento|subir|increase|recortar|recorte|reducir|reduccion|reduce|necesitas?\s+\w+)\b|de\s+mas\b|de\s+menos\b|mas\s+de\s+lo\s+que|menos\s+de\s+lo\s+que|more\s+than\s+you|less\s+than\s+you/;
+
+function esEncuadreDeDelta(sentenceText: string): boolean {
+  return DELTA_FRAMING_RE.test(normLite(sentenceText));
+}
 
 /**
  * Cifras del motor para el grounding. Forma evolucionada (PIEZA 2):
@@ -149,6 +188,23 @@ function exactMatch(a: number, b: number): boolean {
   return Math.abs(a - b) <= 0.01;
 }
 
+// FIX A.2 / MANDAMIENTO 8 — un número al inicio de línea seguido de "." ")" o
+// "-" es un ENUMERADOR de lista ("1. Ajustar el ocio", "2) Aumentar ingresos",
+// "3 - Financiar a más largo plazo"), no una cifra financiera. QA real: el
+// guardarraíl trataba "1"/"2"/"3" como montos, encontraba un concepto cercano
+// en la misma frase (recorte, aumento_necesario…) y los REESCRIBÍA a la cifra
+// de ese concepto — la lista de pasos salía con números de otro planeta
+// ("7000. Ajustar el ocio"). Se excluye ANTES de cualquier chequeo: nunca se
+// aprueba, nunca se corrige, nunca se bloquea — es como si no existiera.
+export function isListEnumerator(text: string, m: NumberMention): boolean {
+  const lineStart = text.lastIndexOf("\n", m.start - 1) + 1;
+  const prefix = text.slice(lineStart, m.start);
+  if (!/^[ \t]*$/.test(prefix)) return false; // hay contenido antes en la misma línea
+  // Admite un espacio entre la cifra y el separador ("3 - Financiar…").
+  const after = text.slice(m.end, m.end + 3);
+  return /^ ?[.)-]/.test(after);
+}
+
 /**
  * Valida el grounding de todas las cifras de la respuesta del modelo contra los
  * hechos verificados del usuario.
@@ -193,26 +249,126 @@ export function validateGrounding(
   };
 
   for (const m of figs) {
+    // FIX A.2 / MANDAMIENTO 8 — enumerador de lista, no una cifra financiera.
+    if (isListEnumerator(modelResponse, m)) continue;
+    // FIX 1 (2ª tanda) — factor multiplicador ("× 12"), no un monto propio.
+    if (isMultiplierFactor(modelResponse, m)) {
+      aprobadas.push({ ...base(m, detectCurrency(modelResponse, m)), categoria: "concepto", motivo: "factor multiplicador" });
+      continue;
+    }
+
     const moneda = detectCurrency(modelResponse, m);
     const [sentStart, sentEnd] = sentenceRangeAt(modelResponse, m.start, m.end);
-    const esReferencia = hasReferenceMarker(modelResponse.slice(sentStart, sentEnd));
+    const sentenceText = modelResponse.slice(sentStart, sentEnd);
+    const esReferencia = hasReferenceMarker(sentenceText);
+
+    // (FACTIBILIDAD — FIX 3, 4ª tanda; acotada FIX 4, 7ª tanda) — una
+    // PROPUESTA de ahorrar/destinar/reservar no puede superar el SOBRANTE
+    // real; una propuesta de recortar no puede superar el GASTO real. Caso
+    // real: "ahorra 746,55 € en 30 días" con un sobrante de 450 € no es un
+    // consejo, es una promesa imposible de cumplir.
+    //
+    // FIX 4 (7ª tanda, testdev6) — BUG BLOQUEANTE: la versión anterior
+    // buscaba el verbo en TODA la frase, así que un ENUNCIADO factual
+    // ("Ingresas 2.300 € y gastas 2.100 €, te sobra 200 € al mes para
+    // destinar a…") bloqueaba el propio ingreso/gastos/sobrante SOLO porque
+    // la frase mencionaba "destinar" en una cláusula final sin cifra propia —
+    // ninguna de esas tres cifras es una propuesta de acción. Ahora el verbo
+    // debe preceder A ESA CIFRA de cerca (misma ventana de 45 caracteres que
+    // usa `roleConcept` para monto/plazo): "Podrías ahorrar X €" sigue
+    // contando (el verbo gobierna X), pero "te sobra 200 € ... destinar" ya
+    // no (el verbo no gobierna el 200 — está lejos, en otra cláusula).
+    if (!isPercent(modelResponse, m) && !isTimeUnit(modelResponse, m)) {
+      const before = normLite(modelResponse.slice(Math.max(0, m.start - 45), m.start));
+      if (SAVE_VERB_RE.test(before) && conceptos.sobrante !== undefined) {
+        if (m.value > conceptos.sobrante + 1) {
+          bloqueadas.push({
+            ...base(m, moneda),
+            motivo: `propuesta de ahorro/destino supera el sobrante real (sobrante=${conceptos.sobrante})`,
+            etiqueta: labelWithinSentence(modelResponse, m),
+            start: m.start,
+            end: m.end,
+          });
+        } else {
+          aprobadas.push({ ...base(m, moneda), categoria: "calculo", motivo: "propuesta de ahorro dentro del sobrante real" });
+        }
+        continue;
+      }
+      if (CUT_VERB_RE.test(before) && conceptos.gastos !== undefined) {
+        if (m.value > conceptos.gastos + 1) {
+          bloqueadas.push({
+            ...base(m, moneda),
+            motivo: `propuesta de recorte supera el gasto real (gastos=${conceptos.gastos})`,
+            etiqueta: labelWithinSentence(modelResponse, m),
+            start: m.start,
+            end: m.end,
+          });
+        } else {
+          aprobadas.push({ ...base(m, moneda), categoria: "calculo", motivo: "propuesta de recorte dentro del gasto real" });
+        }
+        continue;
+      }
+    }
+
+    // (PLAN — FIX 2, 2ª tanda) — CIFRAS DE PROPUESTA. Una cifra en una frase de
+    // ACCIÓN propuesta por el asesor ("1. Identificar y recortar... por 100 €")
+    // es una recomendación, no una afirmación sobre datos verificados: no debe
+    // exigírsele coincidir con el concepto más cercano. QA real: "recortar...
+    // por 100 €" con gastos=1750 se bloqueaba porque el concepto más cercano
+    // ("gastos") no coincidía con 100 — la propuesta ES menor que el gasto, eso
+    // es justo lo correcto, no un error.
+    // ÚNICA sanidad: la propuesta no puede superar el concepto RELACIONADO
+    // nombrado en la MISMA frase (no proponer recortar 5.000 € si gastos=1.750).
+    // Si la frase no nombra NINGÚN concepto conocido, no hay techo que
+    // comprobar — cae al resto del pipeline (no se aprueba en bloque: una lista
+    // numerada con una cifra sin respaldo alguno sigue sin ser gratis).
+    if (!isPercent(modelResponse, m) && !isTimeUnit(modelResponse, m) && esFraseDePropuesta(sentenceText)) {
+      const conceptosFrase = conceptsInSentence(sentenceText).filter((c) => c in conceptos);
+      if (conceptosFrase.length > 0) {
+        const techo = Math.max(...conceptosFrase.map((c) => conceptos[c]));
+        if (m.value <= techo + 1) {
+          aprobadas.push({ ...base(m, moneda), categoria: "calculo", motivo: "cifra de propuesta del asesor" });
+        } else {
+          bloqueadas.push({
+            ...base(m, moneda),
+            motivo: `propuesta supera el concepto relacionado (${conceptosFrase.join(",")}=${techo})`,
+            etiqueta: labelWithinSentence(modelResponse, m),
+            start: m.start,
+            end: m.end,
+          });
+        }
+        continue;
+      }
+    }
 
     // (POSICIONAL · FIX 4) — PRIORIDAD sobre el chequeo por frase. Si la cifra
-    // está ADYACENTE a un patrón de rol ("crédito de <X>", "cuota … <X>",
+    // está ADYACENTE a un patrón de rol INEQUÍVOCO ("crédito de <X>",
     // "a <X> meses") y el motor conoce ese concepto, la cifra DEBE ser ese
     // concepto (±1). Impide que la cuota se cite como el monto del crédito.
-    const rol = roleConcept(modelResponse, m);
+    //
+    // PIEZA 3 (esta tanda) — el rol `plazo` SOLO es inequívoco dentro de una
+    // frase de crédito. CASO C real: "Revisa tu Reserva de Imprevistos para
+    // asegurar que cubra al menos 3 meses de gastos" con conceptos.plazo=48 se
+    // reescribió a "48 meses de gastos" — un absurdo financiero fabricado por
+    // NOSOTROS (violación G1b causada por nuestra propia capa). Fuera del
+    // contexto de crédito, "<N> meses" es una regla temporal y no se toca.
+    const rol = roleConceptEnFrase(modelResponse, m, sentStart, sentEnd);
     if (rol && rol in conceptos && !isPercent(modelResponse, m)) {
       if (Math.abs(m.value - conceptos[rol]) <= 1) {
         aprobadas.push({ ...base(m, moneda), categoria: "calculo", motivo: `coincide con el concepto verificado (${rol}, por posición)` });
       } else {
+        // FIX A (QA real) — SOLO monto/plazo son patrones posicionales
+        // INEQUÍVOCOS ("crédito de <X>", "a <X> meses"): su `correccion` es
+        // segura porque la posición fija sin ambigüedad qué concepto es.
+        // Sustituir por el valor de OTRO concepto fabrica una cifra con
+        // apariencia verificada — sin `correccion` aquí, la frase se ELIMINA.
         bloqueadas.push({
           ...base(m, moneda),
           motivo: `posición de ${rol} pero no coincide con su valor verificado`,
           etiqueta: labelWithinSentence(modelResponse, m),
           start: m.start,
           end: m.end,
-          correccion: conceptos[rol],
+          ...(rol === "monto" || rol === "plazo" ? { correccion: conceptos[rol] } : {}),
         });
       }
       continue;
@@ -258,31 +414,124 @@ export function validateGrounding(
     // a esa cifra (`nearestConceptInSentence`); si no, el sobrante=500 real
     // aprobaría también un "ingresos son de 500" o "gastos son de 500" falsos
     // solo por compartir frase.
-    const sentenceText = modelResponse.slice(sentStart, sentEnd);
     const knownConcepts = new Set(conceptsInSentence(sentenceText).filter((c) => c in conceptos));
     const conceptoCercano =
       knownConcepts.size > 0
         ? nearestConceptInSentence(sentenceText, { start: m.start - sentStart, end: m.end - sentStart }, knownConcepts)
         : null;
     if (conceptoCercano) {
+      // FIX 1 (2ª tanda) — VALIDACIÓN CIFRA A CIFRA, no frase-contra-un-solo-
+      // concepto. QA real: "debes aumentar ingresos o reducir gastos en al
+      // menos 196,55 €" — el concepto TEXTUALMENTE más cercano a 196,55 es
+      // "gastos" (1750 €, no coincide), pero la misma frase también nombra
+      // "aumento_necesario"/"recorte_necesario" (196,55 € exacto). Antes de
+      // bloquear por el mismatch del concepto más CERCANO, se comprueba si la
+      // cifra coincide con OTRO concepto nombrado en la MISMA frase.
+      //
+      // GUARDA (defecto C, HUECO QA — no reabrir la regresión): un concepto
+      // solo puede rescatar si NO está YA correctamente reclamado por OTRA
+      // cifra de la misma frase. Sin esto, "Tus ingresos son de 500 € y tus
+      // gastos son de 500 €, lo que te deja un sobrante de 500 €" (real:
+      // ingreso 10000, gastos 9500, sobrante 500) aprobaría los TRES 500 —
+      // "sobrante" ya está correctamente reclamado por su propio 500 (el
+      // tercero) y no puede rescatar TAMBIÉN al primero y al segundo. En el
+      // caso real, "aumento_necesario"/"recorte_necesario" no están reclamados
+      // por ninguna otra cifra de la frase (746,55 va con "cuota", 550 va con
+      // "sobrante") — quedan libres para rescatar el 196,55.
+      const reclamados = conceptosYaReclamadosEnFrase(figs, m, sentStart, sentEnd, sentenceText, knownConcepts, conceptos);
+      const rescate = [...knownConcepts].find(
+        (c) => c !== conceptoCercano && !reclamados.has(c) && Math.abs(m.value - conceptos[c]) <= 1,
+      );
+
       if (factValues.some((f) => approxEqual(m.value, f))) {
         aprobadas.push({ ...base(m, moneda), categoria: "hecho", motivo: "dato del usuario" });
       } else if (Math.abs(m.value - conceptos[conceptoCercano]) <= 1) {
         aprobadas.push({ ...base(m, moneda), categoria: "calculo", motivo: `coincide con el concepto verificado (${conceptoCercano})` });
+      } else if (rescate !== undefined) {
+        aprobadas.push({
+          ...base(m, moneda),
+          categoria: "calculo",
+          motivo: `coincide con otro concepto verificado de la misma frase (${rescate})`,
+        });
+      } else if (DATO_DECLARADO_CONCEPTS.has(conceptoCercano) && !reclamados.has(conceptoCercano) && !esEncuadreDeDelta(sentenceText)) {
+        // FIX 3 (7ª tanda) — desfase de un turno sobre un DATO DECLARADO: se
+        // corrige en sitio en vez de borrar la frase entera (ver el bloque de
+        // comentario junto a `DATO_DECLARADO_CONCEPTS`, arriba).
+        //
+        // BUG BLOQUEANTE encontrado simulando testdev6 — `!reclamados.has(...)`
+        // es la MISMA guarda que ya protege el "rescate" (arriba): sin ella,
+        // "gastas 2.200 € (arriendo 1.000, servicios 500...)" corregía CADA
+        // ítem del desglose al agregado — "arriendo 2.200 €, servicios 2.200
+        // €..." — porque "gastos" es el único concepto conocido de la frase y
+        // los ítems, al no coincidir con él, se "corregían" a su valor. Si
+        // "gastos" ya quedó correctamente reclamado por OTRA cifra de la MISMA
+        // frase (el 2.200 real), no puede TAMBIÉN ser el destino de corrección
+        // de cifras que en realidad son otra cosa (ítems de un desglose).
+        bloqueadas.push({
+          ...base(m, moneda),
+          motivo: `desfase de un turno: no coincide con el dato declarado verificado (${conceptoCercano}) — se corrige en sitio`,
+          etiqueta: labelWithinSentence(modelResponse, m),
+          start: m.start,
+          end: m.end,
+          correccion: conceptos[conceptoCercano],
+        });
       } else {
-        // El motor conoce el valor correcto del concepto → se ofrece como
-        // corrección en su sitio (la Pieza 3 decide sustituir vs eliminar).
+        // FIX A (QA real) — el motor conoce el valor correcto, pero SUSTITUIRLO
+        // fabrica una mentira con apariencia verificada ("liberar al menos
+        // 10000 €" — brecha real ~247 € — reescrita al ingreso; "gastas 1000 €"
+        // — 11.000 real — reescrito a otro concepto). Solo monto/plazo (patrón
+        // posicional inequívoco, más arriba) y los DATOS DECLARADOS (justo
+        // encima) se corrigen en su sitio; las DERIVADAS se ELIMINAN — sin
+        // `correccion`.
         bloqueadas.push({
           ...base(m, moneda),
           motivo: `no coincide con el concepto verificado por el motor (${conceptoCercano})`,
           etiqueta: labelWithinSentence(modelResponse, m),
           start: m.start,
           end: m.end,
-          correccion: conceptos[conceptoCercano],
         });
       }
       continue;
     }
+
+    // AUDITORÍA AG01 (H1) — concepto DERIVADO afirmado sin cálculo que lo
+    // respalde ("déficit fantasma"). QA real: "Tienes un déficit mensual de
+    // 9500 €" con sobrante real de +500 pasaba el guardarraíl porque
+    // `conceptsInSentence(...).filter((c) => c in conceptos)` (arriba, para el
+    // bloque `conceptoCercano`) DESCARTA "deficit" en cuanto el motor no lo
+    // calculó (sobrante > 0 → nunca puebla `conceptos.deficit`) — la cifra caía
+    // a la heurística genérica y 9500 coincidía como el hecho "gastos". Aquí se
+    // mira TODA la frase (sin el `.filter`) para no perder esa señal.
+    //
+    // Solo aplica cuando el llamante SÍ trae mapa de conceptos (buildScenarioContext
+    // en producción): el modo histórico `number[]` (equivale a `conceptos:{}`,
+    // p. ej. tests/consumidores que solo pasan `valores`) nunca tuvo semántica de
+    // conceptos — bloquear ahí regresionaría c0 sobre cifras legítimamente
+    // calculadas que ese modo nunca etiquetó.
+    if (Object.keys(conceptos).length > 0) {
+      const conceptosNombrados = conceptsInSentence(sentenceText);
+      // Caso especial de signo: "déficit" afirmado mientras el motor calculó
+      // sobrante POSITIVO es una contradicción directa — bloquea siempre, incluso
+      // si la cifra citada coincide por casualidad con un hecho crudo (gastos).
+      const deficitConSobrantePositivo =
+        conceptosNombrados.includes("deficit") && (conceptos.sobrante ?? 0) > 0;
+      const conceptoSinCalculo = conceptosNombrados.find(
+        (c) => DERIVED_CONCEPTS.has(c) && !(c in conceptos),
+      );
+      if (deficitConSobrantePositivo || conceptoSinCalculo) {
+        bloqueadas.push({
+          ...base(m, moneda),
+          motivo: deficitConSobrantePositivo
+            ? "déficit afirmado pero el motor calculó sobrante positivo (contradicción de signo)"
+            : `concepto afirmado sin cálculo que lo respalde (${conceptoSinCalculo})`,
+          etiqueta: labelWithinSentence(modelResponse, m),
+          start: m.start,
+          end: m.end,
+        });
+        continue;
+      }
+    }
+
     // (a) Coincide con un hecho verificado.
     if (factValues.some((f) => approxEqual(m.value, f))) {
       aprobadas.push({ ...base(m, moneda), categoria: "hecho", motivo: "dato del usuario" });
@@ -322,6 +571,36 @@ function base(m: NumberMention, moneda: Moneda) {
   return { valor: m.value, texto: m.text, moneda };
 }
 
+/**
+ * Conceptos de la frase que YA están correctamente reclamados por OTRA cifra
+ * distinta de `actual` (su concepto más cercano coincide con su propio valor).
+ * Un concepto reclamado no puede servir de rescate (FIX 1) para una cifra
+ * DIFERENTE: si "sobrante" ya es la explicación correcta del tercer 500 de la
+ * frase, no puede TAMBIÉN explicar el primero o el segundo.
+ */
+function conceptosYaReclamadosEnFrase(
+  figs: NumberMention[],
+  actual: NumberMention,
+  sentStart: number,
+  sentEnd: number,
+  sentenceText: string,
+  knownConcepts: ReadonlySet<string>,
+  conceptos: Record<string, number>,
+): Set<string> {
+  const reclamados = new Set<string>();
+  if (knownConcepts.size === 0) return reclamados;
+  for (const o of figs) {
+    if (o === actual || o.start < sentStart || o.start >= sentEnd) continue;
+    const oCercano = nearestConceptInSentence(
+      sentenceText,
+      { start: o.start - sentStart, end: o.end - sentStart },
+      knownConcepts,
+    );
+    if (oCercano && Math.abs(o.value - conceptos[oCercano]) <= 1) reclamados.add(oCercano);
+  }
+  return reclamados;
+}
+
 function normLite(s: string): string {
   return s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
 }
@@ -332,7 +611,6 @@ function normLite(s: string): string {
 // modelo suele escribir el objeto, no la palabra "crédito".
 const ROLE_MONTO_BEFORE =
   /\b(credito|prestamo|emprestimo|loan|financiacion|financiamento|financiar|carro|coche|auto|vehiculo|moto|casa|piso|apartamento|viatura|car|house|apartment|vehicle)\s+(?:de\s+|of\s+)?$/;
-const ROLE_CUOTA_BEFORE = /\b(cuota|prestacao|mensualidad|mensualidade|payment|installment)\b/;
 const ROLE_PLAZO_AFTER = /^\s*(?:€\s*)?(meses|mes|months?|parcelas|prestacoes)\b/;
 // FIX 1b — patrón ESTRUCTURAL cazatodo: la cifra que va "de <CIFRA> €? a <N>
 // meses" es SIEMPRE el monto (esa estructura es precio + plazo), aunque no haya
@@ -344,7 +622,15 @@ const ROLE_MONTO_STRUCT_AFTER =
 /**
  * Concepto que denota la cifra `m` por adyacencia, o null. Orden de precisión:
  * plazo (sufijo "meses") → monto (objeto/crédito "de <X>", justo antes) → monto
- * estructural ("de <X> a <N> meses") → cuota (la palabra en la ventana previa).
+ * estructural ("de <X> a <N> meses").
+ *
+ * FIX B (QA real) — "cuota" YA NO es un rol posicional aquí: su ventana de 40
+ * caracteres NO es inequívoca ("la suma de cuota y déficit es 1609,25" cae
+ * dentro de esa ventana sin que la cifra sea la cuota) y competía con
+ * conceptos más específicos de la misma frase (p. ej. esfuerzo_total). El
+ * semántico (`conceptsInSentence` + `nearestConceptInSentence`, más abajo) ya
+ * cubre "cuota" — sin ventana fija, con prioridad direccional por CERCANÍA
+ * real, no por "aparece en algún punto de los últimos 40 caracteres".
  */
 function roleConcept(text: string, m: NumberMention): string | null {
   const before = normLite(text.slice(Math.max(0, m.start - 40), m.start));
@@ -352,9 +638,78 @@ function roleConcept(text: string, m: NumberMention): string | null {
   if (ROLE_PLAZO_AFTER.test(after)) return "plazo";
   if (ROLE_MONTO_BEFORE.test(before)) return "monto";
   if (ROLE_MONTO_BEFORE_DE.test(before) && ROLE_MONTO_STRUCT_AFTER.test(after)) return "monto";
-  if (ROLE_CUOTA_BEFORE.test(before)) return "cuota";
   return null;
 }
+
+/**
+ * PIEZA 3 — contexto INEQUÍVOCO de crédito dentro de la MISMA frase. Sin una de
+ * estas palabras, un "<N> meses" habla de otra cosa (Reserva de Imprevistos,
+ * ritmo de ahorro, horizonte de una meta) y el plazo del crédito no tiene nada
+ * que decir sobre él.
+ */
+const CREDIT_KEYWORD_RE =
+  /\b(credito|creditos|prestamo|prestamos|emprestimo|emprestimos|financiar|financiacion|financiamento|cuota|cuotas|prestacao|prestacoes|loan|installment|installments)\b/;
+
+/**
+ * Rol posicional de la cifra, ACOTADO al contexto de su frase. `plazo` solo
+ * cuenta como rol si la frase habla de un crédito; en cualquier otro tema la
+ * cifra vuelve al camino normal (regla temporal → aprobada, intacta).
+ */
+function roleConceptEnFrase(
+  text: string,
+  m: NumberMention,
+  sentStart: number,
+  sentEnd: number,
+): string | null {
+  const rol = roleConcept(text, m);
+  if (rol !== "plazo") return rol;
+  const frase = normLite(text.slice(sentStart, sentEnd));
+  return CREDIT_KEYWORD_RE.test(frase) ? "plazo" : null;
+}
+
+// ── FIX 2 (2ª tanda) — CIFRAS DE PROPUESTA ───────────────────────────────────
+//
+// Una frase de ACCIÓN propuesta por el asesor ("1. Identificar y recortar…
+// por 100 €", "Buscar un ingreso extra de 100 €") no es una afirmación sobre
+// datos verificados: es una recomendación. Exigirle coincidir con el concepto
+// más cercano bloqueaba propuestas perfectamente sanas (100 € de recorte no es
+// "el gasto total", es la propuesta). Detección: la frase empieza por un verbo
+// en infinitivo/imperativo, o es un ítem de lista numerada (el formato de
+// PB4/PB7 para planes de acción).
+const PROPOSAL_VERB_START_RE = new RegExp(
+  "^(" +
+    // ES
+    "identificar|identifica|recortar|recorta|reducir|reduce|buscar|busca|" +
+    "aumentar|aumenta|destinar|destina|liberar|libera|ahorrar|ahorra|" +
+    "mantener|manten|revisar|revisa|negociar|negocia|ajustar|ajusta|" +
+    // PT
+    "cortar|corta|reduzir|reduz|procurar|procura|poupar|poupa|" +
+    "manter|rever|reve|" +
+    // EN
+    "identify|cut|reduce|find|look|increase|allocate|free|save|" +
+    "keep|maintain|review|negotiate|adjust" +
+  ")\\b",
+);
+
+// Ítem de lista numerada: "1. " / "2) " / "3 - " al principio de la frase.
+const LIST_ITEM_START_RE = /^\s*\d[\d.,]*\s*[.):-]\s*/;
+
+function esFraseDePropuesta(sentenceText: string): boolean {
+  if (LIST_ITEM_START_RE.test(sentenceText)) return true;
+  const sinEnumerador = sentenceText.replace(LIST_ITEM_START_RE, "");
+  return PROPOSAL_VERB_START_RE.test(normLite(sinEnumerador).trimStart());
+}
+
+// ── FIX 3 (4ª tanda) — REGLA DE FACTIBILIDAD ─────────────────────────────────
+//
+// A diferencia de `PROPOSAL_VERB_START_RE` (exige que el verbo abra la frase),
+// estos regex cazan el verbo en CUALQUIER posición: "Podrías ahorrar X €" es
+// tan una propuesta de ahorro como "Ahorra X €". Solo verbos en infinitivo o
+// imperativo — las formas de indicativo ("ahorraste", "ahorra tu abuela") no
+// son propuestas y quedan fuera a propósito.
+const SAVE_VERB_RE =
+  /\b(ahorrar|ahorra|destinar|destina|reservar|reserva|apartar|aparta|poupar|poupa|save|set aside)\b/;
+const CUT_VERB_RE = /\b(recortar|recorta|reducir|reduce|cortar|corta|reduzir|reduz|cut)\b/;
 
 /**
  * Etiqueta de una cifra bloqueada, acotada a SU frase.

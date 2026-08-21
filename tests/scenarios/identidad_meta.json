@@ -2,15 +2,15 @@
   "name": "identidad_meta",
   "playbook": "PB7",
   "language": "es",
-  "description": "Causa raíz QA (AG08): con un crédito en curso (missing=['tae']) el guardarraíl de cifras trataba CUALQUIER turno como financiero, así que '¿qué modelo eres?' se juzgaba como esqueleto sin cifras y se sustituía por el enlatado de missing[0]='tae'. classifyTurn() clasifica el T2 como META pese al escenario activo (la señal del turno manda sobre la continuidad), así que se salta la jaula de cifras y el cierre forzado enteros. También cubre la Pieza 5c: el término de proveedor se elimina aunque el modelo lo mencione.",
+  "description": "Causa raíz QA (AG08): con un crédito en curso (missing=['tae']) el guardarraíl de cifras trataba CUALQUIER turno como financiero, así que '¿qué modelo eres?' se juzgaba como esqueleto sin cifras y se sustituía por el enlatado de missing[0]='tae'. classifyTurn() clasifica el T2 como META pese al escenario activo (la señal del turno manda sobre la continuidad), así que se salta la jaula de cifras y el cierre forzado enteros. También cubre la Pieza 5c: el término de proveedor se elimina aunque el modelo lo mencione. PIEZA 4 (contrato nuevo): en T1 el cierre propio del modelo ya no se sustituye por la petición de TAE.",
   "turns": [
     {
       "user": "Gano 10000 euros al mes y mis gastos son 9500. Quiero financiar un carro de 30000 a 84 meses.",
       "fixtureResponse": "Calculando con una TAE de referencia del 7% —tu banco te dará la real—, la cuota sería de 452,78 €/mes, sobre un sobrante de 500 €. ¿Te gustaría proceder con esta compra?",
       "expectCarril": "FINANCIERO",
       "expectBlocked": false,
-      "expectNotContains": ["proceder con esta compra"],
-      "expectContains": ["452,78", "¿Qué TAE te ofrece tu banco?"],
+      "expectNotContains": ["¿Qué TAE te ofrece tu banco?"],
+      "expectContains": ["452,78", "proceder con esta compra"],
       "expectFallback": false,
       "expectScenarioState": {
         "credito": { "monto": 30000, "plazo_meses": 84, "tae_es_referencia": true },

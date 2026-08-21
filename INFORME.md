@@ -623,3 +623,162 @@ npm run test:regression -- --filter=identidad     # sondeo de identidad
 npm run test:regression -- --filter=saludo        # charla trivial
 npm run test:regression -- --filter=cierre_unico  # regresión doble cierre
 ```
+
+---
+
+# Ag06 — Calculator IDF + ICA
+
+**Fecha:** 2026-05-28
+**Branch:** `agent/06`
+**Commit:** `ag06: calculator idf+ica con 35 tests`
+
+## Resumen
+
+Implementadas las funciones de cálculo IDF (Índice de Dominio Financiero) e ICA (Índice de Consciencia y Acción) en TypeScript, con cobertura de tests por encima del mínimo requerido.
+
+- **IDF:** `src/lib/idf/` — types + calculator + 27 tests (requerían 20).
+- **ICA:** `src/lib/ica/` — types + calculator + 23 tests (requerían 15).
+- **Total tests:** 50/35 pasan en verde.
+- **`npx tsc --noEmit`:** verde, sin errores.
+
+## Arquitectura
+
+### IDF (`src/lib/idf/`)
+
+Estrategia doble:
+
+1. **Primera opción:** invocar la función SQL `calcular_idf_dimensions` que creó Ag02 en `008_idf_function.sql`. Las fórmulas viven en BD para que la consistencia se mantenga si futuros triggers lo invocan server-side.
+2. **Fallback:** si la RPC falla por `42883` ("function does not exist") o por errores asociados (mensajes con `pgrst202`, `could not find`, `does not exist`), se ejecuta la implementación TypeScript que lee directamente `goals` y `transactions`. Las fórmulas son traducción fiel del SQL (que a su vez es traducción fiel de `src/lib/idf.ts`).
+
+**`TODO`** señalado dentro del código: retirar el fallback cuando la migración 008 esté garantizada en todos los entornos.
+
+Núcleo puro exportado (`computeFromData`) para que los tests no necesiten Supabase.
+
+#### Componentes (cada uno 0–100, peso aplicado al sumar)
+
+| Componente          | Peso | Sección |
+|---------------------|------|---------|
+| `progresoMeta`      | 40%  | §IDF-1  |
+| `controlFugas`      | 25%  | §IDF-2  |
+| `estabilidadBase`   | 20%  | §IDF-3  |
+| `velocidadAhorro`   | 15%  | §IDF-4  |
+
+`null` cuando no hay datos suficientes que respalden esa dimensión específica (alineado con `componentes_calculables` del SQL).
+
+#### Comportamiento canónico
+
+- **Sin meta activa:** `score=null`, `level=null`, `reason='no_goal_declared'`, todos los componentes `null`.
+- **Score por defecto sin datos:** **25** (no 0). Razón: `controlFugas` default es 100 cuando no hay fugas — alineado con `idf.ts` original y con la migración 008. El componente se reporta como `null` para que el frontend pueda mostrar el matiz.
+
+### ICA (`src/lib/ica/`)
+
+Implementación pura TypeScript — **no** hay función SQL equivalente (a diferencia de IDF). Lee de `profiles`, `fiscal_profiles`, `goals`, `transactions` y `messages`.
+
+#### Componentes (cada uno 0–100, peso aplicado al sumar)
+
+| Componente              | Peso | Sección |
+|-------------------------|------|---------|
+| `perfilCompleto`        | 20%  | §ICA-1  |
+| `profundidadHistorica`  | 25%  | §ICA-2  |
+| `diversidadFuentes`     | 20%  | §ICA-3  |
+| `consistencia`          | 15%  | §ICA-4  |
+| `engagement`            | 20%  | §ICA-5  |
+
+#### Diseño
+
+- **`perfilCompleto`:** 7 campos identitarios (4 de `profiles` + 3 de `fiscal_profiles`). 100% = todos rellenos.
+- **`profundidadHistorica`:** meses únicos con transacciones en los últimos 12. Lineal 0/12 → 100/12.
+- **`diversidadFuentes`:** categorías distintas en `transactions` + categorías de `goals` + bonus por mix income/expense. Cap a 5.
+- **`consistencia`:** porcentaje de semanas con actividad en las últimas 8.
+- **`engagement`:** mensajes `role='user'` últimos 30 días, escala log-like que satura en 40 queries.
+
+#### Niveles narrativos (string, sin enum)
+
+`0–20 "Apenas comenzando"` · `21–40 "Construyendo visión"` · `41–60 "Dominio en formación"` · `61–80 "Visión clara"` · `81–100 "Dominio total"`.
+
+## Decisiones técnicas relevantes
+
+### 1. FORMULAS_IDF_ICA.md no existe en disco
+
+El prerequisito del briefing pedía leer `FORMULAS_IDF_ICA.md`, pero el archivo no existe (Ag02 lo confirmó en su commit `2945277`). El contrato canónico actual es:
+
+- **IDF:** `src/lib/idf.ts` + `supabase/migrations/008_idf_function.sql` (Ag02, traducido fielmente desde `idf.ts`).
+- **ICA:** no había contrato pre-pivot con estos 5 componentes. Este módulo establece el contrato; documentado en `src/lib/ica/types.ts` y `calculator.ts`.
+
+JSDoc cita las secciones `§IDF-N` / `§ICA-N` esperadas en el documento futuro. Cuando se cree el `.md`, las citas serán resoluble.
+
+### 2. Coexistencia con `src/lib/ica.ts` antiguo
+
+El ICA antiguo (puntos por evento, usado por `ica_history`) sigue intacto. El nuevo módulo `src/lib/ica/` es paralelo y atiende el contrato post-pivot ("Lo que sé de ti"). No se ha tocado `ica.ts` ni `ica-service.ts` para respetar la restricción "no tocar archivos fuera de `src/lib/idf/` y `src/lib/ica/`".
+
+### 3. Inyección de dependencias para tests
+
+Tanto `calcularIDF` como `calcularICA` aceptan un `client?: SupabaseClient` opcional (default: `adminClient()`). Los tests pasan mocks deterministas sin levantar Supabase.
+
+Adicionalmente, ambos exponen un núcleo puro:
+
+- `computeFromData(goal, txMonth, txDesdeGoal, computedAt)` en IDF.
+- `computeICAFromData(inputs, now)` en ICA.
+
+Esto permite que la mayoría de los 50 tests verifiquen la lógica sin tocar la capa de red.
+
+### 4. Sin `npm test` ni `npm run typecheck`
+
+`package.json` no define estos scripts y la restricción prohíbe modificarlo. La verificación se ejecuta con:
+
+```bash
+npx tsx src/lib/idf/__tests__/calculator.test.ts   # 27 passed · 0 failed
+npx tsx src/lib/ica/__tests__/calculator.test.ts   # 23 passed · 0 failed
+npx tsc --noEmit                                    # verde
+```
+
+Es el mismo patrón que usan los tests existentes (`src/lib/__tests__/ica.test.ts`, etc.).
+
+**Recomendación a Ag01 / responsable de root:** añadir a `package.json`:
+
+```json
+"scripts": {
+  "test": "for f in src/lib/**/__tests__/*.test.ts; do npx tsx \"$f\" || exit 1; done",
+  "typecheck": "tsc --noEmit"
+}
+```
+
+## Archivos creados
+
+```
+src/lib/idf/types.ts                          (66 líneas)
+src/lib/idf/calculator.ts                     (332 líneas)
+src/lib/idf/__tests__/calculator.test.ts      (391 líneas, 27 tests)
+src/lib/ica/types.ts                          (54 líneas)
+src/lib/ica/calculator.ts                     (273 líneas)
+src/lib/ica/__tests__/calculator.test.ts      (276 líneas, 23 tests)
+```
+
+Total: 6 archivos, ~1390 líneas (incluye JSDoc y tests).
+
+## Verificación
+
+```
+$ npx tsx src/lib/idf/__tests__/calculator.test.ts
+27 passed · 0 failed
+
+$ npx tsx src/lib/ica/__tests__/calculator.test.ts
+23 passed · 0 failed
+
+$ npx tsc --noEmit
+(sin output → verde)
+```
+
+## Pendientes / handoffs
+
+1. **Ag02 o quien gestione migraciones:** asegurar que `008_idf_function.sql` se ejecuta en todos los entornos (prod + branches QA). Cuando esté garantizado, retirar el fallback TS del calculator IDF (marcado con TODO en `calculator.ts`).
+2. **Ag05 / docs:** crear `FORMULAS_IDF_ICA.md` en raíz con las secciones referenciadas (§IDF-1..4, §IDF-Mapeo-RPC, §IDF-Núcleo, §ICA-1..5, §ICA-Niveles, §ICA-Ponderación). El contenido ya está en los JSDoc de los calculators; basta con consolidarlo.
+3. **Ag01 / Ag07:** integrar `calcularIDF` y `calcularICA` en los endpoints `/api/ica/score` y un nuevo `/api/idf/score` cuando los necesite el dashboard.
+4. **Decisión pendiente:** consolidar el ICA viejo (`src/lib/ica.ts` + `ica-service.ts` + tabla `ica_history`) con el nuevo (`src/lib/ica/calculator.ts`). Tras el pivot AaaS, el contrato del nuevo es el correcto. Recomendación: mantener `ica_history` como log de eventos histórico y usar el nuevo motor para el score que se muestra en UI.
+
+## Restricciones respetadas
+
+- ✅ No se modificó nada fuera de `src/lib/idf/` y `src/lib/ica/`.
+- ✅ No se tocó ninguna migración SQL.
+- ✅ No se tocó el LLM Router (`src/lib/llm.ts`).
+- ✅ Tests verdes (50/50), typecheck verde.

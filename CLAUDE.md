@@ -1,5 +1,28 @@
 # CLAUDE.md — andgcore · Sovereign CFO B2C
-# Actualizado: 2026-05-19
+# Actualizado: 2026-08-07 (AG05 — re-aplicado ADN + terminología, ver docs/ESTADO_ACTUAL.md)
+
+---ADN---
+**monoend NO es un AaaS de finanzas personales genérico. Es un AaaS PREDICTIVO
+que organiza y materializa metas financieras.**
+
+El ciclo, en orden, y no hay otro:
+
+1. El usuario establece la meta **EN CONJUNTO** con monoend. No la declara solo.
+2. monoend **evalúa fricción, riesgos y realidad actual** según el ICA suministrado.
+3. monoend **presenta una propuesta**.
+4. **Acuerdan mutuamente.**
+5. **Arranca el sprint.**
+6. **Seguimiento constante**: mitiga riesgos, mide desviaciones, recalcula rumbo,
+   replantea imprevistos, **entrega la realidad** (no consuelo).
+
+**Toda respuesta cierra con una de estas tres, nunca con nada más:**
+- una **propuesta concreta**, o
+- la **petición del dato que falta**, o
+- la **confirmación de cierre**.
+
+Una respuesta que termina en pregunta abierta vacía, en ánimo, o en un resumen
+sin siguiente jugada, es un defecto — no un matiz de estilo.
+---FIN ADN---
 
 ## PROYECTO
 Nombre: Sovereign CFO / andgcore  
@@ -238,12 +261,22 @@ Sidebar: #111111 siempre
 PROHIBIDO: azules neón, verdes tóxicos
 
 ## TERMINOLOGÍA ANDGCORE
-- "Reserva de Soberanía" = fondo de emergencia
-- "Fuga de Poder" = gasto innecesario
-- "Escudo Familiar" = seguros/protección
+- **"Reserva de Imprevistos"** = fondo de emergencia. Término **multiidioma**;
+  reemplaza toda variante anterior ("Reserva de Soberanía" y cualquier otra)
+  sin excepción. Ya implementado en `src/lib/prompts/` y
+  `src/lib/llm/output-validator.ts` (validador de branding) — esta entrada
+  documenta el código existente, no lo anticipa.
+- "Fuga de Poder" = gasto innecesario/impulsivo
+- "Escudo Familiar" = seguros/protección patrimonial
 - "Escenario de Poder" = proyección what-if
-- "Dominio Financiero" = nivel máximo (NO Soberanía)
-- "The Consigliere" = nombre del agente (NO traducir)
+- "Dominio Financiero" = nivel máximo
+- **"The Consigliere"** = nombre **INTERNO** del modelo LLM. NUNCA traducir.
+  En UI aparece **solo como badge**. Nunca en el cuerpo de los mensajes: el
+  Consigliere no se nombra a sí mismo al hablar.
+- **ICA — Índice de Certeza Algorítmica** (nombre unificado en todo el repo,
+  ver `81bf0a5`): métrica secundaria de qué tanto el sistema conoce al
+  usuario. Reemplaza "Índice de Control Autónomo", "Índice de Conocimiento
+  del Asistido" y demás variantes previas.
 
 ## AAAS ROADMAP
 L1 Reactivo (hoy) → L2 Proactivo (hoy) → 
@@ -256,7 +289,10 @@ Revenue: suscripción → % valor generado
 3. Nunca almacenar IBANs ni credenciales bancarias
 4. LLM: gpt-4o-mini · NO usar GPU local
 5. Idioma código: inglés · UI default: español
-6. NO usar palabra "Soberano/Soberanía" en UI
+6. **Prohibida la palabra "soberanía/soberano" en TODO** — UI, prompts, copy,
+   nombres de término, identificadores nuevos. **Sin excepción.** (Deroga
+   cualquier excepción previa que permitiera el término técnico para el fondo
+   de emergencia: ese término ya no existe, es "Reserva de Imprevistos".)
 7. Plan en sidebar: "Élite · activo" + "Ver beneficios"
 
 ## IDF FÓRMULA

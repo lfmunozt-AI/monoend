@@ -1,0 +1,21 @@
+{
+  "name": "suma_cuota_deficit",
+  "playbook": "PB3",
+  "language": "es",
+  "description": "Caso real QA (FIX B + FIX A): 'la suma de cuota y déficit es 1609,25' (suma real 2.609,25) se reescribía A LA CUOTA — el guardarraíl detectaba 'cuota' en una ventana de 40 caracteres (ROLE_CUOTA_BEFORE) y sustituía por su valor sin más. El motor ahora calcula esfuerzo_total = cuota + déficit y lo expone como concepto propio (además de reconocer la frase NATURAL 'la suma de cuota y déficit', sin depender de que el modelo diga 'esfuerzo total'); el rol posicional de 'cuota' ya no existe (solo monto/plazo se corrigen en sitio) — una cifra mal citada se ELIMINA, nunca se sustituye por otro concepto.",
+  "turns": [
+    {
+      "user": "Gano 2000 euros al mes y mis gastos son 2500. Quiero financiar un carro de 30000 a 48 meses con una TAE del 9%.",
+      "fixtureResponse": "Tu cuota sería de 746,55 € y ya tienes un déficit de 500 € al mes: la suma de cuota y déficit es 1246,55 €. Este crédito no es viable así. ¿Recortamos gastos primero?",
+      "expectBlocked": false,
+      "expectContains": ["746,55", "1246,55"],
+      "expectScenarioState": { "ingreso_mensual": 2000, "gastos_mensuales": 2500 }
+    },
+    {
+      "user": "¿Y si igual lo intento?",
+      "fixtureResponse": "La suma de cuota y déficit es 1609,25 €. ¿Seguimos?",
+      "expectBlocked": true,
+      "expectNotContains": ["1609,25", "746,55"]
+    }
+  ]
+}

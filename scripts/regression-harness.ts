@@ -19,6 +19,26 @@
  *  10. disclaimer si el producto sobrevivió al enforcement
  *  11. ensureSubstance(texto, {idioma, missing})                       ── solo FINANCIERO
  *  12. resolveClosing(texto, { carril, missing, idioma })              ── TODOS los carriles
+ *  13. renumberLists(texto)                                            ── TODOS los carriles
+ *  14. enforceCommandments(texto, { ...raw })  → THE COMMANDMENTS       ── TODOS los carriles
+ *  15. renumberLists(texto) otra vez (post-Commandments)                ── TODOS los carriles
+ *
+ * Los pasos 13-15 se añadieron en la 4ª tanda de AG08: antes el harness no
+ * ejecutaba The Commandments, así que el Mandamiento 9 (plan fantasma/
+ * mutilado) no se podía probar aquí — ver `plan_mutilado.json`.
+ *
+ * 5ª TANDA (complemento) — esEmocional (PIEZA 5c) se calcula tras el paso 2 y
+ * gatea los pasos 6-7/11/12, igual que `pipeline.ts::applyEnforcement`: tono
+ * emocional en el mensaje desactiva grounding, honestidad de simulación,
+ * sustancia y cierre forzado, sea cual sea el carril — la calidez es del
+ * modelo, no de estas capas.
+ *
+ * 6ª TANDA (bug bloqueante, testdev5) — extraccionAmbigua (huérfanos o
+ * discrepancia de gastos) YA NO apaga el cálculo del turno: un huérfano es
+ * solo una señal para preguntar. Solo la discrepancia retiene su propio
+ * campo (gastos) hasta reconciliar (`deltaSinGastosPorDiscrepancia`); el
+ * resto del delta se persiste y `buildScenarioContext` calcula normal con lo
+ * que el estado realmente tiene.
  *
  * Los pasos 6-12 replican `route.ts` en orden, incluido el carrilado por turno
  * (Pieza 1-2 de AG08): META se salta la jaula de cifras y el cierre forzado
@@ -66,7 +86,13 @@ import {
   resolveClosing,
   enforceSimulationHonesty,
   classifyTurn,
+  esTonoEmocional,
+  parseEnforcementMode,
+  enforceCommandments,
+  renumberLists,
   type Carril,
+  type EnforcementMode,
+  type CommandmentViolation,
 } from '../src/lib/guardrail'
 import {
   validateConsigliereOutput,
@@ -84,6 +110,10 @@ import { isPercent } from '../src/lib/guardrail/context'
 import {
   extractScenarioDelta,
   mergeScenario,
+  detectarNumerosHuerfanos,
+  detectarDiscrepanciaGastos,
+  deltaSinGastosPorDiscrepancia,
+  numerosCandidatos,
   type ScenarioState,
 } from '../src/lib/calculator/scenario'
 import { buildScenarioContext } from '../src/lib/calculator/orchestrator'
@@ -114,6 +144,19 @@ interface Turn {
   expectScenarioState?: Record<string, unknown>
   /** Carril esperado (Pieza 1 de AG08: FINANCIERO|META|MIXTO). Opcional. */
   expectCarril?: Carril
+  /**
+   * ¿Debe dispararse el Mandamiento 9 (PLAN FANTASMA / plan mutilado, 4ª
+   * tanda AG08) en este turno? Si es `true`, el texto final debe ser
+   * exactamente `fixtureResponse` (el raw revertido).
+   */
+  expectMandamiento9?: boolean
+  /**
+   * PIEZA 1/2 (5ª tanda, complemento) — ¿debe quedar la extracción de este
+   * turno marcada como ambigua (números huérfanos o discrepancia aritmética)?
+   */
+  expectExtraccionAmbigua?: boolean
+  /** PIEZA 5c (complemento, 5ª tanda) — ¿debe detectarse tono emocional? */
+  expectEmocional?: boolean
 }
 
 interface ProfileSelector {
@@ -319,6 +362,12 @@ interface TurnOutcome {
   missing: string[]
   lang: Language
   carril: Carril
+  /** Violaciones de The Commandments detectadas en este turno (4ª tanda). */
+  violations: CommandmentViolation[]
+  /** PIEZA 1/2 (5ª tanda) — ¿la extracción de este turno quedó ambigua? */
+  extraccionAmbigua: boolean
+  /** PIEZA 5c (5ª tanda) — ¿tono emocional detectado en el mensaje del usuario? */
+  esEmocional: boolean
 }
 
 async function modelResponse(
@@ -366,6 +415,7 @@ async function runTurn(
   live: boolean,
   history: Array<{ role: 'user' | 'assistant'; content: string }>,
   profile: Assignment | undefined,
+  enforcement: EnforcementMode,
 ): Promise<TurnOutcome> {
   const userLang = detectLanguage(turn.user)
 
@@ -378,20 +428,49 @@ async function runTurn(
   // META nunca extrae (mismo motivo que el route: charla trivial no tiene nada
   // financiero que registrar).
   const delta = carril === 'META' ? {} : extractScenarioDelta(turn.user, userLang, prevState)
-  const state = mergeScenario(prevState, delta)
-  const verified = buildScenarioContext(state, turn.user)
+
+  // PIEZA 1 (6ª tanda) — HUÉRFANOS MARCAN, NUNCA DESCARTAN. Un número suelto
+  // que no encaja en ningún campo es solo una señal para preguntar — nunca un
+  // motivo para descartar campos extraídos con confianza. Solo la
+  // discrepancia (agregado ≠ suma del desglose, el MISMO campo
+  // contradiciéndose) retiene su propio campo hasta reconciliar; el resto del
+  // delta se persiste igual — ver la misma lógica en route.ts.
+  const huerfanos = detectarNumerosHuerfanos(turn.user, delta)
+  const discrepancia = detectarDiscrepanciaGastos(delta)
+  const extraccionAmbigua = huerfanos.extraccionIncompleta || discrepancia.discrepancia
+  const deltaAPersistir = deltaSinGastosPorDiscrepancia(delta, discrepancia)
+
+  const state = mergeScenario(prevState, deltaAPersistir)
+  // Todo número candidato del mensaje queda autorizado para el guardarraíl —
+  // ver la misma lógica en route.ts.
+  const valoresExtra = [
+    ...numerosCandidatos(turn.user),
+    ...(discrepancia.suma !== undefined ? [discrepancia.suma] : []),
+  ]
+  const verified = buildScenarioContext(state, turn.user, { valoresExtra })
+
+  // PIEZA 5c (complemento, 5ª tanda) — tono emocional: reduce la autoridad del
+  // enforcement (grounding/sustancia/cierre se desactivan), sea cual sea el
+  // carril — igual que pipeline.ts::applyEnforcement.
+  const esEmocional = esTonoEmocional(turn.user)
 
   // 5 · el modelo (fixture o real)
   const response = await modelResponse(turn, live, scenario, verified.bloque, history, profile)
+  // `raw` — la respuesta CRUDA, antes de cualquier capa. El Mandamiento 9 (4ª
+  // tanda) la necesita para revertir un plan vaciado/mutilado.
+  const raw = response
 
-  // 6-7 · jaula de cifras + honestidad de simulación: SOLO fuera de META (Pieza 2).
+  // 6-7 · jaula de cifras + honestidad de simulación: SOLO fuera de META, y
+  // NUNCA en un turno emocional (PIEZA 5a) — el enforcement no tiene autoridad
+  // sobre nada que no sea una cifra verificable.
   let finalText = response
   let blocked = false
-  if (carril !== 'META') {
+  if (carril !== 'META' && !esEmocional) {
     const guardrail = await runGuardrail(turn.user, response, {
       mode: 'mvp',
       cifrasCalculadas: { valores: verified.valores, conceptos: verified.conceptos },
       idioma: userLang,
+      enforcement,
     })
     finalText = guardrail.texto_final
     blocked = guardrail.bloqueado
@@ -414,13 +493,38 @@ async function runTurn(
     finalText = `${finalText}\n\n${validation.suggestedDisclaimer}`
   }
 
-  // 11 · sustancia: SOLO FINANCIERO. En META/MIXTO una respuesta sin cifras es válida.
-  if (carril === 'FINANCIERO') {
-    finalText = ensureSubstance(finalText, { lang: userLang, missing: state.missing })
+  // 11 · sustancia: SOLO FINANCIERO, y nunca en un turno emocional (PIEZA 5a).
+  // En META/MIXTO una respuesta sin cifras es válida.
+  if (carril === 'FINANCIERO' && !esEmocional) {
+    finalText = ensureSubstance(finalText, { lang: userLang, missing: state.missing, enforcement })
   }
 
-  // 12 · resolutor ÚNICO de cierre, por carril (Pieza 3: fix del doble cierre)
-  finalText = resolveClosing(finalText, { carril, missing: state.missing, lang: userLang })
+  // 12 · resolutor ÚNICO de cierre, por carril (Pieza 3: fix del doble cierre).
+  // PIEZA 5a — un turno emocional NUNCA recibe cierre forzado: se le pasa
+  // 'META' a `resolveClosing` (que ya deja el texto intacto en ese carril),
+  // sea cual sea el carril real del turno.
+  finalText = resolveClosing(finalText, {
+    carril: esEmocional ? 'META' : carril,
+    missing: state.missing,
+    lang: userLang,
+    enforcement,
+  })
+
+  // 13-15 · renumerar listas → The Commandments → renumerar listas otra vez
+  // (mismo orden que pipeline.ts::applyEnforcement). Antes el harness no
+  // ejecutaba Commandments — sin esto, el Mandamiento 9 (4ª tanda) no se podía
+  // probar aquí porque nunca corría.
+  finalText = renumberLists(finalText).texto
+  const esSimulacion = state.credito?.tae_es_referencia === true
+  const commandments = enforceCommandments(finalText, {
+    carril,
+    lang: userLang,
+    missing: state.missing,
+    conceptos: verified.conceptos,
+    esSimulacion,
+    raw,
+  })
+  finalText = renumberLists(commandments.texto).texto
 
   return {
     finalText,
@@ -432,6 +536,9 @@ async function runTurn(
     missing: state.missing,
     lang: userLang,
     carril,
+    violations: commandments.violaciones,
+    extraccionAmbigua,
+    esEmocional,
   }
 }
 
@@ -481,6 +588,21 @@ function checkTurn(turn: Turn, out: TurnOutcome, live: boolean): string[] {
     errs.push(`expectCarril: esperaba ${turn.expectCarril}, encontré ${out.carril}`)
   }
 
+  if (turn.expectMandamiento9 !== undefined) {
+    const got = out.violations.some((v) => v.mandamiento === 9)
+    if (got !== turn.expectMandamiento9) {
+      errs.push(`expectMandamiento9: esperaba ${turn.expectMandamiento9}, encontré ${got}`)
+    }
+  }
+
+  if (turn.expectExtraccionAmbigua !== undefined && turn.expectExtraccionAmbigua !== out.extraccionAmbigua) {
+    errs.push(`expectExtraccionAmbigua: esperaba ${turn.expectExtraccionAmbigua}, encontré ${out.extraccionAmbigua}`)
+  }
+
+  if (turn.expectEmocional !== undefined && turn.expectEmocional !== out.esEmocional) {
+    errs.push(`expectEmocional: esperaba ${turn.expectEmocional}, encontré ${out.esEmocional}`)
+  }
+
   return errs
 }
 
@@ -499,6 +621,14 @@ async function main() {
   const verbose = argv.includes('--verbose')
   const filterArg = argv.find((a) => a.startsWith('--filter='))
   const filter = filterArg ? filterArg.slice('--filter='.length) : undefined
+
+  // PIEZA 1 (AG08) — pasada en modo `minimal`: solo BLOQUEO, sin sustituciones.
+  // Las expectativas de los escenarios describen el contrato de `full`, así que
+  // en minimal se espera MENOS intervención: `--report-only` reporta qué
+  // escenarios cambian de resultado sin marcar la pasada como fallida.
+  const modeArg = argv.find((a) => a.startsWith('--enforcement='))
+  const enforcement = parseEnforcementMode(modeArg?.slice('--enforcement='.length))
+  const reportOnly = argv.includes('--report-only')
 
   if (live) {
     // El prompt de la tanda nombra LLM_API_KEY; llm.ts lee OPENAI_API_KEY.
@@ -523,6 +653,7 @@ async function main() {
 
   console.log(`${BOLD}Harness de regresión conversacional — AG07${RESET}`)
   console.log(`  modo:      ${live ? 'LIVE (LLM real)' : 'FIXTURE (sin LLM, determinista)'}`)
+  console.log(`  enforce:   ${enforcement}${reportOnly ? ' (report-only: los cambios no marcan fallo)' : ''}`)
   console.log(`  escenario: src/lib/calculator/scenario.ts + orchestrator.ts (AG08)`)
   console.log(`  ficheros:  ${files.length}\n`)
 
@@ -543,7 +674,7 @@ async function main() {
     let scenarioFailed = false
 
     for (const [i, turn] of scenario.turns.entries()) {
-      const out = await runTurn(scenario, turn, state, live, history, profile)
+      const out = await runTurn(scenario, turn, state, live, history, profile, enforcement)
       state = out.state
       history.push({ role: 'user', content: turn.user }, { role: 'assistant', content: out.finalText })
 
@@ -575,11 +706,17 @@ async function main() {
   const total = okTurns + failTurns
   console.log('─'.repeat(72))
   if (failTurns === 0) {
-    console.log(`${GREEN}${BOLD}✅ ${okTurns}/${total} turnos OK${RESET} · ${files.length} escenarios`)
+    console.log(`${GREEN}${BOLD}✅ ${okTurns}/${total} turnos OK${RESET} · ${files.length} escenarios · enforcement=${enforcement}`)
+  } else if (reportOnly) {
+    console.log(
+      `${YELLOW}${BOLD}⚠ ${failTurns}/${total} turnos CAMBIAN de resultado en enforcement=${enforcement}${RESET}` +
+      ` · escenarios: ${failedScenarios.join(', ')}`,
+    )
+    console.log(`${DIM}  Esperado: menos intervención que en 'full'. Lo que NUNCA debe aparecer es una cifra falsa.${RESET}`)
   } else {
     console.log(`${RED}${BOLD}❌ ${failTurns}/${total} turnos fallaron${RESET} · escenarios: ${failedScenarios.join(', ')}`)
   }
-  process.exit(failTurns === 0 ? 0 : 1)
+  process.exit(failTurns === 0 || reportOnly ? 0 : 1)
 }
 
 main().catch((err) => {

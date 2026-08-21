@@ -5,8 +5,8 @@
 
 import type { ToolDef } from "../llm";
 import type { Language } from "../language";
-import { classifyExpenses, type ExpenseItem } from "./expenses";
-import { extractScenarioDelta, type ScenarioState, type CreditoState, type MetaState } from "./scenario";
+import { classifyExpenses, classifyExpense, type ExpenseItem } from "./expenses";
+import { extractScenarioDelta, aplicarGuardaDeSanidad, type ScenarioState, type CreditoState, type MetaState, type GastoItemEntry } from "./scenario";
 import { TAE_REFERENCIA } from "./orchestrator";
 
 /**
@@ -86,7 +86,15 @@ export function toolArgsToScenarioDelta(args: Record<string, unknown>): Partial<
   const taeRaw = num(args.credito_tae_pct);
   const tae = taeRaw !== undefined && taeRaw > 0 && taeRaw < 100 ? taeRaw : undefined;
   if (monto !== undefined || plazo !== undefined || tae !== undefined) {
-    const credito: CreditoState = { monto: monto ?? 0, plazo_meses: plazo ?? 0, tae_es_referencia: true };
+    // FIX 1 (7ª tanda, testdev6) — CERO NO ES UN VALOR: el placeholder
+    // `monto ?? 0` / `plazo ?? 0` era la causa raíz del bloqueo circular real
+    // ("el banco me ofrece 18%" sin plazo dejaba plazo_meses=0 persistido,
+    // que a su vez invalidaba el bloque de crédito entero en
+    // buildScenarioContext y borraba la propia pregunta que pedía el plazo).
+    // Un campo no declarado queda `undefined`, nunca `0`.
+    const credito: CreditoState = { tae_es_referencia: true };
+    if (monto !== undefined) credito.monto = monto;
+    if (plazo !== undefined) credito.plazo_meses = plazo;
     if (tae !== undefined) {
       credito.tae_pct = tae;
       credito.tae_es_referencia = false;
@@ -126,10 +134,33 @@ export function toolArgsToScenarioDelta(args: Record<string, unknown>): Partial<
         desconocidos: cls.desconocidos.total,
       };
       delta.gastos_es_detalle = true;
+      // PIEZA 5 (8ª tanda) — conserva cada partida individual también cuando
+      // viene por tool_call, no solo por el fallback regex. `turn: 0` es un
+      // placeholder — `mergeScenario` lo reescribe al acumular.
+      delta.gastos_items = items.map(
+        (i): GastoItemEntry => ({ name: i.name, amount: i.amount, category: classifyExpense(i.name), source: "tool", turn: 0 }),
+      );
+    } else if (items.length === 1) {
+      // MENOR (follow-up QA testdev8, V14 — ley de conservación) — un
+      // desglose de UN SOLO ítem ("netflix 15") no llega al umbral de ≥2
+      // para clasificar vitales/no-vitales (`gastos_es_detalle` queda SIN
+      // tocar: no hay agregado que derivar de una sola partida), pero el
+      // dato SÍ lo dio el usuario — antes desaparecía en silencio. Se
+      // registra igual como evidencia de partida (`gastos_items`), visible
+      // para el modelo y acumulable si llegan más partidas en turnos
+      // siguientes.
+      const [unico] = items;
+      delta.gastos_items = [
+        { name: unico.name, amount: unico.amount, category: classifyExpense(unico.name), source: "tool", turn: 0 },
+      ];
     }
   }
 
-  return delta;
+  // FIX 4 (9ª tanda) — misma guarda de sanidad que la vía regex (V12: el
+  // ingreso nunca es un ítem de gasto; magnitud absurda respecto al ingreso):
+  // el LLM también puede devolver un desglose inconsistente, y esta función
+  // es la ÚNICA defensa para esa vía.
+  return aplicarGuardaDeSanidad(delta);
 }
 
 // ── Helpers del flujo del route (puros y testables) ──────────────────────────
@@ -155,6 +186,8 @@ export interface ToolResultPayload {
   bloque: string;
   missing: string[];
   credito: { es_simulacion: boolean | null; tae_usada: number | null };
+  /** FIX C — PB7 EJECUCIÓN: si true, el modelo debe entregar el plan, no re-diagnosticar. */
+  plan_confirmado: boolean;
 }
 
 /**
@@ -174,5 +207,6 @@ export function buildToolResult(
     bloque: verified.bloque,
     missing: verified.missing,
     credito: { es_simulacion: c?.tae_es_referencia ?? null, tae_usada: taeUsada },
+    plan_confirmado: scenario.plan_confirmado === true,
   };
 }
