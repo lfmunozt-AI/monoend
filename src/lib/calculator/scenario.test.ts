@@ -2727,3 +2727,58 @@ test("G1d: 'TAE 9%' (con signo) sigue capturándose con normalidad — el clasif
   assert.equal(delta.credito?.tae_pct, 9);
   assert.equal(delta.extraction_status, "COMPLETE");
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CIERRE G1d — RESERVA DE AG01: la tolerancia ÷12/×12 (año↔mes) sin marca
+// anual explícita era una puerta trasera del multiset. "renta 1000, comida
+// 200, luz 100" con solo 2 de 3 partidas capturadas (agregado=1200, la suma
+// de las 2 capturadas) daba COMPLETE porque 1200/12 = 100 — el AGREGADO
+// "cubría" por aritmética pura la partida perdida (luz, 100), sin relación
+// real entre ambos números. Fix: la tolerancia ÷12/×12 exige que el
+// candidato traiga una marca anual explícita ("al año", "anual"…) en el
+// propio mensaje — sin ella, solo se admite el redondeo ±1.
+// ═══════════════════════════════════════════════════════════════════════════
+
+test("G1d (reserva AG01): 'renta 1000, comida 200, luz 100' con solo 2 de 3 capturadas → PARTIAL citando el 100, NUNCA COMPLETE por ÷12", () => {
+  const mensaje = "renta 1000, comida 200, luz 100";
+  const deltaIncompleto = {
+    gastos_mensuales: 1200, // suma de las 2 partidas SÍ capturadas — el agregado real
+    gastos_items: [
+      { name: "renta", amount: 1000, category: "vital" as const, source: "regex" as const, turn: 0 },
+      { name: "comida", amount: 200, category: "vital" as const, source: "regex" as const, turn: 0 },
+    ],
+  };
+  const analisis = analizarExtraccion(mensaje, deltaIncompleto);
+  assert.equal(analisis.extraction_status, "PARTIAL", "1200/12=100 NO debe cubrir la partida perdida (luz, sin marca anual)");
+  assert.ok(analisis.huerfanos.numerosHuerfanos.includes(100), "el 100 de 'luz' debe citarse como huérfano");
+});
+
+test("G1d (reserva AG01): control — 'renta 1000, comida 200, luz 150' con la misma pérdida (2 de 3) → PARTIAL", () => {
+  const mensaje = "renta 1000, comida 200, luz 150";
+  const deltaIncompleto = {
+    gastos_mensuales: 1200,
+    gastos_items: [
+      { name: "renta", amount: 1000, category: "vital" as const, source: "regex" as const, turn: 0 },
+      { name: "comida", amount: 200, category: "vital" as const, source: "regex" as const, turn: 0 },
+    ],
+  };
+  const analisis = analizarExtraccion(mensaje, deltaIncompleto);
+  assert.equal(analisis.extraction_status, "PARTIAL");
+  assert.ok(analisis.huerfanos.numerosHuerfanos.includes(150));
+});
+
+test("G1d (reserva AG01): 'gano 27600 al año' con delta ingreso_mensual 2300 (extractor que SÍ anualiza) → sigue COMPLETE, sin huérfanos", () => {
+  const mensaje = "gano 27600 al año";
+  const delta = { ingreso_mensual: 2300 };
+  const analisis = analizarExtraccion(mensaje, delta);
+  assert.equal(analisis.extraction_status, "COMPLETE", "la marca 'al año' SÍ autoriza la tolerancia ÷12 (27600/12=2300)");
+  assert.equal(analisis.huerfanos.numerosHuerfanos.length, 0);
+});
+
+test("G1d (reserva AG01): el mismo importe SIN 'al año' no goza de la tolerancia ÷12/×12", () => {
+  const mensaje = "gano 27600 este mes";
+  const delta = { ingreso_mensual: 2300 };
+  const analisis = analizarExtraccion(mensaje, delta);
+  assert.equal(analisis.extraction_status, "PARTIAL", "sin marca anual, 27600 no puede cubrirse con un ingreso_mensual de 2300");
+  assert.ok(analisis.huerfanos.numerosHuerfanos.includes(27600));
+});

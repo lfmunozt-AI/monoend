@@ -1682,6 +1682,34 @@ export function numerosCandidatos(message: string): number[] {
     .map((m) => m.value);
 }
 
+// FIX (reserva de AG01, cierre G1d) — la tolerancia ÷12/×12 (año↔mes) solo se
+// admite cuando el número tiene una marca ANUAL explícita pegada en el texto
+// ("al año", "anual", "por año", "yearly", "por ano"). Sin ella, degenera en
+// una PUERTA TRASERA para el multiset: un AGREGADO (p. ej. 1200, la suma de
+// solo 2 de 3 partidas capturadas) puede "cubrir" por pura aritmética una
+// partida perdida cuyo valor sea agregado/12 (1200/12 = 100) — el mismo
+// punto ciego que el fix de multiset debía cerrar, reabierto por otra vía.
+const MARCA_ANUAL_RE = /\b(?:al\s+a[ñn]o|anual(?:mente)?|por\s+a[ñn]o|por\s+ano|yearly|per\s+year|annual(?:ly)?)\b/i;
+
+function tieneMarcaAnual(text: string, m: NumberMention): boolean {
+  const before = text.slice(Math.max(0, m.start - 15), m.start);
+  const after = text.slice(m.end, m.end + 15);
+  return MARCA_ANUAL_RE.test(before) || MARCA_ANUAL_RE.test(after);
+}
+
+interface CandidatoConMarca {
+  value: number;
+  /** ¿Este número trae "al año"/"anual"/etc. pegado en el propio mensaje? */
+  anual: boolean;
+}
+
+/** Como `numerosCandidatos`, pero conserva si cada uno trae marca ANUAL explícita. */
+function numerosCandidatosConMarca(message: string): CandidatoConMarca[] {
+  return dedupeOverlaps(findNumberMentions(message))
+    .filter((m) => esCandidataFinanciera(message, m))
+    .map((m) => ({ value: m.value, anual: tieneMarcaAnual(message, m) }));
+}
+
 /**
  * FIX G1d (fidelidad de extracción, evento 22 ago) — MULTISET, no membership.
  * La versión anterior (`coincideConAsignado`, un `.some()` de PERTENENCIA)
@@ -1698,26 +1726,30 @@ export function numerosCandidatos(message: string): number[] {
  * candidato — no puede volver a cubrir otro. Dos pasadas para no depender
  * del ORDEN de aparición: primero se resuelven todas las coincidencias
  * EXACTAS (para que una pareja "floja" ±1/año↔mes de un candidato no le
- * robe a otro candidato su pareja exacta), y solo con lo que sobra de
- * ambos lados se intenta la tolerancia (redondeo ±1, conversión ÷12/×12
- * año↔mes — un extractor que SÍ divide 27.600 €/año entre 12 y guarda
- * 2.300 €/mes no debe marcarse como huérfano).
+ * robe a otro candidato su pareja exacta), y solo con lo que sobra de ambos
+ * lados se intenta la tolerancia — redondeo ±1 SIEMPRE; conversión ÷12/×12
+ * año↔mes SOLO si el candidato trae marca anual explícita (ver
+ * `tieneMarcaAnual` — reserva de AG01, cierre de G1d: sin esta condición, el
+ * ÷12/×12 reabre el mismo punto ciego que el multiset cerraba, por la vía
+ * de un AGREGADO que "cubre" una partida perdida cuyo valor es agregado/12).
  */
-function huerfanosPorMultiset(candidatos: number[], asignados: number[]): number[] {
+function huerfanosPorMultiset(candidatos: CandidatoConMarca[], asignados: number[]): number[] {
   const restantes = [...asignados];
-  const pendientes: number[] = [];
-  for (const v of candidatos) {
-    const idx = restantes.indexOf(v);
+  const pendientes: CandidatoConMarca[] = [];
+  for (const c of candidatos) {
+    const idx = restantes.indexOf(c.value);
     if (idx !== -1) restantes.splice(idx, 1);
-    else pendientes.push(v);
+    else pendientes.push(c);
   }
   const sinDestino: number[] = [];
-  for (const v of pendientes) {
+  for (const c of pendientes) {
     const idx = restantes.findIndex(
-      (a) => Math.abs(a - v) <= 1 || Math.abs(a - v / 12) <= 1 || Math.abs(a - v * 12) <= 1,
+      (a) =>
+        Math.abs(a - c.value) <= 1 ||
+        (c.anual && (Math.abs(a - c.value / 12) <= 1 || Math.abs(a - c.value * 12) <= 1)),
     );
     if (idx !== -1) restantes.splice(idx, 1);
-    else sinDestino.push(v);
+    else sinDestino.push(c.value);
   }
   return sinDestino;
 }
@@ -1787,7 +1819,7 @@ export function detectarNumerosHuerfanos(
   message: string,
   delta: Partial<ScenarioState>,
 ): ExtraccionIncompletaResult {
-  const candidatos = numerosCandidatos(message);
+  const candidatos = numerosCandidatosConMarca(message);
   // FIX CRÉDITO FANTASMA (follow-up) — "a 48 meses: cuota 900, seguro 50" no
   // tiene ningún crédito al que pertenecer (`extractScenarioDelta` ya decidió
   // no escribir `delta.credito` por esa misma razón). `esCandidataFinanciera`
@@ -1798,10 +1830,10 @@ export function detectarNumerosHuerfanos(
   // silencio (V14). Se añade explícitamente porque el filtro general, por
   // diseño, nunca lo deja llegar a `candidatos` — se incorpora ANTES del
   // emparejamiento multiset para que compita por una pareja en igualdad de
-  // condiciones con el resto.
+  // condiciones con el resto. Un plazo suelto nunca lleva marca anual.
   if (!delta.credito) {
     const plazoSuelto = plazoSueltoConLista(message);
-    if (plazoSuelto !== null) candidatos.push(plazoSuelto);
+    if (plazoSuelto !== null) candidatos.push({ value: plazoSuelto, anual: false });
   }
   const asignados = valoresAsignadosEnDelta(message, delta);
   const numerosHuerfanos = huerfanosPorMultiset(candidatos, asignados);
