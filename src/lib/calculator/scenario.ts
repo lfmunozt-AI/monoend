@@ -1626,6 +1626,30 @@ const SUSTANTIVO_NO_MONETARIO_AFTER_RE =
 const TIEMPO_AFTER_RE =
   /^\s*(?:a[ñn]os?|anos?|years?|meses|mes|months?|d[ií]as?|days?|semanas?|weeks?|horas?|hours?)\b/;
 
+// FIX G1d (fidelidad de extracción) — una tasa mencionada SIN el signo "%"
+// ("TAE 9", "tasa del 9") es un dato genuinamente ambiguo, no un importe
+// perdido: el extractor de crédito exige "%" por diseño (evita falsos
+// positivos con cualquier otro número de la frase — ver informe "crédito
+// fantasma"), así que "9" nunca llega a `credito.tae_pct`. Sin esta regla,
+// "quiero un carro de 30000 a 48 meses con TAE 9" degradaba a PARTIAL por
+// ese único número — aunque monto y plazo, los dos importes CLAROS de la
+// frase, ya se hubieran capturado bien. Se clasifica como NO RELEVANTE
+// (mismo trato que "43 años"/"2 hijos") solo cuando NO hay "%" ni marca de
+// moneda inmediatamente después — si cualquiera de las dos aparece, es un
+// importe claro (una tasa con signo, o un cargo de intereses en euros) y
+// SIGUE contando como candidato financiero normal.
+const TASA_BEFORE_RE = /\b(?:tae|tasa|inter[ée]s|apr)\b[^\d%]{0,10}$/i;
+const MONEDA_AFTER_RE = /^\s*(?:€|eur\b|euros?\b|\$|usd\b|d[oó]lares?\b|dollars?\b)/i;
+
+function esTasaSinSigno(text: string, m: NumberMention): boolean {
+  const before = text.slice(Math.max(0, m.start - 20), m.start);
+  const after = text.slice(m.end, m.end + 15);
+  if (!TASA_BEFORE_RE.test(before)) return false;
+  if (/^\s*%/.test(after)) return false;
+  if (MONEDA_AFTER_RE.test(after)) return false;
+  return true;
+}
+
 /** ¿`m` es un enumerador de lista ("1. Ajustar…")? Mismo criterio que validate.ts. */
 function esEnumeradorDeLista(text: string, m: NumberMention): boolean {
   const lineStart = text.lastIndexOf("\n", m.start - 1) + 1;
@@ -1640,6 +1664,7 @@ function esCandidataFinanciera(text: string, m: NumberMention): boolean {
   const after = text.slice(m.end, m.end + 20);
   if (TIEMPO_AFTER_RE.test(after)) return false;
   if (SUSTANTIVO_NO_MONETARIO_AFTER_RE.test(after)) return false;
+  if (esTasaSinSigno(text, m)) return false;
   return true;
 }
 
@@ -1658,15 +1683,43 @@ export function numerosCandidatos(message: string): number[] {
 }
 
 /**
- * ¿`v` coincide con algún valor ya asignado en el delta? Tolera la conversión
- * año↔mes (÷12 / ×12, ±1 de redondeo): un extractor más listo (tool call) que
- * SÍ divide 27.600 €/año entre 12 y guarda 2.300 €/mes no debe marcarse como
- * huérfano — "normaliza explícitamente" es una salida tan válida como preguntar.
+ * FIX G1d (fidelidad de extracción, evento 22 ago) — MULTISET, no membership.
+ * La versión anterior (`coincideConAsignado`, un `.some()` de PERTENENCIA)
+ * dejaba que UNA sola partida capturada "cubriera" TODAS las apariciones del
+ * mismo valor en el mensaje: si el tool_call capturaba "cuota 50" pero
+ * perdía "ayuda a mi madre 50" (una partida DISTINTA, mismo importe), el
+ * candidato 50 de la partida perdida encontraba el 50 de "cuota" YA
+ * asignado y se daba por cubierto — nunca se preguntaba por él. Caso real:
+ * 6 de 17 partidas se perdieron (5, 20, 10, 10, 50, 30 — 125 €) y el sistema
+ * certificó COMPLETE con 2.080 € en vez de PARTIAL citando lo que faltaba,
+ * porque sus importes coincidían por VALOR con otras partidas SÍ capturadas.
+ *
+ * Fix: cada valor asignado se CONSUME (se retira de la bolsa) al cubrir un
+ * candidato — no puede volver a cubrir otro. Dos pasadas para no depender
+ * del ORDEN de aparición: primero se resuelven todas las coincidencias
+ * EXACTAS (para que una pareja "floja" ±1/año↔mes de un candidato no le
+ * robe a otro candidato su pareja exacta), y solo con lo que sobra de
+ * ambos lados se intenta la tolerancia (redondeo ±1, conversión ÷12/×12
+ * año↔mes — un extractor que SÍ divide 27.600 €/año entre 12 y guarda
+ * 2.300 €/mes no debe marcarse como huérfano).
  */
-function coincideConAsignado(v: number, asignados: number[]): boolean {
-  return asignados.some(
-    (a) => Math.abs(a - v) <= 1 || Math.abs(a - v / 12) <= 1 || Math.abs(a - v * 12) <= 1,
-  );
+function huerfanosPorMultiset(candidatos: number[], asignados: number[]): number[] {
+  const restantes = [...asignados];
+  const pendientes: number[] = [];
+  for (const v of candidatos) {
+    const idx = restantes.indexOf(v);
+    if (idx !== -1) restantes.splice(idx, 1);
+    else pendientes.push(v);
+  }
+  const sinDestino: number[] = [];
+  for (const v of pendientes) {
+    const idx = restantes.findIndex(
+      (a) => Math.abs(a - v) <= 1 || Math.abs(a - v / 12) <= 1 || Math.abs(a - v * 12) <= 1,
+    );
+    if (idx !== -1) restantes.splice(idx, 1);
+    else sinDestino.push(v);
+  }
+  return sinDestino;
 }
 
 /**
@@ -1716,11 +1769,12 @@ export interface ExtraccionIncompletaResult {
 }
 
 /** ¿Por qué `m` NO es una cifra financiera candidata? `null` si SÍ lo es. */
-function razonNoRelevante(text: string, m: NumberMention): "tiempo" | "sustantivo" | null {
+function razonNoRelevante(text: string, m: NumberMention): "tiempo" | "sustantivo" | "tasa" | null {
   if (esEnumeradorDeLista(text, m)) return null; // ni siquiera es un número candidato real.
   const after = text.slice(m.end, m.end + 20);
   if (TIEMPO_AFTER_RE.test(after)) return "tiempo";
   if (SUSTANTIVO_NO_MONETARIO_AFTER_RE.test(after)) return "sustantivo";
+  if (esTasaSinSigno(text, m)) return "tasa";
   return null;
 }
 
@@ -1734,8 +1788,6 @@ export function detectarNumerosHuerfanos(
   delta: Partial<ScenarioState>,
 ): ExtraccionIncompletaResult {
   const candidatos = numerosCandidatos(message);
-  const asignados = valoresAsignadosEnDelta(message, delta);
-  const numerosHuerfanos = candidatos.filter((v) => !coincideConAsignado(v, asignados));
   // FIX CRÉDITO FANTASMA (follow-up) — "a 48 meses: cuota 900, seguro 50" no
   // tiene ningún crédito al que pertenecer (`extractScenarioDelta` ya decidió
   // no escribir `delta.credito` por esa misma razón). `esCandidataFinanciera`
@@ -1744,13 +1796,15 @@ export function detectarNumerosHuerfanos(
   // debe generar ruido), pero aquí no hay crédito que completar: es un dato
   // suelto que el usuario escribió y que debe preguntarse, no perderse en
   // silencio (V14). Se añade explícitamente porque el filtro general, por
-  // diseño, nunca lo deja llegar a `candidatos`.
+  // diseño, nunca lo deja llegar a `candidatos` — se incorpora ANTES del
+  // emparejamiento multiset para que compita por una pareja en igualdad de
+  // condiciones con el resto.
   if (!delta.credito) {
     const plazoSuelto = plazoSueltoConLista(message);
-    if (plazoSuelto !== null && !coincideConAsignado(plazoSuelto, asignados)) {
-      numerosHuerfanos.push(plazoSuelto);
-    }
+    if (plazoSuelto !== null) candidatos.push(plazoSuelto);
   }
+  const asignados = valoresAsignadosEnDelta(message, delta);
+  const numerosHuerfanos = huerfanosPorMultiset(candidatos, asignados);
   const numerosNoRelevantes = dedupeOverlaps(findNumberMentions(message))
     .filter((m) => razonNoRelevante(message, m) !== null)
     .map((m) => m.value);

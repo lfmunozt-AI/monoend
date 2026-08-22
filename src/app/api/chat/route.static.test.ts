@@ -118,3 +118,24 @@ test("MAYOR (tono): la anti-repetición también detecta estructura repetida, no
   assert.match(src, /esEstructuraRepetida\(/);
   assert.match(src, /repiteEstructura/);
 });
+
+// ── Compuerta G1d (fidelidad de extracción) — verificación ESTÁTICA ─────────
+
+test("G1d: el payload de telemetría expone importesEnMensaje/importesConDestino/importesSinDestino, calculados sobre cleanMessage", () => {
+  const src = leerRoute();
+  assert.match(src, /const importesEnMensaje = numerosCandidatos\(cleanMessage\)/);
+  assert.match(src, /const importesSinDestino = huerfanos\.numerosHuerfanos/);
+  assert.match(src, /importesEnMensaje:\s*importesEnMensaje\.length/);
+  assert.match(src, /importesConDestino,/);
+  assert.match(src, /importesSinDestino,/);
+});
+
+test("G1d: los nombres del payload (camelCase) coinciden con las columnas (snake_case) de telemetry.ts — un desajuste haría fallar la telemetría en silencio", () => {
+  const telemetrySrc = readFileSync(resolve(__dirname, "../../../lib/telemetry.ts"), "utf8");
+  assert.match(telemetrySrc, /importesEnMensaje\?:\s*number \| null/);
+  assert.match(telemetrySrc, /importesConDestino\?:\s*number \| null/);
+  assert.match(telemetrySrc, /importesSinDestino\?:\s*number\[\] \| null/);
+  assert.match(telemetrySrc, /importes_en_mensaje:\s*payload\.importesEnMensaje/);
+  assert.match(telemetrySrc, /importes_con_destino:\s*payload\.importesConDestino/);
+  assert.match(telemetrySrc, /importes_sin_destino:\s*payload\.importesSinDestino/);
+});

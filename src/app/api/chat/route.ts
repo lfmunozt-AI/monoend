@@ -492,6 +492,20 @@ export async function POST(request: Request) {
   const extraccionAmbigua = huerfanos.extraccionIncompleta || discrepancia.discrepancia || !!itemSospechoso
   const notaAmbigua = extraccionAmbigua ? notaExtraccionAmbigua(huerfanos, discrepancia, itemSospechoso) : null
 
+  // COMPUERTA G1d (fidelidad de extracción, evento 22 ago) — la telemetría
+  // existente no podía detectar esta clase de fallo: comparaba el texto
+  // contra el output del calculador, y ambos venían del MISMO input
+  // corrupto (un tool_call que perdió 6 de 17 partidas y certificó COMPLETE
+  // con 2.080 € en vez de 2.205 €). Estos tres campos son la ÚNICA fuente
+  // independiente en el payload: cuántos importes monetarios trae el
+  // MENSAJE ORIGINAL del usuario (`cleanMessage`, ya expuesto arriba para
+  // `huerfanos`/`analisis`), cuántos de esos terminaron con destino, y la
+  // lista exacta de los que no (huérfanos — ya sea relevante o no, para que
+  // la revisión nocturna pueda distinguir "perdido" de "edad/plazo/años").
+  const importesEnMensaje = numerosCandidatos(cleanMessage)
+  const importesSinDestino = huerfanos.numerosHuerfanos
+  const importesConDestino = importesEnMensaje.length - importesSinDestino.length
+
   if (extraccionAmbigua) {
     console.warn('[chat] extraccion_ambigua', JSON.stringify({
       user_id: user.id,
@@ -983,6 +997,10 @@ export async function POST(request: Request) {
       conflictDiff: scenarioAPersistir.gastos_conflict?.diff ?? null,
       conflictAttempts: scenarioAPersistir.gastos_conflict?.attempts ?? null,
       assumedFields: scenarioAPersistir.gastos_assumed ? ['gastos_mensuales'] : [],
+      // COMPUERTA G1d (fidelidad de extracción) — ver el cálculo arriba.
+      importesEnMensaje: importesEnMensaje.length,
+      importesConDestino,
+      importesSinDestino,
     },
   })
 
