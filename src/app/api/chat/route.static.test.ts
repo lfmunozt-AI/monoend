@@ -123,11 +123,39 @@ test("MAYOR (tono): la anti-repetición también detecta estructura repetida, no
 
 test("G1d: el payload de telemetría expone importesEnMensaje/importesConDestino/importesSinDestino, calculados sobre cleanMessage", () => {
   const src = leerRoute();
-  assert.match(src, /const importesEnMensaje = numerosCandidatos\(cleanMessage\)/);
-  assert.match(src, /const importesSinDestino = huerfanos\.numerosHuerfanos/);
+  // ACTUALIZADO bajo V11 (acuerdo 27) — REFACTOR, no inversión. El requisito
+  // (los tres campos proceden del MENSAJE ORIGINAL del usuario, no del output
+  // del calculador) se conserva íntegro; lo que cambia es el punto de
+  // medición. Asertos anteriores:
+  //     /const importesEnMensaje = numerosCandidatos\(cleanMessage\)/
+  //     /const importesSinDestino = huerfanos\.numerosHuerfanos/
+  // La fórmula canónica de G1d los sustituye por `medirFidelidadExtraccion`,
+  // que distingue "huérfano relevante" (destino declarado, degradante) de
+  // "importe sin NINGÚN destino" — distinción que la expresión anterior no
+  // podía hacer, y por la que un sistema honesto se marcaba a sí mismo.
+  assert.match(src, /const fidelidad = medirFidelidadExtraccion\(cleanMessage, delta, analisis\.extraction_status, seed\)/);
+  assert.match(src, /const importesEnMensaje = fidelidad\.importesEnMensaje/);
+  assert.match(src, /const importesSinDestino = fidelidad\.importesSinDestino/);
+  assert.match(src, /const importesConDestino = fidelidad\.importesConDestino/);
   assert.match(src, /importesEnMensaje:\s*importesEnMensaje\.length/);
   assert.match(src, /importesConDestino,/);
   assert.match(src, /importesSinDestino,/);
+});
+
+test("G1d: la compuerta se evalúa y se registra cuando dispara (violaG1d)", () => {
+  const src = leerRoute();
+  assert.match(src, /if \(fidelidad\.violaG1d\)/);
+  assert.match(src, /g1d_violacion/);
+});
+
+test("FIX 2 (notaAmbigua): el detector de huérfanos recibe el estado PREVIO, para no preguntar por una respuesta corta", () => {
+  const src = leerRoute();
+  // Sin `seed`, "2300 euros" (respuesta a una pregunta que el propio sistema
+  // acaba de hacer) se leía como dinero suelto y disparaba `notaAmbigua`, que
+  // se inyecta en systemPrompt2 y en el prompt de regeneración — es decir,
+  // llegaba al usuario.
+  assert.match(src, /detectarNumerosHuerfanos\(cleanMessage, delta, seed\)/);
+  assert.match(src, /analizarExtraccion\(cleanMessage, delta, seed\)/);
 });
 
 test("G1d: los nombres del payload (camelCase) coinciden con las columnas (snake_case) de telemetry.ts — un desajuste haría fallar la telemetría en silencio", () => {

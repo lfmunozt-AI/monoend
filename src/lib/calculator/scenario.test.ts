@@ -25,6 +25,7 @@ import {
   notaDetalleSinConfirmar,
   detectarEventosICA,
   analizarExtraccion,
+  medirFidelidadExtraccion,
   computeExtractionStatus,
   aplicarGuardaDeSanidad,
   detectarCorreccionDeItem,
@@ -72,9 +73,35 @@ test("ambiguo → no extrae nada (no corrompe el estado)", () => {
   // financiero real, así que ese es el ÚNICO campo esperado.
   assert.deepEqual(extractScenarioDelta("hola, no sé muy bien qué hacer"), { extraction_status: "COMPLETE" });
   assert.deepEqual(extractScenarioDelta("gracias por la ayuda"), { extraction_status: "COMPLETE" });
-  // Un porcentaje SIN contexto de tasa no se toma como TAE — pero SÍ es un
-  // número candidato sin destino (huérfano relevante) → PARTIAL, no COMPLETE.
-  assert.deepEqual(extractScenarioDelta("me gusta el 20% de las cosas"), { extraction_status: "PARTIAL" });
+  // ACTUALIZADO bajo V11 (acuerdo 27) — CORRECCIÓN DE REQUISITO, no
+  // debilitamiento. El aserto anterior era:
+  //     extractScenarioDelta("me gusta el 20% de las cosas") → PARTIAL
+  // es decir, codificaba como especificación que un porcentaje suelto es un
+  // huérfano RELEVANTE que degrada el turno. Eso es incorrecto: un porcentaje
+  // no es un importe monetario — no puede faltar en la suma de gastos, no
+  // desaparece del patrimonio del usuario, y no admite la pregunta "¿a qué
+  // corresponde?". Ese requisito viejo es exactamente el comportamiento
+  // ruidoso que esta tanda corrige (medido en dogfooding: el Consigliere
+  // preguntando al usuario por "18%" como si fuera un gasto sin asignar).
+  //
+  // La CONSERVACIÓN (V14) queda intacta y se verifica EN POSITIVO abajo: el
+  // 20 sigue teniendo destino declarado, en `numerosNoRelevantes`. Lo que se
+  // elimina es su capacidad de degradar a PARTIAL y de generar `notaAmbigua`.
+  const msgPct = "me gusta el 20% de las cosas";
+  const deltaPct = extractScenarioDelta(msgPct);
+  assert.deepEqual(deltaPct, { extraction_status: "COMPLETE" }, "un porcentaje no degrada el turno");
+
+  const huerfanosPct = detectarNumerosHuerfanos(msgPct, deltaPct);
+  assert.ok(
+    huerfanosPct.numerosNoRelevantes.includes(20),
+    "V14: el porcentaje CONSERVA destino declarado — aterriza en numerosNoRelevantes",
+  );
+  assert.deepEqual(huerfanosPct.numerosHuerfanos, [], "y NO como huérfano relevante");
+  assert.equal(
+    notaExtraccionAmbigua(huerfanosPct, detectarDiscrepanciaGastos(deltaPct), null),
+    null,
+    "no se genera notaAmbigua: nunca se pregunta al usuario a qué corresponde un porcentaje",
+  );
 });
 
 test("missing correcto según el playbook activo", () => {
@@ -150,11 +177,33 @@ test("FIX 2: estado con crédito + '18%' → tae 18 real", () => {
   assert.equal(d.credito?.tae_es_referencia, false);
 });
 
-test("FIX 2: SIN crédito previo + '18%' → NO extrae nada", () => {
-  // FIX V14-3 (11ª tanda) — extraction_status siempre definido; "18%" sin
-  // contexto de crédito es un número candidato sin destino → PARTIAL.
-  assert.deepEqual(extractScenarioDelta("18%", "es"), { extraction_status: "PARTIAL" });
-  assert.deepEqual(extractScenarioDelta("18%", "es", {}), { extraction_status: "PARTIAL" });
+test("FIX 2: SIN crédito previo + '18%' → NO extrae nada, y el porcentaje NO degrada el turno", () => {
+  // ACTUALIZADO bajo V11 (acuerdo 27) — CORRECCIÓN DE REQUISITO. Los asertos
+  // anteriores eran:
+  //     extractScenarioDelta("18%", "es")     → PARTIAL
+  //     extractScenarioDelta("18%", "es", {}) → PARTIAL
+  // Codificaban que un porcentaje sin contexto de crédito degrada el turno
+  // como huérfano relevante. Mismo motivo que el caso de arriba: un
+  // porcentaje no es dinero del usuario, así que no puede "faltar" ni se le
+  // pregunta a qué corresponde. Lo que este test SÍ protege — que sin crédito
+  // previo el "18%" no se invente una TAE — se conserva y se refuerza.
+  for (const prev of [undefined, {}]) {
+    const delta = extractScenarioDelta("18%", "es", prev as never);
+    assert.equal(delta.credito, undefined, "sin crédito previo, un 18% suelto NUNCA fabrica una TAE");
+    assert.deepEqual(delta, { extraction_status: "COMPLETE" }, "y el porcentaje no degrada el turno");
+
+    const huerfanos = detectarNumerosHuerfanos("18%", delta);
+    assert.ok(
+      huerfanos.numerosNoRelevantes.includes(18),
+      "V14: el 18 conserva destino declarado en numerosNoRelevantes",
+    );
+    assert.deepEqual(huerfanos.numerosHuerfanos, [], "nunca como huérfano relevante");
+    assert.equal(
+      notaExtraccionAmbigua(huerfanos, detectarDiscrepanciaGastos(delta), null),
+      null,
+      "y por tanto no se le pregunta al usuario por él",
+    );
+  }
 });
 
 test("FIX 2: variantes cortas con crédito previo (es un 9 / 9 por ciento / 9 percent)", () => {
@@ -2781,4 +2830,112 @@ test("G1d (reserva AG01): el mismo importe SIN 'al año' no goza de la toleranci
   const analisis = analizarExtraccion(mensaje, delta);
   assert.equal(analisis.extraction_status, "PARTIAL", "sin marca anual, 27600 no puede cubrirse con un ingreso_mensual de 2300");
   assert.ok(analisis.huerfanos.numerosHuerfanos.includes(27600));
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// COMPUERTA G1d — FÓRMULA CANÓNICA + clasificación semántica (calibración en
+// frío contra 16 mensajes reales del dogfooding).
+//
+// V14 mide CONSERVACIÓN (¿el número dejó rastro?); G1d mide FIDELIDAD (¿la
+// cifra publicada refleja todo el dinero, y el estado declarado era honesto?).
+// Un huérfano relevante ES un destino declarado — degradante, pero destino.
+// El delito nunca fue tener un huérfano: fue tenerlo y declarar COMPLETE.
+// ═══════════════════════════════════════════════════════════════════════════
+
+test("G1d canónico: 11 de 17 capturadas + PARTIAL + preguntar por las 6 → PASA la compuerta", () => {
+  const capturados: Array<[string, number]> = [
+    ["arriendo", 920], ["comida", 130], ["colegio", 350], ["transporte", 160],
+    ["gasolina", 60], ["cuota del carro", 50], ["seguro", 30], ["gimnasio", 80],
+    ["internet", 50], ["luz", 230], ["spotify", 20],
+  ];
+  const gastos_items = capturados.map(([name, amount]) => ({
+    name, amount, category: "desconocido" as const, source: "regex" as const, turn: 0,
+  }));
+  const delta = { ingreso_mensual: 2300, gastos_mensuales: 2080, gastos_items, gastos_es_detalle: true };
+  const analisis = analizarExtraccion(MENSAJE_17_PARTIDAS_G1D, delta);
+  assert.equal(analisis.extraction_status, "PARTIAL", "degrada honestamente");
+  const fid = medirFidelidadExtraccion(MENSAJE_17_PARTIDAS_G1D, delta, analisis.extraction_status);
+  assert.deepEqual(fid.huerfanosRelevantes, [5, 20, 10, 10, 50, 30], "declara las 6 perdidas");
+  assert.deepEqual(fid.importesSinDestino, [], "un huérfano declarado SÍ es destino");
+  assert.equal(fid.violaG1d, false, "el comportamiento honesto NO puede marcarse como violación");
+});
+
+test("G1d canónico: los MISMOS huérfanos declarando COMPLETE → VIOLA (el delito del 22 de agosto)", () => {
+  const capturados: Array<[string, number]> = [
+    ["arriendo", 920], ["comida", 130], ["colegio", 350], ["transporte", 160],
+    ["gasolina", 60], ["cuota del carro", 50], ["seguro", 30], ["gimnasio", 80],
+    ["internet", 50], ["luz", 230], ["spotify", 20],
+  ];
+  const gastos_items = capturados.map(([name, amount]) => ({
+    name, amount, category: "desconocido" as const, source: "regex" as const, turn: 0,
+  }));
+  const delta = { ingreso_mensual: 2300, gastos_mensuales: 2080, gastos_items, gastos_es_detalle: true };
+  const fid = medirFidelidadExtraccion(MENSAJE_17_PARTIDAS_G1D, delta, "COMPLETE");
+  assert.equal(fid.violaG1d, true);
+  assert.equal(fid.motivo, "huerfano_con_complete");
+});
+
+// ── FIX 3 — respuesta corta anclada al contexto (patrón dominante del ruido) ──
+const RESPUESTAS_CORTAS_G1D: Array<[string, Partial<ScenarioState>]> = [
+  ["150000 a 30 anos", { missing: ["meta_monto", "plazo"] }],
+  ["30000 en 48 meses", { missing: ["monto", "plazo"] }],
+  ["2300 euros", { missing: ["ingreso"] }],
+  ["10000 euros en 48 cuotas con una tasa TAEG de 9%", { missing: ["monto", "plazo", "tae"] }],
+];
+
+for (const [msg, prev] of RESPUESTAS_CORTAS_G1D) {
+  test(`G1d FIX 3: respuesta corta a una pregunta pendiente NO es huérfana: "${msg}"`, () => {
+    const delta = extractScenarioDelta(msg, "es", prev as ScenarioState);
+    const analisis = analizarExtraccion(msg, delta, prev);
+    assert.deepEqual(analisis.huerfanos.numerosHuerfanos, [], "la respuesta a la pregunta no es dinero perdido");
+    assert.equal(analisis.extraction_status, "COMPLETE");
+  });
+}
+
+test("G1d FIX 3: SIN pregunta pendiente, la misma cifra pelada SÍ cuenta como huérfana", () => {
+  const analisis = analizarExtraccion("2300 euros", {}, { missing: [] });
+  assert.ok(analisis.huerfanos.numerosHuerfanos.includes(2300));
+});
+
+test("G1d FIX 3: un mensaje largo y narrativo NUNCA es 'respuesta corta' aunque haya pregunta pendiente", () => {
+  const msg = "sabes, ese tema me frustra porque tengo 43 anos dos hijos y aun no les doy algo seguro. siento que pierdo el tiempo";
+  const analisis = analizarExtraccion(msg, extractScenarioDelta(msg), { missing: ["ingreso"] });
+  assert.equal(analisis.extraction_status, "COMPLETE");
+});
+
+// ── FIX 4 — porcentajes, conteos y unidades ──────────────────────────────────
+const NO_MONETARIOS_G1D = [
+  "para TDC un 18%",
+  "10% de mi salario",
+  "En la lista solo estas contenplando 14 gastos y en total son 17",
+  "somos 5 en casa",
+  "la casa tiene 3 hab y 90 m2",
+  "vivo aqui desde 2019",
+];
+
+for (const msg of NO_MONETARIOS_G1D) {
+  test(`G1d FIX 4: sin importes monetarios reales → sin huérfanos: "${msg}"`, () => {
+    const analisis = analizarExtraccion(msg, extractScenarioDelta(msg));
+    assert.deepEqual(analisis.huerfanos.numerosHuerfanos, [], "ni porcentajes, ni conteos, ni unidades, ni años");
+  });
+}
+
+test("G1d FIX 4 (no sobredisparar): una cifra con marca de moneda SIEMPRE es importe", () => {
+  // "100 euros" lleva moneda pegada: aunque 'euros' fuera seguido de cualquier
+  // otra cosa, la marca de moneda manda sobre toda exclusión de FIX 4.
+  const analisis = analizarExtraccion("me sobran 100 euros", {});
+  assert.ok(analisis.huerfanos.numerosHuerfanos.includes(100));
+});
+
+test("G1d FIX 4 (no sobredisparar): 'gano entre 2000 y 2500' conserva AMBOS extremos como huérfanos", () => {
+  const msg = "gano entre 2000 y 2500";
+  const analisis = analizarExtraccion(msg, extractScenarioDelta(msg));
+  assert.deepEqual(analisis.huerfanos.numerosHuerfanos.sort((a, b) => a - b), [2000, 2500]);
+});
+
+test("G1d FIX 4 (no sobredisparar): 'mis gastos son 2200' sigue siendo un importe vigilado", () => {
+  // La cópula "son" NO puede silenciar un importe: es la forma más común de
+  // declararlo, y silenciarla dejaría a G1d ciego ante su pérdida.
+  const analisis = analizarExtraccion("mis gastos son 2200", {});
+  assert.ok(analisis.huerfanos.numerosHuerfanos.includes(2200));
 });

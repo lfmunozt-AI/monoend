@@ -29,6 +29,7 @@ import {
   deltaSinGastosPorDiscrepancia,
   renderDatosRecienEntendidos,
   numerosCandidatos,
+  medirFidelidadExtraccion,
   notaFaltaDesglose,
   notaDetalleSinConfirmar,
   detectarEventosICA,
@@ -480,14 +481,21 @@ export async function POST(request: Request) {
   // distinta: ES el mismo campo contradiciéndose a sí mismo, así que solo ESE
   // campo se retiene hasta reconciliar (`deltaSinGastosPorDiscrepancia`); el
   // resto del delta (ingreso, crédito, meta…) se persiste igualmente.
-  const huerfanos = detectarNumerosHuerfanos(cleanMessage, delta)
+  // FIX 2 (calibración en frío) — `seed` (el estado ANTES de este turno) entra
+  // en el detector: sin él, una RESPUESTA CORTA a una pregunta que el propio
+  // sistema acaba de hacer ("2300 euros", "150000 a 30 anos") se leía como
+  // dinero suelto y disparaba `notaAmbigua` — el Consigliere volvía a
+  // preguntar por la cifra que el usuario ACABA de darle. `notaAmbigua` NO es
+  // solo telemetría: se inyecta en `systemPrompt2` y en el de regeneración,
+  // así que un falso positivo llega al usuario.
+  const huerfanos = detectarNumerosHuerfanos(cleanMessage, delta, seed)
   const discrepancia = detectarDiscrepanciaGastos(delta)
   // PIEZA 1/3 (8ª tanda) — honestidad de la extracción: además de huérfanos y
   // discrepancia, ¿hay un ítem de la lista de gastos sospechoso de pegado
   // ("60 100" leído como 60.100)? `extraction_status` resume las cuatro
   // señales en un solo valor para telemetría/depuración — no sustituye a
   // ninguna, solo las agrupa (ver `analizarExtraccion`).
-  const analisis = analizarExtraccion(cleanMessage, delta)
+  const analisis = analizarExtraccion(cleanMessage, delta, seed)
   const itemSospechoso = analisis.itemSospechoso
   const extraccionAmbigua = huerfanos.extraccionIncompleta || discrepancia.discrepancia || !!itemSospechoso
   const notaAmbigua = extraccionAmbigua ? notaExtraccionAmbigua(huerfanos, discrepancia, itemSospechoso) : null
@@ -496,15 +504,31 @@ export async function POST(request: Request) {
   // existente no podía detectar esta clase de fallo: comparaba el texto
   // contra el output del calculador, y ambos venían del MISMO input
   // corrupto (un tool_call que perdió 6 de 17 partidas y certificó COMPLETE
-  // con 2.080 € en vez de 2.205 €). Estos tres campos son la ÚNICA fuente
-  // independiente en el payload: cuántos importes monetarios trae el
-  // MENSAJE ORIGINAL del usuario (`cleanMessage`, ya expuesto arriba para
-  // `huerfanos`/`analisis`), cuántos de esos terminaron con destino, y la
-  // lista exacta de los que no (huérfanos — ya sea relevante o no, para que
-  // la revisión nocturna pueda distinguir "perdido" de "edad/plazo/años").
-  const importesEnMensaje = numerosCandidatos(cleanMessage)
-  const importesSinDestino = huerfanos.numerosHuerfanos
-  const importesConDestino = importesEnMensaje.length - importesSinDestino.length
+  // con 2.080 € en vez de 2.205 €). Es la ÚNICA fuente independiente en el
+  // payload: parte del MENSAJE ORIGINAL del usuario, no del output.
+  //
+  // FÓRMULA CANÓNICA (`medirFidelidadExtraccion`): un huérfano relevante SÍ
+  // es un destino declarado — degradante, pero destino. La compuerta dispara
+  // por (a) un importe sin NINGÚN destino, o (b) un huérfano relevante con
+  // `extraction_status = COMPLETE`. Un sistema que captura 11 de 17, degrada
+  // a PARTIAL y pregunta por las 6 restantes PASA la compuerta: es justo el
+  // comportamiento honesto que se quiere premiar.
+  const fidelidad = medirFidelidadExtraccion(cleanMessage, delta, analisis.extraction_status, seed)
+  const importesEnMensaje = fidelidad.importesEnMensaje
+  const importesSinDestino = fidelidad.importesSinDestino
+  const importesConDestino = fidelidad.importesConDestino
+
+  if (fidelidad.violaG1d) {
+    console.error('[chat] g1d_violacion', JSON.stringify({
+      user_id: user.id,
+      conversation_id: convId,
+      motivo: fidelidad.motivo,
+      importes_en_mensaje: importesEnMensaje.length,
+      importes_sin_destino: importesSinDestino,
+      huerfanos_relevantes: fidelidad.huerfanosRelevantes,
+      extraction_status: analisis.extraction_status,
+    }))
+  }
 
   if (extraccionAmbigua) {
     console.warn('[chat] extraccion_ambigua', JSON.stringify({

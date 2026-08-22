@@ -1624,7 +1624,98 @@ export function aplicarGuardaDeSanidad(delta: Partial<ScenarioState>): Partial<S
 const SUSTANTIVO_NO_MONETARIO_AFTER_RE =
   /^\s*(?:hijos?|hijas?|filhos?|filhas?|kids?|child(?:ren)?|ni[ñn]os?|personas?|people|veces|times|kg|kgs|kilos?|m2|m²|habitaciones?|hab|quartos?|rooms?|edad|idade|age|grados?|graus|degrees?)\b/;
 const TIEMPO_AFTER_RE =
-  /^\s*(?:a[ñn]os?|anos?|years?|meses|mes|months?|d[ií]as?|days?|semanas?|weeks?|horas?|hours?)\b/;
+  /^\s*(?:a[ñn]os?|anos?|years?|meses|mes|months?|d[ií]as?|days?|semanas?|weeks?|horas?|hours?|cuotas?|quotas?|parcelas?|presta[cç][oõ]es|installments?)\b/;
+
+// ── FIX 4 (calibración en frío, 16 mensajes reales del dogfooding) ───────────
+//
+// El clasificador de huérfanos NO es solo telemetría: `notaAmbigua` se inyecta
+// en el prompt de la LLAMADA 2 (`route.ts`) y en el de regeneración, así que un
+// falso positivo hace que el Consigliere PREGUNTE AL USUARIO por su edad, por
+// un porcentaje o por un conteo como si fueran gastos sin asignar. Cada regla
+// de abajo sale de un mensaje real que degradaba.
+
+// (a) PORCENTAJES — un porcentaje NUNCA es un importe monetario: ni con signo
+// ("para TDC un 18%", "10% de mi salario") ni escrito ("18 por ciento").
+// Distinto de `esTasaSinSigno`, que cubre el caso INVERSO (una tasa SIN "%",
+// reconocible solo por la palabra que la precede).
+// El `\b` va SOLO en las alternativas de palabra: tras "%" no hay frontera de
+// palabra posible (ambos lados son no-word), así que `%\b` nunca casaba y los
+// porcentajes seguían colándose como importes.
+const PORCENTAJE_AFTER_RE = /^\s*(?:%|(?:por\s*ciento|por\s*cento|percent|pct)\b)/i;
+
+// (b) CONTEOS — el sustantivo contable va DESPUÉS del número ("14 gastos",
+// "3 hab"): son cosas contadas, no dinero. "gastos"/"partidas"/"ítems" solo
+// cuentan como conteo cuando siguen al número — "gastos 2200" (la palabra
+// ANTES) sigue siendo una declaración monetaria normal.
+const CONTEO_AFTER_RE =
+  /^\s*(?:gastos?|partidas?|[ií]tems?|conceptos?|categor[ií]as?|movimientos?|cuentas?|tarjetas?|deudas?|entradas?|l[ií]neas?)\b/i;
+
+// (c) CONTEOS con el verbo ANTES del número ("somos 5 en casa"): "tengo 2
+// hijos" ya lo cubre el AFTER, pero "somos 5" no tiene sustantivo detrás. Se
+// mira la palabra inmediatamente anterior.
+//
+// DELIBERADAMENTE NO incluye "entre": "gano entre 2000 y 2500" es un RANGO de
+// baja confianza cuyos dos extremos DEBEN seguir contando como huérfanos
+// relevantes (es un caso cubierto por la batería desde la 6ª tanda — meterlo
+// aquí los silenciaba y rompía 3 tests reales).
+// Tampoco incluye la cópula "son": "mis gastos son 2200" es la forma MÁS
+// común de declarar un importe — silenciarla dejaría a G1d ciego ante la
+// pérdida de ese número, que es justo lo que la compuerta existe para ver.
+const CONTEO_BEFORE_RE = /\b(?:somos|[eé]ramos|seremos)\s+$/i;
+
+// (d) UNIDADES de medida no monetarias, pegadas al número.
+const UNIDAD_AFTER_RE =
+  /^\s*(?:metros?|mts?|m\b|km|kil[oó]metros?|litros?|lts?|l\b|gramos?|gr\b|tons?|toneladas?)\b/i;
+
+// (e) AÑOS de 4 dígitos en contexto temporal ("desde 2019", "en 2024"). Se
+// exige tanto el rango plausible como la preposición temporal delante: "2000"
+// suelto sigue siendo un importe perfectamente válido.
+const ANIO_BEFORE_RE = /\b(?:desde|hasta|en|del|de|a[ñn]o|ano|year|since|from|in)\s+$/i;
+
+function esAnioTemporal(text: string, m: NumberMention): boolean {
+  if (!/^\d{4}$/.test(text.slice(m.start, m.end))) return false;
+  const v = m.value;
+  if (v < 1900 || v > 2100) return false;
+  return ANIO_BEFORE_RE.test(text.slice(Math.max(0, m.start - 12), m.start));
+}
+
+/**
+ * SALVAGUARDA TRANSVERSAL (no sobredisparar) — una cifra con marca de moneda
+ * adyacente (€, EUR, euros, $, USD…) es SIEMPRE un importe monetario, pase lo
+ * que pase con el resto de reglas. Se comprueba ANTES que cualquier exclusión
+ * de FIX 4.
+ */
+function tieneMarcaDeMoneda(text: string, m: NumberMention): boolean {
+  const after = text.slice(m.end, m.end + 12);
+  const before = text.slice(Math.max(0, m.start - 4), m.start);
+  return MONEDA_AFTER_RE.test(after) || /(?:€|\$)\s*$/.test(before);
+}
+
+// (f) DÍGITO PEGADO A UNA LETRA — "m2", "m²", "a4": el buscador de números
+// extrae el "2" de "m2" como si fuera una cifra suelta, y ese 2 acababa como
+// huérfano relevante (→ el Consigliere preguntando por "2" al usuario que
+// describió un piso de 90 m2). Un dígito soldado a una letra que le precede
+// es parte de un token de unidad, no un importe. Se acota a 1-2 dígitos para
+// no tocar formas tipo "EUR1000".
+function esDigitoPegadoAUnidad(text: string, m: NumberMention): boolean {
+  if (m.end - m.start > 2) return false;
+  const anterior = text.slice(Math.max(0, m.start - 1), m.start);
+  return /\p{L}/u.test(anterior);
+}
+
+/** ¿`m` queda excluido por la clasificación semántica de FIX 4? */
+function esNoMonetarioPorClasificacion(text: string, m: NumberMention): boolean {
+  if (tieneMarcaDeMoneda(text, m)) return false; // la moneda manda sobre todo.
+  if (esDigitoPegadoAUnidad(text, m)) return true;
+  const after = text.slice(m.end, m.end + 20);
+  const before = text.slice(Math.max(0, m.start - 12), m.start);
+  if (PORCENTAJE_AFTER_RE.test(after)) return true;
+  if (CONTEO_AFTER_RE.test(after)) return true;
+  if (UNIDAD_AFTER_RE.test(after)) return true;
+  if (CONTEO_BEFORE_RE.test(before)) return true;
+  if (esAnioTemporal(text, m)) return true;
+  return false;
+}
 
 // FIX G1d (fidelidad de extracción) — una tasa mencionada SIN el signo "%"
 // ("TAE 9", "tasa del 9") es un dato genuinamente ambiguo, no un importe
@@ -1703,11 +1794,72 @@ interface CandidatoConMarca {
   anual: boolean;
 }
 
-/** Como `numerosCandidatos`, pero conserva si cada uno trae marca ANUAL explícita. */
-function numerosCandidatosConMarca(message: string): CandidatoConMarca[] {
+// ── FIX 3 (calibración en frío) — RESPUESTA CORTA ANCLADA AL CONTEXTO ───────
+//
+// Patrón DOMINANTE del ruido medido: el sistema pide un dato concreto y el
+// usuario contesta con la cifra pelada ("150000 a 30 anos", "2300 euros").
+// El extractor no siempre la ancla a un campo, y el sensor la marcaba como
+// dinero perdido — con lo que el Consigliere volvía a preguntar por la cifra
+// que el usuario ACABA de darle. Un número que responde a una pregunta
+// pendiente no es un huérfano: es la respuesta.
+//
+// Se exige que se cumplan LAS DOS condiciones:
+//   1. el turno anterior pedía algo concreto (`missing` no vacío, o hay una
+//      propuesta pendiente de confirmar), y
+//   2. el mensaje actual es MAYORITARIAMENTE esa cifra: no contiene ninguna
+//      palabra de contenido más allá de números, monedas, unidades de plazo,
+//      conectores y vocabulario financiero de la propia pregunta.
+// La condición 2 es la que impide que un mensaje largo y narrativo (donde el
+// usuario cuenta su situación) se tome por una respuesta corta.
+const TOKEN_ADMITIDO_RESPUESTA_CORTA_RE = new RegExp(
+  "^(?:" +
+    "[\\d.,]+%?" + // la cifra en sí (con o sin %)
+    "|€|\\$|eur|euros?|usd|d[oó]lares?|dollars?" + // moneda
+    "|a[ñn]os?|anos?|years?|meses|mes|months?|d[ií]as?|days?|semanas?|weeks?" + // plazo
+    "|cuotas?|quotas?|parcelas?|presta[cç][oõ]es|installments?|mensuales?|mensual" +
+    "|tae|taeg|tasa|inter[ée]s|apr|cat|cet|porciento|ciento|cento|percent" + // vocabulario de tasa
+    "|al|a|en|de|del|con|una?|unos?|y|o|por|para|the|of|at|in" + // conectores
+    ")$",
+  "i",
+);
+
+function esRespuestaCortaAnclada(message: string, prev?: Partial<ScenarioState>): boolean {
+  if (!prev) return false;
+  const hayPreguntaPendiente = (prev.missing?.length ?? 0) > 0 || !!prev.propuesta_pendiente;
+  if (!hayPreguntaPendiente) return false;
+  const tokens = norm(message).split(/[\s,;:]+/).filter(Boolean);
+  if (tokens.length === 0 || tokens.length > 12) return false;
+  if (!tokens.some((t) => /\d/.test(t))) return false; // sin cifra no es respuesta a un dato
+  return tokens.every((t) => TOKEN_ADMITIDO_RESPUESTA_CORTA_RE.test(t));
+}
+
+/**
+ * Candidatos a IMPORTE MONETARIO para el detector de huérfanos (y para la
+ * medición de fidelidad G1d). Distinto de `numerosCandidatos`, que es la lista
+ * de números AUTORIZABLES para el guardarraíl de cifras (allí interesa que el
+ * modelo pueda CITAR cualquier número del mensaje — incluido un porcentaje o
+ * un conteo — sin que se le bloquee). Aquí, en cambio, la pregunta es "¿esto
+ * es dinero del usuario que puede haberse perdido?", y la respuesta para un
+ * porcentaje, un conteo, una unidad o un año es NO.
+ */
+function importesMonetariosConMarca(message: string, prev?: Partial<ScenarioState>): CandidatoConMarca[] {
+  // FIX 3 — si el mensaje entero es la respuesta a la pregunta pendiente, sus
+  // cifras son la respuesta, no dinero suelto. Excluidas POR CONSTRUCCIÓN:
+  // nunca llegan a ser huérfanas, así que nunca generan `notaAmbigua` ni
+  // cuentan como pérdida en G1d.
+  if (esRespuestaCortaAnclada(message, prev)) return [];
   return dedupeOverlaps(findNumberMentions(message))
     .filter((m) => esCandidataFinanciera(message, m))
+    .filter((m) => !esNoMonetarioPorClasificacion(message, m)) // FIX 4
     .map((m) => ({ value: m.value, anual: tieneMarcaAnual(message, m) }));
+}
+
+/**
+ * Importes monetarios del mensaje (valores). Base del contador
+ * `importes_en_mensaje` de la compuerta G1d — ver `medirFidelidadExtraccion`.
+ */
+export function importesMonetarios(message: string, prev?: Partial<ScenarioState>): number[] {
+  return importesMonetariosConMarca(message, prev).map((c) => c.value);
 }
 
 /**
@@ -1801,12 +1953,17 @@ export interface ExtraccionIncompletaResult {
 }
 
 /** ¿Por qué `m` NO es una cifra financiera candidata? `null` si SÍ lo es. */
-function razonNoRelevante(text: string, m: NumberMention): "tiempo" | "sustantivo" | "tasa" | null {
+function razonNoRelevante(
+  text: string,
+  m: NumberMention,
+): "tiempo" | "sustantivo" | "tasa" | "no_monetario" | null {
   if (esEnumeradorDeLista(text, m)) return null; // ni siquiera es un número candidato real.
   const after = text.slice(m.end, m.end + 20);
   if (TIEMPO_AFTER_RE.test(after)) return "tiempo";
   if (SUSTANTIVO_NO_MONETARIO_AFTER_RE.test(after)) return "sustantivo";
   if (esTasaSinSigno(text, m)) return "tasa";
+  // FIX 4 — porcentaje, conteo, unidad de medida o año en contexto temporal.
+  if (esNoMonetarioPorClasificacion(text, m)) return "no_monetario";
   return null;
 }
 
@@ -1818,8 +1975,9 @@ function razonNoRelevante(text: string, m: NumberMention): "tiempo" | "sustantiv
 export function detectarNumerosHuerfanos(
   message: string,
   delta: Partial<ScenarioState>,
+  prev?: Partial<ScenarioState>,
 ): ExtraccionIncompletaResult {
-  const candidatos = numerosCandidatosConMarca(message);
+  const candidatos = importesMonetariosConMarca(message, prev);
   // FIX CRÉDITO FANTASMA (follow-up) — "a 48 meses: cuota 900, seguro 50" no
   // tiene ningún crédito al que pertenecer (`extractScenarioDelta` ya decidió
   // no escribir `delta.credito` por esa misma razón). `esCandidataFinanciera`
@@ -1831,7 +1989,10 @@ export function detectarNumerosHuerfanos(
   // diseño, nunca lo deja llegar a `candidatos` — se incorpora ANTES del
   // emparejamiento multiset para que compita por una pareja en igualdad de
   // condiciones con el resto. Un plazo suelto nunca lleva marca anual.
-  if (!delta.credito) {
+  // FIX 3 — si el mensaje entero es la respuesta a la pregunta pendiente,
+  // `importesMonetariosConMarca` ya devolvió [] a propósito: tampoco se
+  // reintroduce el plazo suelto por esta puerta.
+  if (!delta.credito && candidatos.length > 0) {
     const plazoSuelto = plazoSueltoConLista(message);
     if (plazoSuelto !== null) candidatos.push({ value: plazoSuelto, anual: false });
   }
@@ -2019,8 +2180,12 @@ function rangoAgregadoDeclarado(message: string): Rango | null {
  * (route.ts) decide qué hacer con cada señal (igual que ya hacía antes de
  * existir esta función, que solo las agrupa).
  */
-export function analizarExtraccion(message: string, delta: Partial<ScenarioState>): AnalisisExtraccion {
-  const huerfanos = detectarNumerosHuerfanos(message, delta);
+export function analizarExtraccion(
+  message: string,
+  delta: Partial<ScenarioState>,
+  prev?: Partial<ScenarioState>,
+): AnalisisExtraccion {
+  const huerfanos = detectarNumerosHuerfanos(message, delta, prev);
   const discrepancia = detectarDiscrepanciaGastos(delta);
   // MAYOR 3 — excluye el rango del agregado declarado (si lo hay) del
   // re-parseo: la misma frontera que `extractScenarioDelta` ya aplicó al
@@ -2033,6 +2198,80 @@ export function analizarExtraccion(message: string, delta: Partial<ScenarioState
   const camposInvalidos = detectarValoresInvalidos(message);
   const extraction_status = computeExtractionStatus({ huerfanos, discrepancia, itemSospechoso, camposInvalidos });
   return { extraction_status, huerfanos, discrepancia, itemSospechoso, camposInvalidos };
+}
+
+// ── COMPUERTA G1d — FIDELIDAD DE EXTRACCIÓN (fórmula canónica) ───────────────
+//
+// V14 y G1d miden cosas DISTINTAS, y confundirlas fue el defecto de la
+// implementación anterior:
+//
+//   V14 mide CONSERVACIÓN: ¿el número dejó rastro? Un huérfano relevante SÍ
+//       es un destino declarado — el sistema lo vio, lo registró y va a
+//       preguntar por él.
+//   G1d mide FIDELIDAD: ¿la cifra publicada refleja TODO el dinero del
+//       usuario, y el estado declarado era honesto?
+//
+// Un huérfano relevante es un destino LEGÍTIMO pero DEGRADANTE: su precio
+// obligatorio es PARTIAL. El delito del 22 de agosto nunca fue tener un
+// huérfano — fue tenerlo y declarar COMPLETE.
+//
+// La versión anterior contaba TODO huérfano como "importe sin destino", con
+// lo que un sistema honesto (captura 11 partidas, degrada a PARTIAL y
+// pregunta por las 6 restantes) se marcaba a sí mismo como violación. Eso es
+// justo el comportamiento que la compuerta debe PREMIAR.
+export interface FidelidadExtraccion {
+  /** Importes MONETARIOS presentes en el mensaje original del usuario. */
+  importesEnMensaje: number[];
+  /** Cuántos llegaron a un destino declarado (campo, ítem, o huérfano declarado). */
+  importesConDestino: number;
+  /** Los que no llegaron a NINGÚN destino — en un build correcto, vacío. */
+  importesSinDestino: number[];
+  /** Huérfanos relevantes: destino legítimo, pero obligan a PARTIAL. */
+  huerfanosRelevantes: number[];
+  /** ¿Viola la compuerta? (a) algún importe sin destino, o (b) huérfano relevante con COMPLETE. */
+  violaG1d: boolean;
+  motivo: "sin_destino" | "huerfano_con_complete" | null;
+}
+
+/**
+ * Mide la fidelidad de la extracción de un turno (compuerta G1d). Puro.
+ *
+ * `importesSinDestino` es la detección del caso (a): un importe que no aterrizó
+ * en ningún campo Y que tampoco se declaró como huérfano — es decir, dinero que
+ * el sistema perdió SIN DARSE CUENTA (el fallo real del 22 de agosto, donde el
+ * emparejamiento por pertenencia "cubría" partidas ausentes con el valor de
+ * otras capturadas). En un build correcto es siempre vacío, y esa es
+ * precisamente su utilidad como sensor: si deja de estarlo, hay un agujero
+ * nuevo.
+ */
+export function medirFidelidadExtraccion(
+  message: string,
+  delta: Partial<ScenarioState>,
+  extractionStatus: ExtractionStatus,
+  prev?: Partial<ScenarioState>,
+): FidelidadExtraccion {
+  const importesEnMensaje = importesMonetarios(message, prev);
+  const huerfanosRelevantes = detectarNumerosHuerfanos(message, delta, prev).numerosHuerfanos;
+
+  // Un importe tiene destino si aterrizó en un campo del delta O si quedó
+  // declarado como huérfano relevante (que el sistema SÍ va a preguntar).
+  const asignados = valoresAsignadosEnDelta(message, delta);
+  const declarados = [...asignados, ...huerfanosRelevantes];
+  const importesSinDestino = huerfanosPorMultiset(
+    importesEnMensaje.map((value) => ({ value, anual: false })),
+    declarados,
+  );
+
+  const violaSinDestino = importesSinDestino.length > 0;
+  const violaHuerfanoConComplete = huerfanosRelevantes.length > 0 && extractionStatus === "COMPLETE";
+  return {
+    importesEnMensaje,
+    importesConDestino: importesEnMensaje.length - importesSinDestino.length,
+    importesSinDestino,
+    huerfanosRelevantes,
+    violaG1d: violaSinDestino || violaHuerfanoConComplete,
+    motivo: violaSinDestino ? "sin_destino" : violaHuerfanoConComplete ? "huerfano_con_complete" : null,
+  };
 }
 
 /**
