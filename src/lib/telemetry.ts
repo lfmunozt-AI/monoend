@@ -84,6 +84,20 @@ export interface ResponseTelemetryPayload {
   conflictDiff?: number | null
   conflictAttempts?: number | null
   assumedFields?: string[] | null
+  /**
+   * COMPUERTA G1d (fidelidad de extracción, evento 22 ago) — migración
+   * 024_telemetry_fidelidad.sql. La telemetría existente compara el texto
+   * contra el output del calculador; ambos vienen del MISMO input cuando la
+   * extracción pierde partidas (el caso real: un tool_call capturó 11 de 17
+   * y certificó COMPLETE con 2.080 € en vez de 2.205 €). Estas tres columnas
+   * son la ÚNICA fuente independiente: cuántos importes monetarios trae el
+   * MENSAJE ORIGINAL del usuario, cuántos terminaron con destino, y la lista
+   * exacta de los que no. Todas nullable — turnos anteriores a la migración
+   * la dejan en NULL.
+   */
+  importesEnMensaje?: number | null
+  importesConDestino?: number | null
+  importesSinDestino?: number[] | null
 }
 
 /**
@@ -139,6 +153,9 @@ export async function logResponseTelemetry(
       conflict_diff: payload.conflictDiff ?? null,
       conflict_attempts: payload.conflictAttempts ?? null,
       assumed_fields: payload.assumedFields ?? null,
+      importes_en_mensaje: payload.importesEnMensaje ?? null,
+      importes_con_destino: payload.importesConDestino ?? null,
+      importes_sin_destino: payload.importesSinDestino ?? null,
     })
     if (error) throw new Error(error.message)
     return true

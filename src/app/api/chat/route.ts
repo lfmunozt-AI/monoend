@@ -21,6 +21,7 @@ import {
   contarRepeticionesMensajeUsuario,
   actualizarDigresiones,
   notaRetornoMeta,
+  esEstructuraRepetida,
   notaSinCifrasDePlan,
   detectarNumerosHuerfanos,
   detectarDiscrepanciaGastos,
@@ -28,6 +29,7 @@ import {
   deltaSinGastosPorDiscrepancia,
   renderDatosRecienEntendidos,
   numerosCandidatos,
+  medirFidelidadExtraccion,
   notaFaltaDesglose,
   notaDetalleSinConfirmar,
   detectarEventosICA,
@@ -479,17 +481,54 @@ export async function POST(request: Request) {
   // distinta: ES el mismo campo contradiciéndose a sí mismo, así que solo ESE
   // campo se retiene hasta reconciliar (`deltaSinGastosPorDiscrepancia`); el
   // resto del delta (ingreso, crédito, meta…) se persiste igualmente.
-  const huerfanos = detectarNumerosHuerfanos(cleanMessage, delta)
+  // FIX 2 (calibración en frío) — `seed` (el estado ANTES de este turno) entra
+  // en el detector: sin él, una RESPUESTA CORTA a una pregunta que el propio
+  // sistema acaba de hacer ("2300 euros", "150000 a 30 anos") se leía como
+  // dinero suelto y disparaba `notaAmbigua` — el Consigliere volvía a
+  // preguntar por la cifra que el usuario ACABA de darle. `notaAmbigua` NO es
+  // solo telemetría: se inyecta en `systemPrompt2` y en el de regeneración,
+  // así que un falso positivo llega al usuario.
+  const huerfanos = detectarNumerosHuerfanos(cleanMessage, delta, seed)
   const discrepancia = detectarDiscrepanciaGastos(delta)
   // PIEZA 1/3 (8ª tanda) — honestidad de la extracción: además de huérfanos y
   // discrepancia, ¿hay un ítem de la lista de gastos sospechoso de pegado
   // ("60 100" leído como 60.100)? `extraction_status` resume las cuatro
   // señales en un solo valor para telemetría/depuración — no sustituye a
   // ninguna, solo las agrupa (ver `analizarExtraccion`).
-  const analisis = analizarExtraccion(cleanMessage, delta)
+  const analisis = analizarExtraccion(cleanMessage, delta, seed)
   const itemSospechoso = analisis.itemSospechoso
   const extraccionAmbigua = huerfanos.extraccionIncompleta || discrepancia.discrepancia || !!itemSospechoso
   const notaAmbigua = extraccionAmbigua ? notaExtraccionAmbigua(huerfanos, discrepancia, itemSospechoso) : null
+
+  // COMPUERTA G1d (fidelidad de extracción, evento 22 ago) — la telemetría
+  // existente no podía detectar esta clase de fallo: comparaba el texto
+  // contra el output del calculador, y ambos venían del MISMO input
+  // corrupto (un tool_call que perdió 6 de 17 partidas y certificó COMPLETE
+  // con 2.080 € en vez de 2.205 €). Es la ÚNICA fuente independiente en el
+  // payload: parte del MENSAJE ORIGINAL del usuario, no del output.
+  //
+  // FÓRMULA CANÓNICA (`medirFidelidadExtraccion`): un huérfano relevante SÍ
+  // es un destino declarado — degradante, pero destino. La compuerta dispara
+  // por (a) un importe sin NINGÚN destino, o (b) un huérfano relevante con
+  // `extraction_status = COMPLETE`. Un sistema que captura 11 de 17, degrada
+  // a PARTIAL y pregunta por las 6 restantes PASA la compuerta: es justo el
+  // comportamiento honesto que se quiere premiar.
+  const fidelidad = medirFidelidadExtraccion(cleanMessage, delta, analisis.extraction_status, seed)
+  const importesEnMensaje = fidelidad.importesEnMensaje
+  const importesSinDestino = fidelidad.importesSinDestino
+  const importesConDestino = fidelidad.importesConDestino
+
+  if (fidelidad.violaG1d) {
+    console.error('[chat] g1d_violacion', JSON.stringify({
+      user_id: user.id,
+      conversation_id: convId,
+      motivo: fidelidad.motivo,
+      importes_en_mensaje: importesEnMensaje.length,
+      importes_sin_destino: importesSinDestino,
+      huerfanos_relevantes: fidelidad.huerfanosRelevantes,
+      extraction_status: analisis.extraction_status,
+    }))
+  }
 
   if (extraccionAmbigua) {
     console.warn('[chat] extraccion_ambigua', JSON.stringify({
@@ -521,9 +560,22 @@ export async function POST(request: Request) {
   // ser una cifra derivada verificada — es el eco de lo que el usuario
   // escribió, no una cifra inventada. `discrepancia.suma` se añade aparte
   // porque es COMPUTADA (no un token literal del mensaje).
+  // MAYOR (tono, QA testdev10) — mientras `gastos_conflict`/`gastos_assumed`
+  // sigue abierto en turnos POSTERIORES al que lo creó, `discrepancia.suma`
+  // ya no existe (es una señal del delta de ESTE turno, no del conflicto
+  // persistido) — así que agregado/detalle/valor_adoptado NUNCA quedaban
+  // autorizados para el guardarraíl. El modelo redacta su propia pregunta de
+  // aclaración citando esos dos valores (`notaConflictoGastos` se los da), y
+  // el grounding, al no reconocerlos, ELIMINABA LA FRASE ENTERA que los
+  // citaba — dejando publicada solo la pregunta desnuda, sin el contexto que
+  // la motiva ("¿Cuál es el valor correcto?", 26 caracteres, 4 mutaciones).
+  // Se autorizan aquí, igual que `discrepancia.suma` ya autorizaba el caso
+  // del primer turno.
   const valoresExtra = [
     ...numerosCandidatos(cleanMessage),
     ...(discrepancia.suma !== undefined ? [discrepancia.suma] : []),
+    ...(scenario.gastos_conflict ? [scenario.gastos_conflict.agregado, scenario.gastos_conflict.detalle] : []),
+    ...(scenario.gastos_assumed ? [scenario.gastos_assumed.valor] : []),
   ]
   const verified = buildScenarioContext(scenario, cleanMessage, { valoresExtra })
 
@@ -574,9 +626,23 @@ export async function POST(request: Request) {
     // llamada (aún no se ha generado nada con el delta de este turno).
     const systemPrompt2 = [basePrompt, notaDatosCalculadosPostMerge, notaDigresion, notaSinCifras, notaAmbigua, notaEco, notaDesglose, notaDetalleSinConfirmarVal, notaConflicto, notaRepeticionMensaje, notaTonoEmocional, idiomaObligatorio]
       .filter(Boolean).join('\n\n')
+    // BLOQUEANTE G1b (QA testdev10) — SNAPSHOT ÚNICO POR TURNO. `call1.content`
+    // se generó bajo `systemPrompt1`, cuyas derivadas (`notaDatosCalculados`)
+    // vienen de `seed` — el estado ANTES de fusionar el delta de este turno.
+    // Si se deja tal cual en el historial, LLAMADA 2 puede "recordar" una
+    // derivada calculada sobre el estado VIEJO (p. ej. un sobrante) y
+    // combinarla con una cifra fresca de `notaDatosCalculadosPostMerge` (p.
+    // ej. un gasto recién corregido) — exactamente el incidente real:
+    // "capacidad de 375 €" = sobrante viejo (300 €, gastos 2200) + mitad de
+    // un ocio nuevo (75 €, de gastos 2250), una cifra que no corresponde a
+    // NINGÚN snapshot real. Se vacía: LLAMADA 2 razona solo con el snapshot
+    // fresco (`verified`, calculado ÍNTEGRAMENTE de `scenario` post-merge) y
+    // el historial real de turnos anteriores — nunca con su propio borrador
+    // pre-merge de este turno. El tool_call en sí (los datos extraídos) SÍ
+    // viaja igual — es lo único de LLAMADA 1 que es autoridad, no prosa.
     const messages2 = [
       ...allMessages,
-      { role: 'assistant' as const, content: call1.content, toolCalls: [toolCall] },
+      { role: 'assistant' as const, content: '', toolCalls: [toolCall] },
       { role: 'tool' as const, toolCallId: toolCall.id, content: toolResult },
     ]
     const call2 = await callLLMWithTools(
@@ -625,12 +691,26 @@ export async function POST(request: Request) {
   // calcada ("¿quieres que te proyecte el plan?" una y otra vez). Si el texto
   // generado es ≥90% idéntico al último mensaje del asistente en esta MISMA
   // conversación, se regenera UNA sola vez con instrucción explícita de avanzar.
+  //
+  // MAYOR (tono, QA testdev10) — `esRespuestaRepetida` compara TEXTO CRUDO
+  // (umbral 90%): no detecta la muletilla estructural real ("Reducir a la
+  // mitad el X liberaría Y €, dejando una capacidad de Z €", 4 veces con
+  // cifras distintas) porque las cifras cambiadas bajan la similitud
+  // literal por debajo del umbral. `esEstructuraRepetida` normaliza los
+  // dígitos y compara solo la APERTURA — misma respuesta a la MISMA causa,
+  // sin exigir que el texto entero coincida.
   const lastAssistantMessage = [...contextMessages].reverse().find((m) => m.role === 'assistant')?.content
-  if (esRespuestaRepetida(llmResult.content, lastAssistantMessage)) {
-    console.warn('[chat] repetition_detected', JSON.stringify({ user_id: user.id, conversation_id: convId, carril }))
-    const instruccionAvance =
-      'Tu respuesta iba a repetir casi literalmente la anterior de esta conversación. ' +
-      'PROHIBIDO reformular el mismo diagnóstico o repetir la misma pregunta: avanza al siguiente paso concreto.'
+  const repiteTexto = esRespuestaRepetida(llmResult.content, lastAssistantMessage)
+  const repiteEstructura = !repiteTexto && esEstructuraRepetida(llmResult.content, lastAssistantMessage)
+  if (repiteTexto || repiteEstructura) {
+    console.warn('[chat] repetition_detected', JSON.stringify({
+      user_id: user.id, conversation_id: convId, carril, tipo: repiteTexto ? 'texto' : 'estructura',
+    }))
+    const instruccionAvance = repiteTexto
+      ? 'Tu respuesta iba a repetir casi literalmente la anterior de esta conversación. ' +
+        'PROHIBIDO reformular el mismo diagnóstico o repetir la misma pregunta: avanza al siguiente paso concreto.'
+      : 'Tu respuesta abre con la MISMA construcción que tu mensaje anterior en esta conversación, aunque las cifras cambien. ' +
+        'PROHIBIDO repetir esa estructura de apertura: dilo de una forma distinta.'
     const retry = await callLLMWithTools(
       respondingMessages,
       `${respondingSystemPrompt}\n\n${instruccionAvance}`,
@@ -941,6 +1021,10 @@ export async function POST(request: Request) {
       conflictDiff: scenarioAPersistir.gastos_conflict?.diff ?? null,
       conflictAttempts: scenarioAPersistir.gastos_conflict?.attempts ?? null,
       assumedFields: scenarioAPersistir.gastos_assumed ? ['gastos_mensuales'] : [],
+      // COMPUERTA G1d (fidelidad de extracción) — ver el cálculo arriba.
+      importesEnMensaje: importesEnMensaje.length,
+      importesConDestino,
+      importesSinDestino,
     },
   })
 

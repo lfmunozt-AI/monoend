@@ -84,3 +84,86 @@ test("MAYOR 7: se detecta la repetición del MENSAJE del usuario, no solo de la 
   assert.match(src, /contarRepeticionesMensajeUsuario\(/);
   assert.match(src, /notaRepeticionMensaje/);
 });
+
+// ── QA testdev10 — verificación ESTÁTICA de los fixes de esta tanda ─────────
+
+test("BLOQUEANTE G1b: el borrador de LLAMADA 1 (snapshot pre-merge) NUNCA sobrevive al historial de LLAMADA 2", () => {
+  const src = leerRoute();
+  // `messages2` debe llevar el toolCall con content vacío, no `call1.content`
+  // — si `call1.content` reaparece aquí, el modelo puede volver a mezclar una
+  // derivada calculada sobre `seed` (pre-merge) con una fresca de este mismo
+  // turno (el incidente real: "capacidad de 375€" = sobrante viejo + ocio
+  // nuevo). Ver `orchestrator.test.ts` para la mitad del fix que SÍ se puede
+  // probar sin el runtime de Next.js (pureza de snapshot único).
+  assert.match(src, /\{\s*role:\s*'assistant'\s*as\s*const,\s*content:\s*'',\s*toolCalls:\s*\[toolCall\]\s*\}/);
+  assert.ok(
+    !/content:\s*call1\.content,\s*toolCalls/.test(src),
+    "call1.content no debe viajar como texto del asistente hacia LLAMADA 2",
+  );
+});
+
+test("MAYOR (tono): un conflicto de gastos ya abierto autoriza agregado/detalle/valor_adoptado para el guardarraíl", () => {
+  const src = leerRoute();
+  // Antes, solo `discrepancia.suma` (señal del turno que CREA el conflicto)
+  // quedaba autorizada — en los turnos POSTERIORES, mientras el conflicto
+  // sigue abierto, ni agregado ni detalle lo estaban, y el grounding
+  // eliminaba la frase que los citaba: quedaba publicada solo la pregunta
+  // desnuda, sin el contexto que la motiva.
+  assert.match(src, /scenario\.gastos_conflict\.agregado,\s*scenario\.gastos_conflict\.detalle/);
+  assert.match(src, /scenario\.gastos_assumed\.valor/);
+});
+
+test("MAYOR (tono): la anti-repetición también detecta estructura repetida, no solo texto idéntico", () => {
+  const src = leerRoute();
+  assert.match(src, /esEstructuraRepetida\(/);
+  assert.match(src, /repiteEstructura/);
+});
+
+// ── Compuerta G1d (fidelidad de extracción) — verificación ESTÁTICA ─────────
+
+test("G1d: el payload de telemetría expone importesEnMensaje/importesConDestino/importesSinDestino, calculados sobre cleanMessage", () => {
+  const src = leerRoute();
+  // ACTUALIZADO bajo V11 (acuerdo 27) — REFACTOR, no inversión. El requisito
+  // (los tres campos proceden del MENSAJE ORIGINAL del usuario, no del output
+  // del calculador) se conserva íntegro; lo que cambia es el punto de
+  // medición. Asertos anteriores:
+  //     /const importesEnMensaje = numerosCandidatos\(cleanMessage\)/
+  //     /const importesSinDestino = huerfanos\.numerosHuerfanos/
+  // La fórmula canónica de G1d los sustituye por `medirFidelidadExtraccion`,
+  // que distingue "huérfano relevante" (destino declarado, degradante) de
+  // "importe sin NINGÚN destino" — distinción que la expresión anterior no
+  // podía hacer, y por la que un sistema honesto se marcaba a sí mismo.
+  assert.match(src, /const fidelidad = medirFidelidadExtraccion\(cleanMessage, delta, analisis\.extraction_status, seed\)/);
+  assert.match(src, /const importesEnMensaje = fidelidad\.importesEnMensaje/);
+  assert.match(src, /const importesSinDestino = fidelidad\.importesSinDestino/);
+  assert.match(src, /const importesConDestino = fidelidad\.importesConDestino/);
+  assert.match(src, /importesEnMensaje:\s*importesEnMensaje\.length/);
+  assert.match(src, /importesConDestino,/);
+  assert.match(src, /importesSinDestino,/);
+});
+
+test("G1d: la compuerta se evalúa y se registra cuando dispara (violaG1d)", () => {
+  const src = leerRoute();
+  assert.match(src, /if \(fidelidad\.violaG1d\)/);
+  assert.match(src, /g1d_violacion/);
+});
+
+test("FIX 2 (notaAmbigua): el detector de huérfanos recibe el estado PREVIO, para no preguntar por una respuesta corta", () => {
+  const src = leerRoute();
+  // Sin `seed`, "2300 euros" (respuesta a una pregunta que el propio sistema
+  // acaba de hacer) se leía como dinero suelto y disparaba `notaAmbigua`, que
+  // se inyecta en systemPrompt2 y en el prompt de regeneración — es decir,
+  // llegaba al usuario.
+  assert.match(src, /detectarNumerosHuerfanos\(cleanMessage, delta, seed\)/);
+  assert.match(src, /analizarExtraccion\(cleanMessage, delta, seed\)/);
+});
+
+test("G1d: los nombres del payload (camelCase) coinciden con las columnas (snake_case) de telemetry.ts — un desajuste haría fallar la telemetría en silencio", () => {
+  const telemetrySrc = readFileSync(resolve(__dirname, "../../../lib/telemetry.ts"), "utf8");
+  assert.match(telemetrySrc, /importesEnMensaje\?:\s*number \| null/);
+  assert.match(telemetrySrc, /importesConDestino\?:\s*number \| null/);
+  assert.match(telemetrySrc, /importesSinDestino\?:\s*number\[\] \| null/);
+  assert.match(telemetrySrc, /importes_en_mensaje:\s*payload\.importesEnMensaje/);
+  assert.match(telemetrySrc, /importes_con_destino:\s*payload\.importesConDestino/);
+  assert.match(telemetrySrc, /importes_sin_destino:\s*payload\.importesSinDestino/);
+});

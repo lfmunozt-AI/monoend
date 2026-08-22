@@ -11,6 +11,7 @@ import {
   esConfirmacionCorta,
   esPropuestaDePlan,
   esRespuestaRepetida,
+  esEstructuraRepetida,
   actualizarDigresiones,
   notaRetornoMeta,
   notaSinCifrasDePlan,
@@ -24,6 +25,7 @@ import {
   notaDetalleSinConfirmar,
   detectarEventosICA,
   analizarExtraccion,
+  medirFidelidadExtraccion,
   computeExtractionStatus,
   aplicarGuardaDeSanidad,
   detectarCorreccionDeItem,
@@ -71,9 +73,35 @@ test("ambiguo → no extrae nada (no corrompe el estado)", () => {
   // financiero real, así que ese es el ÚNICO campo esperado.
   assert.deepEqual(extractScenarioDelta("hola, no sé muy bien qué hacer"), { extraction_status: "COMPLETE" });
   assert.deepEqual(extractScenarioDelta("gracias por la ayuda"), { extraction_status: "COMPLETE" });
-  // Un porcentaje SIN contexto de tasa no se toma como TAE — pero SÍ es un
-  // número candidato sin destino (huérfano relevante) → PARTIAL, no COMPLETE.
-  assert.deepEqual(extractScenarioDelta("me gusta el 20% de las cosas"), { extraction_status: "PARTIAL" });
+  // ACTUALIZADO bajo V11 (acuerdo 27) — CORRECCIÓN DE REQUISITO, no
+  // debilitamiento. El aserto anterior era:
+  //     extractScenarioDelta("me gusta el 20% de las cosas") → PARTIAL
+  // es decir, codificaba como especificación que un porcentaje suelto es un
+  // huérfano RELEVANTE que degrada el turno. Eso es incorrecto: un porcentaje
+  // no es un importe monetario — no puede faltar en la suma de gastos, no
+  // desaparece del patrimonio del usuario, y no admite la pregunta "¿a qué
+  // corresponde?". Ese requisito viejo es exactamente el comportamiento
+  // ruidoso que esta tanda corrige (medido en dogfooding: el Consigliere
+  // preguntando al usuario por "18%" como si fuera un gasto sin asignar).
+  //
+  // La CONSERVACIÓN (V14) queda intacta y se verifica EN POSITIVO abajo: el
+  // 20 sigue teniendo destino declarado, en `numerosNoRelevantes`. Lo que se
+  // elimina es su capacidad de degradar a PARTIAL y de generar `notaAmbigua`.
+  const msgPct = "me gusta el 20% de las cosas";
+  const deltaPct = extractScenarioDelta(msgPct);
+  assert.deepEqual(deltaPct, { extraction_status: "COMPLETE" }, "un porcentaje no degrada el turno");
+
+  const huerfanosPct = detectarNumerosHuerfanos(msgPct, deltaPct);
+  assert.ok(
+    huerfanosPct.numerosNoRelevantes.includes(20),
+    "V14: el porcentaje CONSERVA destino declarado — aterriza en numerosNoRelevantes",
+  );
+  assert.deepEqual(huerfanosPct.numerosHuerfanos, [], "y NO como huérfano relevante");
+  assert.equal(
+    notaExtraccionAmbigua(huerfanosPct, detectarDiscrepanciaGastos(deltaPct), null),
+    null,
+    "no se genera notaAmbigua: nunca se pregunta al usuario a qué corresponde un porcentaje",
+  );
 });
 
 test("missing correcto según el playbook activo", () => {
@@ -149,11 +177,33 @@ test("FIX 2: estado con crédito + '18%' → tae 18 real", () => {
   assert.equal(d.credito?.tae_es_referencia, false);
 });
 
-test("FIX 2: SIN crédito previo + '18%' → NO extrae nada", () => {
-  // FIX V14-3 (11ª tanda) — extraction_status siempre definido; "18%" sin
-  // contexto de crédito es un número candidato sin destino → PARTIAL.
-  assert.deepEqual(extractScenarioDelta("18%", "es"), { extraction_status: "PARTIAL" });
-  assert.deepEqual(extractScenarioDelta("18%", "es", {}), { extraction_status: "PARTIAL" });
+test("FIX 2: SIN crédito previo + '18%' → NO extrae nada, y el porcentaje NO degrada el turno", () => {
+  // ACTUALIZADO bajo V11 (acuerdo 27) — CORRECCIÓN DE REQUISITO. Los asertos
+  // anteriores eran:
+  //     extractScenarioDelta("18%", "es")     → PARTIAL
+  //     extractScenarioDelta("18%", "es", {}) → PARTIAL
+  // Codificaban que un porcentaje sin contexto de crédito degrada el turno
+  // como huérfano relevante. Mismo motivo que el caso de arriba: un
+  // porcentaje no es dinero del usuario, así que no puede "faltar" ni se le
+  // pregunta a qué corresponde. Lo que este test SÍ protege — que sin crédito
+  // previo el "18%" no se invente una TAE — se conserva y se refuerza.
+  for (const prev of [undefined, {}]) {
+    const delta = extractScenarioDelta("18%", "es", prev as never);
+    assert.equal(delta.credito, undefined, "sin crédito previo, un 18% suelto NUNCA fabrica una TAE");
+    assert.deepEqual(delta, { extraction_status: "COMPLETE" }, "y el porcentaje no degrada el turno");
+
+    const huerfanos = detectarNumerosHuerfanos("18%", delta);
+    assert.ok(
+      huerfanos.numerosNoRelevantes.includes(18),
+      "V14: el 18 conserva destino declarado en numerosNoRelevantes",
+    );
+    assert.deepEqual(huerfanos.numerosHuerfanos, [], "nunca como huérfano relevante");
+    assert.equal(
+      notaExtraccionAmbigua(huerfanos, detectarDiscrepanciaGastos(delta), null),
+      null,
+      "y por tanto no se le pregunta al usuario por él",
+    );
+  }
 });
 
 test("FIX 2: variantes cortas con crédito previo (es un 9 / 9 por ciento / 9 percent)", () => {
@@ -231,9 +281,14 @@ test("BUG 3: crédito de carro sin meta → meta derivada (título, monto, plazo
   assert.ok(!s.missing.includes("plazo") || s.credito?.plazo_meses === 36, "el plazo ya lo trae el crédito");
 });
 
-test("BUG 3: sin objeto reconocible en el mensaje → título genérico 'compra financiada'", () => {
+// ACTUALIZADO (follow-up, tono/jerga interna QA testdev10) — "compra
+// financiada" era el título genérico que se filtraba tal cual a la salida
+// del modelo ("Tu meta activa es una compra financiada"). Ya no se inventa
+// un título de relleno: sin objeto reconocible, `titulo` queda SIN VALOR
+// (el monto/plazo siguen ahí; el modelo nombra la meta con su propia voz).
+test("BUG 3: sin objeto reconocible en el mensaje → SIN título de relleno (nunca 'compra financiada')", () => {
   const s = mergeScenario(undefined, extractScenarioDelta("Quiero financiar 30000 a 36 meses."));
-  assert.equal(s.meta?.titulo, "compra financiada");
+  assert.equal(s.meta?.titulo, undefined);
   assert.equal(s.meta?.monto, 30000);
 });
 
@@ -352,6 +407,25 @@ test("esRespuestaRepetida: sin respuesta anterior → false (nada que comparar)"
   assert.equal(esRespuestaRepetida("Cualquier cosa.", undefined), false);
 });
 
+// ── esEstructuraRepetida (MAYOR, tono, QA testdev10) — caso real: la misma
+// construcción de apertura 4 veces con cifras distintas cada vez.
+test("esEstructuraRepetida: misma apertura, cifras distintas → true (esRespuestaRepetida NO lo cazaría)", () => {
+  const anterior = "Reducir a la mitad el ocio liberaría 75 €, dejando una capacidad de 375 €.";
+  const actual = "Reducir a la mitad el transporte liberaría 40 €, dejando una capacidad de 290 €.";
+  assert.equal(esRespuestaRepetida(actual, anterior), false, "texto crudo, con cifras distintas, cae bajo el 90%");
+  assert.equal(esEstructuraRepetida(actual, anterior), true, "misma construcción de apertura, normalizando dígitos");
+});
+
+test("esEstructuraRepetida: aperturas distintas → false", () => {
+  const anterior = "Reducir a la mitad el ocio liberaría 75 €, dejando una capacidad de 375 €.";
+  const actual = "Con tu ritmo actual, la meta se atrasa 3 meses — no es motivo para abandonarla.";
+  assert.equal(esEstructuraRepetida(actual, anterior), false);
+});
+
+test("esEstructuraRepetida: sin respuesta anterior → false", () => {
+  assert.equal(esEstructuraRepetida("Cualquier cosa.", undefined), false);
+});
+
 // ── PIEZA 6 — META ACTIVA ÚNICA CON TRANSICIÓN EXPLÍCITA ─────────────────────
 //
 // Diseño de Luis: la meta activa es UNA. Se cierra al confirmar el plan; se
@@ -458,7 +532,10 @@ test("PIEZA 7: la nota de reconducción aparece al 3.º turno fuera, no antes", 
 
   const nota = notaRetornoMeta({ ...activa, digresiones_seguidas: 3 });
   assert.ok(nota, "al tercero se reconduce");
-  assert.match(nota!, /3 turnos fuera de la meta activa 'Carro'/);
+  // ACTUALIZADO (follow-up, tono/jerga interna QA testdev10) — el aviso ya
+  // no usa la frase "meta activa" (prohibida en la salida, ver
+  // consigliere.ts); el título de la meta va solo, sin la etiqueta.
+  assert.match(nota!, /3 turnos fuera de 'Carro'/);
   assert.match(nota!, /reconduce con naturalidad/);
 });
 
@@ -2583,4 +2660,282 @@ test("documentado (no corregido): 'quiero un carro de 30000 con TAE 9' no extrae
   const delta = extractScenarioDelta("quiero un carro de 30000 con TAE 9");
   assert.equal(delta.credito, undefined, "confirmado: sin plazo en el mensaje, el bloque de crédito no escribe nada");
   assert.equal(delta.meta?.monto, 30000, "confirmado: el 30000 sin reclamar cae en Meta — comportamiento incorrecto, documentado");
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// COMPUERTA G1d — FIDELIDAD DE EXTRACCIÓN (evento de producción, 22 ago).
+// V14 (ley de conservación) verificaba la conservación por PERTENENCIA de
+// valor ("¿existe algún asignado con este número?"), no por MULTISET: una
+// partida capturada podía "cubrir" TODAS las apariciones futuras del mismo
+// importe, incluida una partida DISTINTA sin capturar. 6 de 17 partidas
+// reales (Amazon Prime 5, Claude 20, Google 10, filtro de agua 10, ayuda a
+// la madre 50, ayuda a la suegra 30 — 125 €) se perdieron y el sistema
+// certificó COMPLETE con 2.080 € en vez de PARTIAL con 2.205 €, porque sus
+// importes coincidían por VALOR con otras partidas SÍ capturadas.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// CRITERIO A — fixture PERMANENTE: el mensaje real de las 17 partidas.
+const MENSAJE_17_PARTIDAS_G1D =
+  "gano 2300 y mis gastos son: arriendo 920, comida 130, colegio 350, transporte 160, " +
+  "gasolina 60, cuota del carro 50, seguro 30, gimnasio 80, internet 50, luz 230, " +
+  "amazon prime 5, claude 20, spotify 20, google 10, filtro de agua 10, " +
+  "ayuda a mi madre 50, ayuda a mi suegra 30";
+
+test("G1d Criterio A: las 17 partidas reales — captura las 17 y suma 2.205 €, NUNCA COMPLETE con 2.080 €", () => {
+  const delta = extractScenarioDelta(MENSAJE_17_PARTIDAS_G1D);
+  const suma = delta.gastos_items?.reduce((a, i) => a + i.amount, 0) ?? 0;
+  if (delta.extraction_status === "COMPLETE") {
+    // Si certifica COMPLETE, tiene que ser con las 17 partidas y 2.205 € —
+    // PROHIBIDO COMPLETE con 11 partidas y 2.080 € (el incidente real).
+    assert.equal(delta.gastos_items?.length, 17, `COMPLETE exige las 17 partidas, no ${delta.gastos_items?.length}`);
+    assert.equal(suma, 2205, `COMPLETE exige la suma real (2.205 €), nunca 2.080 €. Suma real: ${suma}`);
+  } else {
+    // Si no captura las 17, DEBE degradar y citar lo que falta — nunca
+    // publicar 2.080 € como si fuera el total real.
+    assert.equal(delta.extraction_status, "PARTIAL", `si no hay 17 partidas, el estado debe ser PARTIAL, no ${delta.extraction_status}`);
+    assert.notEqual(suma, 2080, "PROHIBIDO publicar 2.080 € (la suma incompleta del incidente real) sin degradar");
+  }
+  assert.notEqual(delta.gastos_mensuales, 2080, "PROHIBIDO COMPLETE con 2.080 € bajo ninguna circunstancia");
+});
+
+// CRITERIO A (regresión directa del incidente) — reproduce el fallo EXACTO:
+// un delta que capturó 11 de 17 partidas (simula lo que hizo el tool_call
+// real en producción) debe degradar a PARTIAL citando las 6 que faltan —
+// nunca certificar COMPLETE con la suma incompleta.
+test("G1d: delta incompleto (11 de 17 partidas, simula el tool_call real) → PARTIAL citando las 6 que faltan, NUNCA COMPLETE", () => {
+  const capturados: Array<[string, number]> = [
+    ["arriendo", 920], ["comida", 130], ["colegio", 350], ["transporte", 160],
+    ["gasolina", 60], ["cuota del carro", 50], ["seguro", 30], ["gimnasio", 80],
+    ["internet", 50], ["luz", 230], ["spotify", 20],
+  ];
+  const gastos_items = capturados.map(([name, amount]) => ({
+    name, amount, category: "desconocido" as const, source: "regex" as const, turn: 0,
+  }));
+  const suma = gastos_items.reduce((a, i) => a + i.amount, 0);
+  assert.equal(suma, 2080, "confirma la reconstrucción: 11 partidas capturadas suman 2.080 € (el incidente real)");
+  const deltaIncompleto = { ingreso_mensual: 2300, gastos_mensuales: suma, gastos_items, gastos_es_detalle: true };
+  const analisis = analizarExtraccion(MENSAJE_17_PARTIDAS_G1D, deltaIncompleto);
+  assert.equal(analisis.extraction_status, "PARTIAL", "11 de 17 partidas NUNCA es COMPLETE");
+  const faltantes = [5, 20, 10, 10, 50, 30];
+  for (const v of faltantes) {
+    assert.ok(analisis.huerfanos.numerosHuerfanos.includes(v), `${v} debe citarse como huérfano (partida perdida)`);
+  }
+  assert.equal(analisis.huerfanos.numerosHuerfanos.length, 6, "las 6 partidas perdidas, ni una más ni una menos");
+});
+
+// CRITERIO B — AUSENCIA DE FALSOS PARTIAL. Los 5 mensajes exigidos + 3
+// inventados: ninguno debe degradar.
+const MENSAJES_SIN_FALSO_PARTIAL_G1D = [
+  "gano 2300, tengo 43 años y 2 hijos, gasto 2200",
+  "quiero una casa de 150000 a 30 años",
+  "gano 2500 y gasto 1800",
+  "mis gastos fueron 1200: internet 300, agua 400, gas 500",
+  "quiero un carro de 30000 a 48 meses con TAE 9",
+  // 3 inventados
+  "trabajo 8 horas al día, gano 2800 y gasto 2100",
+  "mi meta es ahorrar 20000 en 24 meses, gano 3000 y gasto 2200",
+  "gano 4000 y gasto 3200 hace 5 años que vivo así",
+];
+
+for (const msg of MENSAJES_SIN_FALSO_PARTIAL_G1D) {
+  test(`G1d Criterio B (sin falso PARTIAL): "${msg}"`, () => {
+    const delta = extractScenarioDelta(msg);
+    const analisis = analizarExtraccion(msg, delta);
+    assert.equal(
+      analisis.extraction_status,
+      "COMPLETE",
+      `no debe degradar — huérfanos: ${JSON.stringify(analisis.huerfanos.numerosHuerfanos)}`,
+    );
+  });
+}
+
+// V13 explícito — un número YA RECLAMADO por un patrón declarativo (ingreso)
+// no puede ADEMÁS contarse como huérfano sin asignar (si no, el ingreso
+// dispararía PARTIAL en cada mensaje).
+test("G1d respeta V13: el ingreso reclamado no se cuenta dos veces como huérfano", () => {
+  const delta = extractScenarioDelta("gano 2300 y gasto 1800");
+  const analisis = analizarExtraccion("gano 2300 y gasto 1800", delta);
+  assert.equal(analisis.extraction_status, "COMPLETE");
+  assert.equal(analisis.huerfanos.numerosHuerfanos.length, 0);
+});
+
+// Salvaguarda del nuevo clasificador de tasas: no debe absorber un IMPORTE
+// monetario real solo porque una palabra de tasa/interés aparece cerca —
+// solo excluye el número cuando NO hay "%" NI marca de moneda después.
+test("G1d: 'intereses de 500 euros' (importe real, no tasa) sigue contando como candidato financiero", () => {
+  const delta = extractScenarioDelta("gano 2300 y pago intereses de 500 euros al mes");
+  const analisis = analizarExtraccion("gano 2300 y pago intereses de 500 euros al mes", delta);
+  assert.ok(
+    analisis.huerfanos.numerosHuerfanos.includes(500) || delta.gastos_mensuales === 500 || delta.credito?.monto === 500,
+    "500 € de intereses reales no debe desaparecer silenciosamente clasificado como 'tasa sin signo'",
+  );
+});
+
+test("G1d: 'TAE 9%' (con signo) sigue capturándose con normalidad — el clasificador de tasas no interfiere", () => {
+  const delta = extractScenarioDelta("quiero un carro de 30000 a 48 meses con TAE 9%");
+  assert.equal(delta.credito?.tae_pct, 9);
+  assert.equal(delta.extraction_status, "COMPLETE");
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CIERRE G1d — RESERVA DE AG01: la tolerancia ÷12/×12 (año↔mes) sin marca
+// anual explícita era una puerta trasera del multiset. "renta 1000, comida
+// 200, luz 100" con solo 2 de 3 partidas capturadas (agregado=1200, la suma
+// de las 2 capturadas) daba COMPLETE porque 1200/12 = 100 — el AGREGADO
+// "cubría" por aritmética pura la partida perdida (luz, 100), sin relación
+// real entre ambos números. Fix: la tolerancia ÷12/×12 exige que el
+// candidato traiga una marca anual explícita ("al año", "anual"…) en el
+// propio mensaje — sin ella, solo se admite el redondeo ±1.
+// ═══════════════════════════════════════════════════════════════════════════
+
+test("G1d (reserva AG01): 'renta 1000, comida 200, luz 100' con solo 2 de 3 capturadas → PARTIAL citando el 100, NUNCA COMPLETE por ÷12", () => {
+  const mensaje = "renta 1000, comida 200, luz 100";
+  const deltaIncompleto = {
+    gastos_mensuales: 1200, // suma de las 2 partidas SÍ capturadas — el agregado real
+    gastos_items: [
+      { name: "renta", amount: 1000, category: "vital" as const, source: "regex" as const, turn: 0 },
+      { name: "comida", amount: 200, category: "vital" as const, source: "regex" as const, turn: 0 },
+    ],
+  };
+  const analisis = analizarExtraccion(mensaje, deltaIncompleto);
+  assert.equal(analisis.extraction_status, "PARTIAL", "1200/12=100 NO debe cubrir la partida perdida (luz, sin marca anual)");
+  assert.ok(analisis.huerfanos.numerosHuerfanos.includes(100), "el 100 de 'luz' debe citarse como huérfano");
+});
+
+test("G1d (reserva AG01): control — 'renta 1000, comida 200, luz 150' con la misma pérdida (2 de 3) → PARTIAL", () => {
+  const mensaje = "renta 1000, comida 200, luz 150";
+  const deltaIncompleto = {
+    gastos_mensuales: 1200,
+    gastos_items: [
+      { name: "renta", amount: 1000, category: "vital" as const, source: "regex" as const, turn: 0 },
+      { name: "comida", amount: 200, category: "vital" as const, source: "regex" as const, turn: 0 },
+    ],
+  };
+  const analisis = analizarExtraccion(mensaje, deltaIncompleto);
+  assert.equal(analisis.extraction_status, "PARTIAL");
+  assert.ok(analisis.huerfanos.numerosHuerfanos.includes(150));
+});
+
+test("G1d (reserva AG01): 'gano 27600 al año' con delta ingreso_mensual 2300 (extractor que SÍ anualiza) → sigue COMPLETE, sin huérfanos", () => {
+  const mensaje = "gano 27600 al año";
+  const delta = { ingreso_mensual: 2300 };
+  const analisis = analizarExtraccion(mensaje, delta);
+  assert.equal(analisis.extraction_status, "COMPLETE", "la marca 'al año' SÍ autoriza la tolerancia ÷12 (27600/12=2300)");
+  assert.equal(analisis.huerfanos.numerosHuerfanos.length, 0);
+});
+
+test("G1d (reserva AG01): el mismo importe SIN 'al año' no goza de la tolerancia ÷12/×12", () => {
+  const mensaje = "gano 27600 este mes";
+  const delta = { ingreso_mensual: 2300 };
+  const analisis = analizarExtraccion(mensaje, delta);
+  assert.equal(analisis.extraction_status, "PARTIAL", "sin marca anual, 27600 no puede cubrirse con un ingreso_mensual de 2300");
+  assert.ok(analisis.huerfanos.numerosHuerfanos.includes(27600));
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// COMPUERTA G1d — FÓRMULA CANÓNICA + clasificación semántica (calibración en
+// frío contra 16 mensajes reales del dogfooding).
+//
+// V14 mide CONSERVACIÓN (¿el número dejó rastro?); G1d mide FIDELIDAD (¿la
+// cifra publicada refleja todo el dinero, y el estado declarado era honesto?).
+// Un huérfano relevante ES un destino declarado — degradante, pero destino.
+// El delito nunca fue tener un huérfano: fue tenerlo y declarar COMPLETE.
+// ═══════════════════════════════════════════════════════════════════════════
+
+test("G1d canónico: 11 de 17 capturadas + PARTIAL + preguntar por las 6 → PASA la compuerta", () => {
+  const capturados: Array<[string, number]> = [
+    ["arriendo", 920], ["comida", 130], ["colegio", 350], ["transporte", 160],
+    ["gasolina", 60], ["cuota del carro", 50], ["seguro", 30], ["gimnasio", 80],
+    ["internet", 50], ["luz", 230], ["spotify", 20],
+  ];
+  const gastos_items = capturados.map(([name, amount]) => ({
+    name, amount, category: "desconocido" as const, source: "regex" as const, turn: 0,
+  }));
+  const delta = { ingreso_mensual: 2300, gastos_mensuales: 2080, gastos_items, gastos_es_detalle: true };
+  const analisis = analizarExtraccion(MENSAJE_17_PARTIDAS_G1D, delta);
+  assert.equal(analisis.extraction_status, "PARTIAL", "degrada honestamente");
+  const fid = medirFidelidadExtraccion(MENSAJE_17_PARTIDAS_G1D, delta, analisis.extraction_status);
+  assert.deepEqual(fid.huerfanosRelevantes, [5, 20, 10, 10, 50, 30], "declara las 6 perdidas");
+  assert.deepEqual(fid.importesSinDestino, [], "un huérfano declarado SÍ es destino");
+  assert.equal(fid.violaG1d, false, "el comportamiento honesto NO puede marcarse como violación");
+});
+
+test("G1d canónico: los MISMOS huérfanos declarando COMPLETE → VIOLA (el delito del 22 de agosto)", () => {
+  const capturados: Array<[string, number]> = [
+    ["arriendo", 920], ["comida", 130], ["colegio", 350], ["transporte", 160],
+    ["gasolina", 60], ["cuota del carro", 50], ["seguro", 30], ["gimnasio", 80],
+    ["internet", 50], ["luz", 230], ["spotify", 20],
+  ];
+  const gastos_items = capturados.map(([name, amount]) => ({
+    name, amount, category: "desconocido" as const, source: "regex" as const, turn: 0,
+  }));
+  const delta = { ingreso_mensual: 2300, gastos_mensuales: 2080, gastos_items, gastos_es_detalle: true };
+  const fid = medirFidelidadExtraccion(MENSAJE_17_PARTIDAS_G1D, delta, "COMPLETE");
+  assert.equal(fid.violaG1d, true);
+  assert.equal(fid.motivo, "huerfano_con_complete");
+});
+
+// ── FIX 3 — respuesta corta anclada al contexto (patrón dominante del ruido) ──
+const RESPUESTAS_CORTAS_G1D: Array<[string, Partial<ScenarioState>]> = [
+  ["150000 a 30 anos", { missing: ["meta_monto", "plazo"] }],
+  ["30000 en 48 meses", { missing: ["monto", "plazo"] }],
+  ["2300 euros", { missing: ["ingreso"] }],
+  ["10000 euros en 48 cuotas con una tasa TAEG de 9%", { missing: ["monto", "plazo", "tae"] }],
+];
+
+for (const [msg, prev] of RESPUESTAS_CORTAS_G1D) {
+  test(`G1d FIX 3: respuesta corta a una pregunta pendiente NO es huérfana: "${msg}"`, () => {
+    const delta = extractScenarioDelta(msg, "es", prev as ScenarioState);
+    const analisis = analizarExtraccion(msg, delta, prev);
+    assert.deepEqual(analisis.huerfanos.numerosHuerfanos, [], "la respuesta a la pregunta no es dinero perdido");
+    assert.equal(analisis.extraction_status, "COMPLETE");
+  });
+}
+
+test("G1d FIX 3: SIN pregunta pendiente, la misma cifra pelada SÍ cuenta como huérfana", () => {
+  const analisis = analizarExtraccion("2300 euros", {}, { missing: [] });
+  assert.ok(analisis.huerfanos.numerosHuerfanos.includes(2300));
+});
+
+test("G1d FIX 3: un mensaje largo y narrativo NUNCA es 'respuesta corta' aunque haya pregunta pendiente", () => {
+  const msg = "sabes, ese tema me frustra porque tengo 43 anos dos hijos y aun no les doy algo seguro. siento que pierdo el tiempo";
+  const analisis = analizarExtraccion(msg, extractScenarioDelta(msg), { missing: ["ingreso"] });
+  assert.equal(analisis.extraction_status, "COMPLETE");
+});
+
+// ── FIX 4 — porcentajes, conteos y unidades ──────────────────────────────────
+const NO_MONETARIOS_G1D = [
+  "para TDC un 18%",
+  "10% de mi salario",
+  "En la lista solo estas contenplando 14 gastos y en total son 17",
+  "somos 5 en casa",
+  "la casa tiene 3 hab y 90 m2",
+  "vivo aqui desde 2019",
+];
+
+for (const msg of NO_MONETARIOS_G1D) {
+  test(`G1d FIX 4: sin importes monetarios reales → sin huérfanos: "${msg}"`, () => {
+    const analisis = analizarExtraccion(msg, extractScenarioDelta(msg));
+    assert.deepEqual(analisis.huerfanos.numerosHuerfanos, [], "ni porcentajes, ni conteos, ni unidades, ni años");
+  });
+}
+
+test("G1d FIX 4 (no sobredisparar): una cifra con marca de moneda SIEMPRE es importe", () => {
+  // "100 euros" lleva moneda pegada: aunque 'euros' fuera seguido de cualquier
+  // otra cosa, la marca de moneda manda sobre toda exclusión de FIX 4.
+  const analisis = analizarExtraccion("me sobran 100 euros", {});
+  assert.ok(analisis.huerfanos.numerosHuerfanos.includes(100));
+});
+
+test("G1d FIX 4 (no sobredisparar): 'gano entre 2000 y 2500' conserva AMBOS extremos como huérfanos", () => {
+  const msg = "gano entre 2000 y 2500";
+  const analisis = analizarExtraccion(msg, extractScenarioDelta(msg));
+  assert.deepEqual(analisis.huerfanos.numerosHuerfanos.sort((a, b) => a - b), [2000, 2500]);
+});
+
+test("G1d FIX 4 (no sobredisparar): 'mis gastos son 2200' sigue siendo un importe vigilado", () => {
+  // La cópula "son" NO puede silenciar un importe: es la forma más común de
+  // declararlo, y silenciarla dejaría a G1d ciego ante su pérdida.
+  const analisis = analizarExtraccion("mis gastos son 2200", {});
+  assert.ok(analisis.huerfanos.numerosHuerfanos.includes(2200));
 });

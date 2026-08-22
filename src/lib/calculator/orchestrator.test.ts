@@ -5,7 +5,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { buildVerifiedContext, buildScenarioContext } from "./orchestrator";
-import { mergeScenario, extractScenarioDelta } from "./scenario";
+import { mergeScenario, extractScenarioDelta, type ScenarioState } from "./scenario";
 import { toolArgsToScenarioDelta } from "./tools";
 import { validateGrounding } from "../guardrail/validate";
 
@@ -351,3 +351,85 @@ test("FIX 2: crédito con monto Y plazo → cuota SÍ se calcula (sin regresión
   const { conceptos } = buildScenarioContext(s, "");
   assert.ok(conceptos.cuota > 0, `con ambos insumos, la cuota SÍ debe calcularse: ${JSON.stringify(conceptos)}`);
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// BLOQUEANTE G1b (follow-up, QA testdev10) — SNAPSHOT ÚNICO POR TURNO.
+// "Reducir a la mitad el ocio liberaría 75 €, dejando una capacidad de 375 €"
+// combinó el sobrante VIEJO (300 €, de gastos 2200) con la mitad del ocio
+// NUEVO (75 €, de gastos 2250) — una cifra que no corresponde a NINGÚN
+// snapshot real. `buildScenarioContext` ya es puro (una sola `scenario` de
+// entrada); estos tests fijan esa pureza como invariante estructural y
+// reproducen la secuencia real para confirmar que, DENTRO DE CADA LLAMADA,
+// nunca aparece una `nueva_capacidad`/`sobrante_mensual` mezclando estados.
+// El otro extremo del fix (que `route.ts` no deje sobrevivir el borrador de
+// LLAMADA 1, generado sobre el snapshot pre-merge, en el historial de
+// LLAMADA 2) se fija con un test ESTÁTICO en route.static.test.ts — route.ts
+// no se puede ejecutar aquí (depende del runtime de Next.js).
+// ═══════════════════════════════════════════════════════════════════════════
+
+test("estructural: nueva_capacidad, cuando aparece, SIEMPRE es sobrante + recorte DE LA MISMA llamada (snapshot único)", () => {
+  const s = mergeScenario(
+    {},
+    extractScenarioDelta("gano 2500 y mis gastos son 2200: arriendo 900, comida 500, luz 400, internet 300, ocio 100"),
+  );
+  const { conceptos } = buildScenarioContext(s, "");
+  if ("nueva_capacidad" in conceptos) {
+    assert.equal(
+      conceptos.nueva_capacidad,
+      round2(conceptos.sobrante + conceptos.recorte),
+      "nueva_capacidad debe derivar EXACTAMENTE de sobrante+recorte de esta misma llamada, nunca de otra",
+    );
+  }
+});
+
+test("G1b: secuencia real (T1 establece, T2 corrige ocio → conflicto, T3 pregunta durante el conflicto) — ninguna llamada mezcla estados", () => {
+  // T1 — establece ingreso/gastos/ocio=100.
+  let s = mergeScenario({}, extractScenarioDelta(
+    "gano 2500 y mis gastos son 2200: arriendo 900, comida 500, luz 400, internet 300, ocio 100",
+  ));
+  const v1 = buildScenarioContext(s, "");
+  assert.equal(v1.conceptos.nueva_capacidad, 350, "T1: sobrante 300 + recorte 50 (ocio 100/2), estado consistente");
+  assert.equal(s.gastos_conflict, undefined);
+
+  // T2 — corrige el ocio a 150: el agregado (2200) y el detalle (2250) ya no
+  // cuadran → conflicto. `verified` (post-merge, EL snapshot que persiste
+  // esta llamada) debe OMITIR sobrante/capacidad/recorte — V4.
+  const seedT2 = { ...s };
+  s = mergeScenario(s, extractScenarioDelta("el ocio en realidad es 150", "es", s));
+  assert.ok(s.gastos_conflict, "T2 crea el conflicto (2200 vs 2250)");
+  const v2 = buildScenarioContext(s, "");
+  assert.ok(!("nueva_capacidad" in v2.conceptos), "T2 post-merge: nueva_capacidad OMITIDA mientras hay conflicto");
+  assert.ok(!("sobrante" in v2.conceptos), "T2 post-merge: sobrante OMITIDO mientras hay conflicto");
+  // El snapshot PRE-merge de T2 (equivalente a `seed` en route.ts) es una
+  // fotografía DISTINTA y válida en sí misma — el bug no es que exista,
+  // es que su prosa sobreviva a LLAMADA 2 (fix en route.ts). Aquí solo se
+  // confirma que, tomada sola, sigue siendo autoconsistente (ocio 100, no
+  // 150 — nunca una mezcla).
+  const vSeedT2 = buildScenarioContext(seedT2 as ScenarioState, "el ocio en realidad es 150");
+  if ("nueva_capacidad" in vSeedT2.conceptos) {
+    assert.equal(vSeedT2.conceptos.recorte, 50, "el snapshot pre-merge de T2 solo conoce el ocio VIEJO (100/2=50), nunca el 150 de este turno");
+  }
+
+  // T3 — pregunta durante el conflicto: ambas llamadas (pre-merge y
+  // post-merge son el MISMO snapshot ya, porque T3 no trae delta nuevo)
+  // deben seguir omitiendo la capacidad.
+  const seedT3 = { ...s };
+  s = mergeScenario(s, extractScenarioDelta("si reduzco el ocio a la mitad, ¿cuánto me quedaría?", "es", s));
+  const v3seed = buildScenarioContext(seedT3 as ScenarioState, "si reduzco el ocio a la mitad, ¿cuánto me quedaría?");
+  const v3 = buildScenarioContext(s, "si reduzco el ocio a la mitad, ¿cuánto me quedaría?");
+  assert.ok(!("nueva_capacidad" in v3seed.conceptos), "T3 pre-merge: sigue en conflicto, sin capacidad");
+  assert.ok(!("nueva_capacidad" in v3.conceptos), "T3 post-merge: sigue en conflicto, sin capacidad");
+
+  // T4 — resuelve el conflicto: ahora SÍ debe aparecer, y con las cifras
+  // FRESCAS (sobrante 250, recorte 75 — ocio 150/2), nunca 300/50.
+  s = mergeScenario(s, extractScenarioDelta("usa 2250", "es", s));
+  assert.equal(s.gastos_conflict, undefined, "T4 resuelve");
+  const v4 = buildScenarioContext(s, "");
+  assert.equal(v4.conceptos.sobrante, 250);
+  assert.equal(v4.conceptos.recorte, 75);
+  assert.equal(v4.conceptos.nueva_capacidad, 325, "325 = 250 + 75 — nunca 375 (300 viejo + 75 nuevo)");
+});
+
+function round2(n: number): number {
+  return Math.round((n + Number.EPSILON) * 100) / 100;
+}
