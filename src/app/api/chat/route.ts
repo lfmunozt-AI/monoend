@@ -21,6 +21,7 @@ import {
   contarRepeticionesMensajeUsuario,
   actualizarDigresiones,
   notaRetornoMeta,
+  esEstructuraRepetida,
   notaSinCifrasDePlan,
   detectarNumerosHuerfanos,
   detectarDiscrepanciaGastos,
@@ -521,9 +522,22 @@ export async function POST(request: Request) {
   // ser una cifra derivada verificada — es el eco de lo que el usuario
   // escribió, no una cifra inventada. `discrepancia.suma` se añade aparte
   // porque es COMPUTADA (no un token literal del mensaje).
+  // MAYOR (tono, QA testdev10) — mientras `gastos_conflict`/`gastos_assumed`
+  // sigue abierto en turnos POSTERIORES al que lo creó, `discrepancia.suma`
+  // ya no existe (es una señal del delta de ESTE turno, no del conflicto
+  // persistido) — así que agregado/detalle/valor_adoptado NUNCA quedaban
+  // autorizados para el guardarraíl. El modelo redacta su propia pregunta de
+  // aclaración citando esos dos valores (`notaConflictoGastos` se los da), y
+  // el grounding, al no reconocerlos, ELIMINABA LA FRASE ENTERA que los
+  // citaba — dejando publicada solo la pregunta desnuda, sin el contexto que
+  // la motiva ("¿Cuál es el valor correcto?", 26 caracteres, 4 mutaciones).
+  // Se autorizan aquí, igual que `discrepancia.suma` ya autorizaba el caso
+  // del primer turno.
   const valoresExtra = [
     ...numerosCandidatos(cleanMessage),
     ...(discrepancia.suma !== undefined ? [discrepancia.suma] : []),
+    ...(scenario.gastos_conflict ? [scenario.gastos_conflict.agregado, scenario.gastos_conflict.detalle] : []),
+    ...(scenario.gastos_assumed ? [scenario.gastos_assumed.valor] : []),
   ]
   const verified = buildScenarioContext(scenario, cleanMessage, { valoresExtra })
 
@@ -574,9 +588,23 @@ export async function POST(request: Request) {
     // llamada (aún no se ha generado nada con el delta de este turno).
     const systemPrompt2 = [basePrompt, notaDatosCalculadosPostMerge, notaDigresion, notaSinCifras, notaAmbigua, notaEco, notaDesglose, notaDetalleSinConfirmarVal, notaConflicto, notaRepeticionMensaje, notaTonoEmocional, idiomaObligatorio]
       .filter(Boolean).join('\n\n')
+    // BLOQUEANTE G1b (QA testdev10) — SNAPSHOT ÚNICO POR TURNO. `call1.content`
+    // se generó bajo `systemPrompt1`, cuyas derivadas (`notaDatosCalculados`)
+    // vienen de `seed` — el estado ANTES de fusionar el delta de este turno.
+    // Si se deja tal cual en el historial, LLAMADA 2 puede "recordar" una
+    // derivada calculada sobre el estado VIEJO (p. ej. un sobrante) y
+    // combinarla con una cifra fresca de `notaDatosCalculadosPostMerge` (p.
+    // ej. un gasto recién corregido) — exactamente el incidente real:
+    // "capacidad de 375 €" = sobrante viejo (300 €, gastos 2200) + mitad de
+    // un ocio nuevo (75 €, de gastos 2250), una cifra que no corresponde a
+    // NINGÚN snapshot real. Se vacía: LLAMADA 2 razona solo con el snapshot
+    // fresco (`verified`, calculado ÍNTEGRAMENTE de `scenario` post-merge) y
+    // el historial real de turnos anteriores — nunca con su propio borrador
+    // pre-merge de este turno. El tool_call en sí (los datos extraídos) SÍ
+    // viaja igual — es lo único de LLAMADA 1 que es autoridad, no prosa.
     const messages2 = [
       ...allMessages,
-      { role: 'assistant' as const, content: call1.content, toolCalls: [toolCall] },
+      { role: 'assistant' as const, content: '', toolCalls: [toolCall] },
       { role: 'tool' as const, toolCallId: toolCall.id, content: toolResult },
     ]
     const call2 = await callLLMWithTools(
@@ -625,12 +653,26 @@ export async function POST(request: Request) {
   // calcada ("¿quieres que te proyecte el plan?" una y otra vez). Si el texto
   // generado es ≥90% idéntico al último mensaje del asistente en esta MISMA
   // conversación, se regenera UNA sola vez con instrucción explícita de avanzar.
+  //
+  // MAYOR (tono, QA testdev10) — `esRespuestaRepetida` compara TEXTO CRUDO
+  // (umbral 90%): no detecta la muletilla estructural real ("Reducir a la
+  // mitad el X liberaría Y €, dejando una capacidad de Z €", 4 veces con
+  // cifras distintas) porque las cifras cambiadas bajan la similitud
+  // literal por debajo del umbral. `esEstructuraRepetida` normaliza los
+  // dígitos y compara solo la APERTURA — misma respuesta a la MISMA causa,
+  // sin exigir que el texto entero coincida.
   const lastAssistantMessage = [...contextMessages].reverse().find((m) => m.role === 'assistant')?.content
-  if (esRespuestaRepetida(llmResult.content, lastAssistantMessage)) {
-    console.warn('[chat] repetition_detected', JSON.stringify({ user_id: user.id, conversation_id: convId, carril }))
-    const instruccionAvance =
-      'Tu respuesta iba a repetir casi literalmente la anterior de esta conversación. ' +
-      'PROHIBIDO reformular el mismo diagnóstico o repetir la misma pregunta: avanza al siguiente paso concreto.'
+  const repiteTexto = esRespuestaRepetida(llmResult.content, lastAssistantMessage)
+  const repiteEstructura = !repiteTexto && esEstructuraRepetida(llmResult.content, lastAssistantMessage)
+  if (repiteTexto || repiteEstructura) {
+    console.warn('[chat] repetition_detected', JSON.stringify({
+      user_id: user.id, conversation_id: convId, carril, tipo: repiteTexto ? 'texto' : 'estructura',
+    }))
+    const instruccionAvance = repiteTexto
+      ? 'Tu respuesta iba a repetir casi literalmente la anterior de esta conversación. ' +
+        'PROHIBIDO reformular el mismo diagnóstico o repetir la misma pregunta: avanza al siguiente paso concreto.'
+      : 'Tu respuesta abre con la MISMA construcción que tu mensaje anterior en esta conversación, aunque las cifras cambien. ' +
+        'PROHIBIDO repetir esa estructura de apertura: dilo de una forma distinta.'
     const retry = await callLLMWithTools(
       respondingMessages,
       `${respondingSystemPrompt}\n\n${instruccionAvance}`,

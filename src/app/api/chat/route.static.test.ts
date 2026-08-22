@@ -84,3 +84,37 @@ test("MAYOR 7: se detecta la repetición del MENSAJE del usuario, no solo de la 
   assert.match(src, /contarRepeticionesMensajeUsuario\(/);
   assert.match(src, /notaRepeticionMensaje/);
 });
+
+// ── QA testdev10 — verificación ESTÁTICA de los fixes de esta tanda ─────────
+
+test("BLOQUEANTE G1b: el borrador de LLAMADA 1 (snapshot pre-merge) NUNCA sobrevive al historial de LLAMADA 2", () => {
+  const src = leerRoute();
+  // `messages2` debe llevar el toolCall con content vacío, no `call1.content`
+  // — si `call1.content` reaparece aquí, el modelo puede volver a mezclar una
+  // derivada calculada sobre `seed` (pre-merge) con una fresca de este mismo
+  // turno (el incidente real: "capacidad de 375€" = sobrante viejo + ocio
+  // nuevo). Ver `orchestrator.test.ts` para la mitad del fix que SÍ se puede
+  // probar sin el runtime de Next.js (pureza de snapshot único).
+  assert.match(src, /\{\s*role:\s*'assistant'\s*as\s*const,\s*content:\s*'',\s*toolCalls:\s*\[toolCall\]\s*\}/);
+  assert.ok(
+    !/content:\s*call1\.content,\s*toolCalls/.test(src),
+    "call1.content no debe viajar como texto del asistente hacia LLAMADA 2",
+  );
+});
+
+test("MAYOR (tono): un conflicto de gastos ya abierto autoriza agregado/detalle/valor_adoptado para el guardarraíl", () => {
+  const src = leerRoute();
+  // Antes, solo `discrepancia.suma` (señal del turno que CREA el conflicto)
+  // quedaba autorizada — en los turnos POSTERIORES, mientras el conflicto
+  // sigue abierto, ni agregado ni detalle lo estaban, y el grounding
+  // eliminaba la frase que los citaba: quedaba publicada solo la pregunta
+  // desnuda, sin el contexto que la motiva.
+  assert.match(src, /scenario\.gastos_conflict\.agregado,\s*scenario\.gastos_conflict\.detalle/);
+  assert.match(src, /scenario\.gastos_assumed\.valor/);
+});
+
+test("MAYOR (tono): la anti-repetición también detecta estructura repetida, no solo texto idéntico", () => {
+  const src = leerRoute();
+  assert.match(src, /esEstructuraRepetida\(/);
+  assert.match(src, /repiteEstructura/);
+});

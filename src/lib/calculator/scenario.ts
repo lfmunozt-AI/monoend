@@ -182,6 +182,43 @@ export function esRespuestaRepetida(actual: string, anterior: string | undefined
 }
 
 /**
+ * MAYOR (tono, QA testdev10) — ¿la respuesta ACTUAL abre con la MISMA
+ * CONSTRUCCIÓN que la anterior del asistente, aunque las cifras cambien?
+ * Caso real: "Reducir a la mitad el ocio liberaría 75 €, dejando una
+ * capacidad de 375 €" se repitió 4 veces con cifras distintas cada vez —
+ * `esRespuestaRepetida` (similitud de TEXTO CRUDO, umbral 90%) nunca dispara
+ * porque los números cambian y bajan la similitud literal, pero el
+ * ESQUELETO de la frase es idéntico.
+ *
+ * Comparación POR PALABRA, no por carácter: un ítem con nombre más largo o
+ * más corto ("ocio" vs "transporte") desplaza el resto de la frase y hunde
+ * la similitud de Levenshtein sobre una ventana de caracteres, aunque la
+ * construcción sea idéntica palabra a palabra. Se normalizan los dígitos a
+ * un placeholder y se compara, POSICIÓN A POSICIÓN, solo las primeras
+ * `palabrasApertura` palabras — el resto de la respuesta puede, y debe,
+ * variar libremente; esto solo detecta la muletilla de arranque.
+ */
+export function esEstructuraRepetida(
+  actual: string,
+  anterior: string | undefined,
+  umbral = 0.7,
+  palabrasApertura = 8,
+): boolean {
+  if (!anterior) return false;
+  const palabras = (t: string) =>
+    t.trim().toLowerCase().replace(/[\d.,]+/g, "#").split(/\s+/).filter(Boolean).slice(0, palabrasApertura);
+  const p1 = palabras(actual);
+  const p2 = palabras(anterior);
+  const n = Math.min(p1.length, p2.length);
+  if (n < 3) return false;
+  let coincidencias = 0;
+  for (let i = 0; i < n; i++) {
+    if (p1[i] === p2[i]) coincidencias++;
+  }
+  return coincidencias / n >= umbral;
+}
+
+/**
  * MAYOR 7 (QA testdev8) — cuenta cuántos mensajes ANTERIORES del USUARIO en
  * esta conversación son casi idénticos (≥90%) al mensaje actual. Más fiable
  * que comparar la respuesta del asistente: "¿cuánto me queda al mes?" ×3
@@ -2651,7 +2688,14 @@ export function mergeScenario(
   // pierde contexto y repite preguntas.
   if (base.credito && base.credito.monto !== undefined && base.credito.monto > 0 && (base.meta === undefined || base.meta_derivada)) {
     base.meta = {
-      titulo: base.credito.objeto ? capitalize(base.credito.objeto) : "compra financiada",
+      // MAYOR (tono, QA testdev10) — sin objeto reconocido ("carro"/"casa"),
+      // `titulo` queda SIN VALOR en vez de "compra financiada": esa etiqueta
+      // era la única forma que el modelo tenía de nombrar la meta en
+      // `summarizeScenario`, y la citaba literal ("Tu meta activa es una
+      // compra financiada") — jerga interna publicada tal cual. Sin título,
+      // el modelo se apoya en el monto/plazo y en su propia voz natural
+      // ("lo que quieres comprar"), nunca en una etiqueta de sistema.
+      ...(base.credito.objeto ? { titulo: capitalize(base.credito.objeto) } : {}),
       monto: base.credito.monto,
       plazo_meses: base.credito.plazo_meses,
     };
@@ -2847,9 +2891,13 @@ export function notaRetornoMeta(
   if (!s || !tieneMetaActiva(s)) return null;
   const n = s.digresiones_seguidas ?? 0;
   if (n < umbral) return null;
-  const titulo = s.meta?.titulo ?? "la meta activa";
+  // MAYOR (tono, QA testdev10) — "la meta activa" es jerga interna
+  // PROHIBIDA en la salida; "tu meta" es el mismo aviso sin la etiqueta de
+  // sistema, para que el modelo no tenga ningún motivo para copiarla tal
+  // cual si no hay un título real que nombrar.
+  const titulo = s.meta?.titulo ?? "tu meta";
   return (
-    `El usuario lleva ${n} turnos fuera de la meta activa '${titulo}'. ` +
+    `El usuario lleva ${n} turnos fuera de '${titulo}'. ` +
     "Responde su pregunta y reconduce con naturalidad hacia el plan pendiente."
   );
 }
@@ -3076,7 +3124,12 @@ export function summarizeScenario(s: Partial<ScenarioState> | undefined): string
     if (partes.length) {
       // PIEZA 6 — la meta activa es UNA y el modelo tiene que saber si sigue
       // abierta: mientras lo esté, no se abre otra.
-      l.push(`meta ${s.meta_cerrada ? "CERRADA" : "activa"} (única): ${partes.join(", ")}`);
+      // MAYOR (tono, QA testdev10) — "meta activa" es jerga interna
+      // PROHIBIDA en la salida; esta línea es SOLO para que el modelo
+      // entienda su propio estado, pero se ha visto copiada literal en
+      // respuestas reales ("Tu meta activa es..."). Se evita la frase exacta
+      // aquí también, no solo en la instrucción del prompt.
+      l.push(`meta (estado: ${s.meta_cerrada ? "cerrada" : "en curso"}, única): ${partes.join(", ")}`);
     }
   }
   if (s.goals_cerradas && s.goals_cerradas.length > 0) {
